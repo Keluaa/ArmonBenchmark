@@ -1,0 +1,22 @@
+name=lagrangian_threads
+device=CPU
+backends=kokkos
+node=a100-bxi
+threads=1,8,16,32,64
+block_sizes=256
+ieee_bits=32,64
+cells=1000,64e3,64e6
+tests=Sod,Bizarrium
+armon=--write-output 0 --verbose 2 --euler 0
+max_time=2400
+-
+device=CUDA
+backends=kokkos
+node=a100-bxi
+threads=1,8,16,32,64
+block_sizes=256
+ieee_bits=32,64
+cells=1000,64e3,64e6
+tests=Sod,Bizarrium
+armon=--write-output 0 --verbose 2 --euler 1
+max_time=2400
