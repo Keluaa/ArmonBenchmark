@@ -44,11 +44,10 @@ armon_base_options = [
 ]
 min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
 
-# TODO
 julia_script_path = "./julia/run_julia.jl"
 julia_tmp_script_output_file = "./tmp_script_output.txt"
-cpp_exe_path = ""
-cpp_make_dir = ""
+cpp_exe_path = "./cpp/armon.exe"
+cpp_make_dir = "./cpp/"
 cpp_make_target = "armon.exe"
 kokkos_make_dir = "./kokkos/"
 
@@ -287,6 +286,8 @@ function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Bool, compiler
     end
 
     run(`cd $(cpp_make_dir) && make --quiet -j4 clean && make $(make_options) $(cpp_make_target)`)
+
+    return cpp_exe_path
 end
 
 
