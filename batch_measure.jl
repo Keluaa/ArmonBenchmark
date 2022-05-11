@@ -1,4 +1,6 @@
 
+using Printf
+
 @enum Device CPU CUDA ROCM
 @enum Backend CPP Kokkos Julia
 @enum Compiler GCC Clang ICC
@@ -34,7 +36,7 @@ mutable struct MeasureParams
 end
 
 
-inti_cmd(options, measure_index, inti_index) = `ccc_mprun $(options) julia $(PROGRAM_FILE) $(measure_index) $(inti_index)`
+inti_cmd(options, measure_index, inti_index) = `ccc_mprun $(options) julia $(PROGRAM_FILE) $(ARGS[1]) $(measure_index) $(inti_index)`
 gnuplot_cmd(plot_file) = `gnuplot $(plot_file)`
 
 julia_options = ["-O3", "--check-bounds=no"]
@@ -78,8 +80,8 @@ function parse_measure_params(file_line_parser)
     backends = [Julia]
     threads = [4]
     block_sizes = [256]
-    ieee_bits = 64
-    use_simd = true
+    ieee_bits = [64]
+    use_simd = [true]
     compilers = [GCC]
     cells_list = [12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6]
     tests_list = ["Sod"]
@@ -139,13 +141,13 @@ function parse_measure_params(file_line_parser)
                 end
             end            
         elseif option == "threads"
-            threads = parse(Int, split(value, ','))
+            threads = parse.(Int, split(value, ','))
         elseif option == "block_sizes"
-            block_sizes = parse(Int, split(value, ','))
+            block_sizes = parse.(Int, split(value, ','))
         elseif option == "ieee_bits"
-            ieee_bits = parse(Int, split(value, ','))
+            ieee_bits = parse.(Int, split(value, ','))
         elseif option == "use_simd"
-            use_simd = parse(Int, split(value, ','))
+            use_simd = parse.(Int, split(value, ','))
         elseif option == "compilers"
             compilers = []
             for compiler in split(value, ',')
@@ -161,7 +163,7 @@ function parse_measure_params(file_line_parser)
                 end
             end
         elseif option == "cells"
-            cells_list = parse(Float64, split(value, ','))
+            cells_list = parse.(Float64, split(value, ','))
         elseif option == "tests"
             tests_list = split(value, ',')
         elseif option == "armon"
@@ -212,13 +214,9 @@ end
 function parse_measure_script_file(file::IOStream)
     measures::Vector{MeasureParams} = []
     file_line_parser = enumerate(eachline(file))
-    while true
-        ok, measure = parse_measure_params(file_line_parser)
-        if ok
-            push!(measures, measure)
-        else
-            break
-        end
+    while !eof(file)
+        measure = parse_measure_params(file_line_parser)
+        push!(measures, measure)
     end
     return measures
 end
@@ -245,9 +243,26 @@ function parse_arguments()
 end
 
 
+function run_cmd_print_on_error(cmd::Cmd)
+    # Run a command without printing its output to stdout
+    # However if there is an error we print the command's output
+    # A temporary file is used to achieve that
+    mktemp() do _, file
+        try 
+            run(pipeline(cmd, stdout=file#= , stderr=file =#))
+        catch
+            flush(file)
+            seekstart(file)
+            println("ERROR:\n", read(file, String))
+            rethrow()
+        end
+    end
+end
+
+
 function build_inti_combinaisons(measure::MeasureParams, inti_index::Int)
     options = [measure.processes, measure.distributions]
-    return Iterators.rest(Iterators.product(options...), inti_index)
+    return Iterators.drop(Iterators.product(options...), inti_index)
 end
 
 
@@ -264,7 +279,7 @@ function build_backend_combinaisons(measure::MeasureParams)
 end
 
 
-function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Bool, compiler::Int)
+function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler)
     make_options = [
         "--quiet",  # Don't print unuseful info
         "-j4",      # Use 4 threads to compile more files at the same time
@@ -286,14 +301,14 @@ function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Bool, compiler
         error("Wrong compiler")
     end
 
-    run(Cmd(`make --quiet -j4 clean`, dir=cpp_make_dir))
-    run(Cmd(`make $(make_options) $(cpp_make_target)`, dir=cpp_make_dir))
+    run_cmd_print_on_error(Cmd(`make --quiet -j4 clean`, dir=cpp_make_dir))
+    run_cmd_print_on_error(Cmd(`make $(make_options) $(cpp_make_target)`, dir=cpp_make_dir))
 
     return cpp_exe_path
 end
 
 
-function recompile_kokkos(device::Int, block_size::Int, ieee_bits::Int, use_simd::Bool, compiler::Int)
+function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler)
     error("TODO : block_size, compiler")
     # TODO : block_size
     # TODO : compiler
@@ -321,13 +336,13 @@ function recompile_kokkos(device::Int, block_size::Int, ieee_bits::Int, use_simd
         error("Wrong device")
     end
 
-    run(Cmd(`make $(make_options) $(make_target)`, dir=kokkos_make_dir))
+    run_cmd_print_on_error(Cmd(`make $(make_options) $(make_target)`, dir=kokkos_make_dir))
 
     return make_run_target
 end
 
 
-function maybe_recompile(device::Int, threads::Int, block_size::Int, ieee_bits::Int, use_simd::Bool, compiler::Int, backend::Int, prev_params)
+function maybe_recompile(device::Device, threads::Int, block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler, backend::Backend, prev_params)
     # If 'prev_params' is empty, we are at the first iteration and we force a recompilation, to make sure that the version of the program is correct
     if length(prev_params) > 0
         # Check if the parameters changed enough so that a recompilation is needed
@@ -355,7 +370,7 @@ function maybe_recompile(device::Int, threads::Int, block_size::Int, ieee_bits::
 end
 
 
-function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_simd::Bool, ieee_bits::Int, base_file_name::String, legend_base::String)
+function run_julia(measure::MeasureParams, threads::Int, block_size::Int, ieee_bits::Int, use_simd::Int, base_file_name::String, legend_base::String)
     armon_options = []
 
     if measure.device == CUDA
@@ -405,18 +420,14 @@ end
 
 function get_kokkos_run_cmd(exe_path, threads, armon_options)
     # For Kokkos, the exe_path is not a path but a make target that compiles (if needed) the exe then runs it with the arguments given.
-    cmd = Cmd(`make $(exe_path) args=\"--kokkos-threads=$(threads) $(armon_options)\"`, dir=kokkos_make_dir)
+    args = "--kokkos-threads=$(threads) $(join(string.(armon_options), ' '))"
+    cmd = Cmd(`make $(exe_path) args=\"$(args)\"`, dir=kokkos_make_dir)
     return cmd
 end
 
 
 function run_and_parse_output(cmd)
-    output = try
-        read(cmd, String)
-    catch
-        println("Command failed: ", cmd)
-        rethrow()
-    end
+    output = read(cmd, String)
 
     mega_cells_per_sec_raw = match(r"Cells/sec:\s*\K[0-9\.]+", output)
 
@@ -432,7 +443,7 @@ function run_and_parse_output(cmd)
 end
 
 
-function run_armon(measure::MeasureParams, backend::Int, threads::Int, exe_path::String, base_file_name::String, legend::String)
+function run_armon(measure::MeasureParams, backend::Backend, threads::Int, exe_path::String, base_file_name::String, legend::String)
     plot_commands = Vector{String}()
 
     for test in measure.tests_list
@@ -454,7 +465,12 @@ function run_armon(measure::MeasureParams, backend::Int, threads::Int, exe_path:
             else
                 error("Wrong backend")
             end
+
+            @printf(" - %s, %g cells: ", test, cells)
+
             cells_throughput = run_and_parse_output(cmd)
+
+            @printf("%f Giga cells/sec\n", cells_throughput)
     
             # Append the result to the output file
             open(data_file_name, "a") do file
@@ -564,10 +580,10 @@ function run_measure(measure::MeasureParams, measure_index::Int, inti_index::Int
                 base_file_name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
                 if backend == Julia
                     exe_path = ""
-                    extra_plot_commmands = run_julia(measure, threads, block_size, use_simd, ieee_bits, base_file_name, legend)
+                    extra_plot_commmands = run_julia(measure, threads, block_size, ieee_bits, use_simd, base_file_name, legend)
                     append!(plot_commands, extra_plot_commmands)
                 else
-                    exe_path = maybe_recompile(measure.device, threads, block_size, use_simd, ieee_bits, compiler, backend, prev_params)
+                    exe_path = maybe_recompile(measure.device, threads, block_size, ieee_bits, use_simd, compiler, backend, prev_params)
                     extra_plot_commmands = run_armon(measure, backend, threads, exe_path, base_file_name, legend)
                     append!(plot_commands, extra_plot_commmands)
                 end
@@ -581,8 +597,9 @@ function run_measure(measure::MeasureParams, measure_index::Int, inti_index::Int
             processes == 1 || error("Running multiple processes at once is not yet implemented")
 
             inti_options = [
+                "-p", measure.node,
                 "-n", processes,                   # Number of processes
-                "-E", "-m block|$(distribution)",  # Threads distribution
+                "-E", "-m block:$(distribution)",  # Threads distribution
                 # Allocate for the maximum number of threads needed. To make sure that there is enough memory available,
                 # there is a minimum number of core allocated.
                 "-c", max(maximum(measure.threads), min_inti_cores)
@@ -610,21 +627,23 @@ end
 
 
 function setup_env()
-    # Modules required for CUDA or ROCM GPUs
-    run(`module load cuda rocm hwloc`)
-
     # Environment variables needed to configure ROCM so that hipcc works correctly
     ENV["PATH"] *= ":/opt/rocm-4.5.0/hip/lib:/opt/rocm-4.5.0/hsa/lib"
     ENV["ROCM_PATH"] = "/opt/rocm-4.5.0"
     ENV["HIP_CLANG"] = "/opt/rocm-4.5.0/llvm/bin"
     ENV["HSA_PATH"] = "/opt/rocm-4.5.0/hsa"
+
+    # Output folders
+    mkpath(data_dir)
+    mkpath(plot_scripts_dir)
+    mkpath(plots_dir)
 end
 
 
 function main()
     measures, measure_index, inti_index = parse_arguments()
     
-    if measures_index != 0
+    if measure_index != 0
         # Sub loop, running inside of a compute node
         return run_measure(measures[measure_index], measure_index, inti_index)
     end
@@ -633,7 +652,7 @@ function main()
     setup_env()
     for (i, measure) in enumerate(measures)
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
-        run_measure(measure, measure_index, inti_index)
+        run_measure(measure, i, inti_index)
         run(gnuplot_cmd(measure.gnuplot_script))
     end
 end
