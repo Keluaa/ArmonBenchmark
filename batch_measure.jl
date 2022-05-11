@@ -100,6 +100,7 @@ function parse_measure_params(file_line_parser)
         line = chomp(line)
         if line == "-"; break; end    # End of this measure
         if line == ""; continue; end  # Empty line
+        if startswith(line, '#'); continue; end # Comment
         if isnothing(findfirst('=', line))
             error("Missing '=' at line $(i)")
         end
@@ -613,6 +614,18 @@ function run_measure(measure::MeasureParams, measure_index::Int, inti_index::Int
 end
 
 
+function setup_env()
+    # Modules required for CUDA or ROCM GPUs
+    run(`module load cuda rocm hwloc`)
+
+    # Path variables needed to configure ROCM so that hipcc works correctly
+    run(`export PATH=$PATH:/opt/rocm-4.5.0/hip/lib:/opt/rocm-4.5.0/hsa/lib`)
+    run(`export ROCM_PATH=/opt/rocm-4.5.0`)
+    run(`export HIP_CLANG_PATH=/opt/rocm-4.5.0/llvm/bin`)
+    run(`export HSA_PATH=/opt/rocm-4.5.0/hsa`)
+end
+
+
 function main()
     measures, measure_index, inti_index = parse_arguments()
     
@@ -622,6 +635,7 @@ function main()
     end
 
     # Main loop, running in the login node, parsing through all measurments to do
+    setup_env()
     for (i, measure) in enumerate(measures)
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
         run_measure(measure, measure_index, inti_index)
