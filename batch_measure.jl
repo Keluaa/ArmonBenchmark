@@ -286,7 +286,8 @@ function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Bool, compiler
         error("Wrong compiler")
     end
 
-    run(`cd $(cpp_make_dir) && make --quiet -j4 clean && make $(make_options) $(cpp_make_target)`)
+    run(Cmd(`make --quiet -j4 clean`, dir=cpp_make_dir))
+    run(Cmd(`make $(make_options) $(cpp_make_target)`, dir=cpp_make_dir))
 
     return cpp_exe_path
 end
@@ -320,7 +321,7 @@ function recompile_kokkos(device::Int, block_size::Int, ieee_bits::Int, use_simd
         error("Wrong device")
     end
 
-    run(`cd $(kokkos_make_dir) && make $(make_options) $(make_target)`)
+    run(Cmd(`make $(make_options) $(make_target)`, dir=kokkos_make_dir))
 
     return make_run_target
 end
@@ -377,13 +378,7 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_si
         "--legend", legend_base
     ])
 
-    launch_cmd = `julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`
-    try
-        run(launch_cmd)
-    catch
-        println("Command failed: ", launch_cmd)
-        rethrow()
-    end
+    run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
 
     # Parse the script output file, which contains the names of the data files as well as their legends, separated by pipes    
     plot_commands = Vector{String}()
@@ -410,7 +405,7 @@ end
 
 function get_kokkos_run_cmd(exe_path, threads, armon_options)
     # For Kokkos, the exe_path is not a path but a make target that compiles (if needed) the exe then runs it with the arguments given.
-    cmd = `cd $(kokkos_make_dir) && make $(exe_path) args=\"--kokkos-threads=$(threads) $(armon_options)\"`
+    cmd = Cmd(`make $(exe_path) args=\"--kokkos-threads=$(threads) $(armon_options)\"`, dir=kokkos_make_dir)
     return cmd
 end
 
@@ -618,11 +613,11 @@ function setup_env()
     # Modules required for CUDA or ROCM GPUs
     run(`module load cuda rocm hwloc`)
 
-    # Path variables needed to configure ROCM so that hipcc works correctly
-    run(`export PATH=$PATH:/opt/rocm-4.5.0/hip/lib:/opt/rocm-4.5.0/hsa/lib`)
-    run(`export ROCM_PATH=/opt/rocm-4.5.0`)
-    run(`export HIP_CLANG_PATH=/opt/rocm-4.5.0/llvm/bin`)
-    run(`export HSA_PATH=/opt/rocm-4.5.0/hsa`)
+    # Environment variables needed to configure ROCM so that hipcc works correctly
+    ENV["PATH"] *= ":/opt/rocm-4.5.0/hip/lib:/opt/rocm-4.5.0/hsa/lib"
+    ENV["ROCM_PATH"] = "/opt/rocm-4.5.0"
+    ENV["HIP_CLANG"] = "/opt/rocm-4.5.0/llvm/bin"
+    ENV["HSA_PATH"] = "/opt/rocm-4.5.0/hsa"
 end
 
 
