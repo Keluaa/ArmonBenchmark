@@ -33,6 +33,7 @@ mutable struct MeasureParams
     plot_file::String
     log_scale::Bool
     plot_title::String
+    verbose::Bool
 end
 
 
@@ -46,6 +47,8 @@ armon_base_options = [
 ]
 min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
 
+base_make_options = "-j4"
+
 julia_script_path = "./julia/run_julia.jl"
 julia_tmp_script_output_file = "./tmp_script_output.txt"
 cpp_exe_path = "./cpp/armon.exe"
@@ -54,7 +57,7 @@ cpp_make_target = "armon.exe"
 kokkos_make_dir = "./kokkos/"
 
 data_dir = "./data/"
-plot_scripts_dir = "./plot_scipts/"
+plot_scripts_dir = "./plot_scripts/"
 plots_dir = "./plots/"
 
 
@@ -95,6 +98,7 @@ function parse_measure_params(file_line_parser)
     plot_file = nothing
     log_scale = true
     plot_title = nothing
+    verbose = false
 
     last_i = 0
     for (i, line) in file_line_parser
@@ -178,6 +182,8 @@ function parse_measure_params(file_line_parser)
             plot_title = value
         elseif option == "log_scale"
             log_scale = parse(Bool, value)
+        elseif option == "verbose"
+            verbose = parse(Bool, value)
         else
             error("Unknown option: $(option), at line $(i)")
         end
@@ -207,7 +213,7 @@ function parse_measure_params(file_line_parser)
     return MeasureParams(device, node, distributions, processes, max_time,
         backends, threads, block_sizes, ieee_bits, use_simd, compilers,
         cells_list, tests_list, common_armon_params,
-        name, gnuplot_script, plot_file, log_scale, plot_title)
+        name, gnuplot_script, plot_file, log_scale, plot_title, verbose)
 end
 
 
@@ -282,7 +288,6 @@ end
 function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler)
     make_options = [
         "--quiet",  # Don't print unuseful info
-        "-j4",      # Use 4 threads to compile more files at the same time
         "use_simd=$(use_simd)",
         "use_single_precision=$(ieee_bits == 32)",
     ]
@@ -301,24 +306,23 @@ function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Int, compiler:
         error("Wrong compiler")
     end
 
-    run_cmd_print_on_error(Cmd(`make --quiet -j4 clean`, dir=cpp_make_dir))
-    run_cmd_print_on_error(Cmd(`make $(make_options) $(cpp_make_target)`, dir=cpp_make_dir))
+    run_cmd_print_on_error(Cmd(`make $(base_make_options) --quiet clean`, dir=cpp_make_dir))
+    run_cmd_print_on_error(Cmd(`make $(base_make_options) $(make_options) $(cpp_make_target)`, dir=cpp_make_dir))
 
     return cpp_exe_path
 end
 
 
 function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler)
-    error("TODO : block_size, compiler")
+    # error("TODO : block_size, compiler")
     # TODO : block_size
     # TODO : compiler
 
     make_options = [
         "--quiet",    # Don't print unuseful info
-        "-j4",        # Use 4 threads to compile more files at the same time
         "use_omp=1",  # Always enable OpenMP for Kokkos, since it can still help a bit for GPUs in the host side
         "use_simd=$(use_simd)",
-        "use_single=$(ieee_bits == 32)"
+        "use_single=$(convert(Int, ieee_bits == 32))"
     ]
 
     println("Recompiling the C++ Kokkos code with: block_size=$(block_size), ieee_bits=$(ieee_bits), use_simd=$(use_simd)")
@@ -336,7 +340,7 @@ function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_s
         error("Wrong device")
     end
 
-    run_cmd_print_on_error(Cmd(`make $(make_options) $(make_target)`, dir=kokkos_make_dir))
+    run_cmd_print_on_error(Cmd(`make $(base_make_options) $(make_options) $(make_target)`, dir=kokkos_make_dir))
 
     return make_run_target
 end
@@ -421,12 +425,12 @@ end
 function get_kokkos_run_cmd(exe_path, threads, armon_options)
     # For Kokkos, the exe_path is not a path but a make target that compiles (if needed) the exe then runs it with the arguments given.
     args = "--kokkos-threads=$(threads) $(join(string.(armon_options), ' '))"
-    cmd = Cmd(`make $(exe_path) args=\"$(args)\"`, dir=kokkos_make_dir)
+    cmd = Cmd(`make $(base_make_options) $(exe_path) args=\"$(args)\"`, dir=kokkos_make_dir)
     return cmd
 end
 
 
-function run_and_parse_output(cmd)
+function run_and_parse_output(cmd, verbose)
     output = read(cmd, String)
 
     mega_cells_per_sec_raw = match(r"Cells/sec:\s*\K[0-9\.]+", output)
@@ -434,6 +438,8 @@ function run_and_parse_output(cmd)
     if isnothing(mega_cells_per_sec_raw)
         println("Command failed, wrong output: ", cmd, "\nOutput:\n", output)
         error("Wrong output")
+    elseif verbose
+        println(output)
     end
 
     mega_cells_per_sec = parse(Float64, mega_cells_per_sec_raw.match)
@@ -448,6 +454,7 @@ function run_armon(measure::MeasureParams, backend::Backend, threads::Int, exe_p
 
     for test in measure.tests_list
         data_file_name = base_file_name * test * ".csv"
+        open(data_file_name, "w") do _ end  # Create/Clear the file
 
         for cells in measure.cells_list
             armon_options = [
@@ -466,11 +473,11 @@ function run_armon(measure::MeasureParams, backend::Backend, threads::Int, exe_p
                 error("Wrong backend")
             end
 
-            @printf(" - %s, %g cells: ", test, cells)
+            @printf(" - %s, %-10g cells: ", test, cells)
 
-            cells_throughput = run_and_parse_output(cmd)
+            cells_throughput = run_and_parse_output(cmd, measure.verbose)
 
-            @printf("%f Giga cells/sec\n", cells_throughput)
+            @printf("%.2f Giga cells/sec\n", cells_throughput)
     
             # Append the result to the output file
             open(data_file_name, "a") do file
@@ -611,18 +618,20 @@ function run_measure(measure::MeasureParams, measure_index::Int, inti_index::Int
         end
     end
 
-    # create/append gnuplot script
-    if isfile(measure.gnuplot_script)
-        gnuplot_script = open(measure.gnuplot_script, "w")
-        println(gnuplot_script, base_gnuplot_script_commands(measure.plot_file, measure.plot_title, measure.log_scale))
-    else
-        gnuplot_script = open(measure.gnuplot_script, "a")
+    if !isempty(plot_commands)
+        # create/append gnuplot script
+        if !isfile(measure.gnuplot_script)
+            gnuplot_script = open(measure.gnuplot_script, "w")
+            print(gnuplot_script, base_gnuplot_script_commands(measure.plot_file, measure.plot_title, measure.log_scale))
+        else
+            gnuplot_script = open(measure.gnuplot_script, "a")
+        end
+
+        plot_cmd = join(plot_commands, ", \\\n     ")
+        println(gnuplot_script, plot_cmd)
+
+        close(gnuplot_script)
     end
-
-    plot_cmd = join(plot_commands, ", \\\n     ")
-    println(gnuplot_script, plot_cmd)
-
-    close(gnuplot_script)
 end
 
 
