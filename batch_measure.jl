@@ -564,7 +564,7 @@ function create_all_data_files_and_plot(measure::MeasureParams)
     for (processes, distribution) in build_inti_combinaisons(measure, 0)
         for (threads, block_size, use_simd, ieee_bits, compiler, backend) in build_backend_combinaisons(measure)
             base_file_name, legend_base = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
-            for test in measure.tests
+            for test in measure.tests_list
                 data_file_name = base_file_name * test * ".csv"
                 open(data_file_name, "w") do _ end  # Create/Clear the file
                 legend = "$(test), $(legend_base)"
