@@ -374,7 +374,7 @@ function maybe_recompile(device::Device, threads::Int, block_size::Int, ieee_bit
 end
 
 
-function run_julia(measure::MeasureParams, threads::Int, block_size::Int, ieee_bits::Int, use_simd::Int, base_file_name::String, legend_base::String)
+function run_julia(measure::MeasureParams, threads::Int, block_size::Int, ieee_bits::Int, use_simd::Int, base_file_name::String)
     armon_options = []
 
     if measure.device == CUDA
@@ -390,28 +390,17 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, ieee_b
     append!(armon_options, [
         "--block-size", block_size,
         "--use-simd", use_simd,
-        "--ieee-bits", ieee_bits,
-        "--tests", measure.tests_list,
-        "--cells-list", measure.cells_list,
+        "--ieee", ieee_bits,
+        "--tests", join(measure.tests_list, ','),
+        "--cells-list", join(string.(measure.cells_list), ','),
         "--data-file", base_file_name,
-        "--legend", legend_base
+        "--gnuplot-script", measure.gnuplot_script,
+        "--verbose", (measure.verbose ? 2 : 5)
     ])
 
+    println("Running Julia with: $(threads) threads, $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
+
     run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
-
-    # Parse the script output file, which contains the names of the data files as well as their legends, separated by pipes    
-    plot_commands = Vector{String}()
-    open(julia_tmp_script_output_file, "r") do script_output_file
-        for line in eachline(script_output_file)
-            data_file_name, legend = split(line, '|')
-            plot_cmd = gnuplot_plot_command(data_file_name, legend)
-            push!(plot_commands, plot_cmd)
-        end
-    end
-
-    rm(julia_tmp_script_output_file)
-
-    return plot_commands
 end
 
 
@@ -449,12 +438,9 @@ function run_and_parse_output(cmd, verbose)
 end
 
 
-function run_armon(measure::MeasureParams, backend::Backend, threads::Int, exe_path::String, base_file_name::String, legend::String)
-    plot_commands = Vector{String}()
-
+function run_armon(measure::MeasureParams, backend::Backend, threads::Int, exe_path::String, base_file_name::String)
     for test in measure.tests_list
         data_file_name = base_file_name * test * ".csv"
-        open(data_file_name, "w") do _ end  # Create/Clear the file
 
         for cells in measure.cells_list
             armon_options = [
@@ -483,14 +469,12 @@ function run_armon(measure::MeasureParams, backend::Backend, threads::Int, exe_p
             open(data_file_name, "a") do file
                 println(file, cells, ", ", cells_throughput)
             end
+
+            # Update the plot
+            # We redirect the output of gnuplot to null so that there is no warning messages displayed
+            run(pipeline(`gnuplot $(measure.gnuplot_script)`, stdout=devnull, stderr=devnull))
         end
-
-        # Make the legend and the gnuplot command for the file
-        plot_cmd = gnuplot_plot_command(data_file_name, test * ", " * legend)
-        push!(plot_commands, plot_cmd)
     end
-
-    return plot_commands
 end
 
 
@@ -575,62 +559,45 @@ function build_data_file_base_name(measure::MeasureParams, processes, distributi
 end
 
 
-function run_measure(measure::MeasureParams, measure_index::Int, inti_index::Int)
-    on_compute_node = startswith(readchomp(`hostname`), "inti")
-
-    plot_commands = Vector{String}()
-
-    for (processes, distribution) in build_inti_combinaisons(measure, inti_index)
-        if on_compute_node
-            prev_params = ()
-            for (threads, block_size, use_simd, ieee_bits, compiler, backend) in build_backend_combinaisons(measure)
-                base_file_name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
-                if backend == Julia
-                    exe_path = ""
-                    extra_plot_commmands = run_julia(measure, threads, block_size, ieee_bits, use_simd, base_file_name, legend)
-                    append!(plot_commands, extra_plot_commmands)
-                else
-                    exe_path = maybe_recompile(measure.device, threads, block_size, ieee_bits, use_simd, compiler, backend, prev_params)
-                    extra_plot_commmands = run_armon(measure, backend, threads, exe_path, base_file_name, legend)
-                    append!(plot_commands, extra_plot_commmands)
-                end
-
-                prev_params = (threads, block_size, ieee_bits, use_simd, compiler, backend, exe_path)
+function create_all_data_files_and_plot(measure::MeasureParams)
+    plot_commands = []
+    for (processes, distribution) in build_inti_combinaisons(measure, 0)
+        for (threads, block_size, use_simd, ieee_bits, compiler, backend) in build_backend_combinaisons(measure)
+            base_file_name, legend_base = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
+            for test in measure.tests
+                data_file_name = base_file_name * test * ".csv"
+                open(data_file_name, "w") do _ end  # Create/Clear the file
+                legend = "$(test), $(legend_base)"
+                plot_cmd = gnuplot_plot_command(data_file_name, legend)
+                push!(plot_commands, plot_cmd)
             end
-            break  # We are on a compute node, and there is no way to change the ccc_mprun parameters here
-        else
-            # Launch a new INTI job on a compute node
-
-            processes == 1 || error("Running multiple processes at once is not yet implemented")
-
-            inti_options = [
-                "-p", measure.node,
-                "-n", processes,                   # Number of processes
-                "-E", "-m block:$(distribution)",  # Threads distribution
-                # Allocate for the maximum number of threads needed. To make sure that there is enough memory available,
-                # there is a minimum number of core allocated.
-                "-c", max(maximum(measure.threads), min_inti_cores)
-            ]
-            cmd = inti_cmd(inti_options, measure_index, inti_index)
-            println("Starting INTI job: ", cmd)
-            run(cmd)
-            inti_index += 1
         end
     end
 
-    if !isempty(plot_commands)
-        # create/append gnuplot script
-        if !isfile(measure.gnuplot_script)
-            gnuplot_script = open(measure.gnuplot_script, "w")
-            print(gnuplot_script, base_gnuplot_script_commands(measure.plot_file, measure.plot_title, measure.log_scale))
-        else
-            gnuplot_script = open(measure.gnuplot_script, "a")
-        end
-
+    # Create the gnuplot script. It will then be run at each new data point
+    open(measure.gnuplot_script, "w") do gnuplot_script
+        print(gnuplot_script, base_gnuplot_script_commands(measure.plot_file, measure.plot_title, measure.log_scale))
         plot_cmd = join(plot_commands, ", \\\n     ")
         println(gnuplot_script, plot_cmd)
+    end
+end
 
-        close(gnuplot_script)
+
+function run_measure(measure::MeasureParams, inti_index::Int)
+    for (processes, distribution) in build_inti_combinaisons(measure, inti_index)
+        prev_params = ()
+        for (threads, block_size, use_simd, ieee_bits, compiler, backend) in build_backend_combinaisons(measure)
+            base_file_name, _ = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
+            if backend == Julia
+                exe_path = ""  # No recompilation here
+                run_julia(measure, threads, block_size, ieee_bits, use_simd, base_file_name)
+            else
+                exe_path = maybe_recompile(measure.device, threads, block_size, ieee_bits, use_simd, compiler, backend, prev_params)
+                run_armon(measure, backend, threads, exe_path, base_file_name)
+            end
+            prev_params = (threads, block_size, ieee_bits, use_simd, compiler, backend, exe_path)
+        end
+        break  # We are on a compute node, and there is no way to change the ccc_mprun parameters here
     end
 end
 
@@ -642,7 +609,7 @@ function setup_env()
     ENV["HIP_CLANG"] = "/opt/rocm-4.5.0/llvm/bin"
     ENV["HSA_PATH"] = "/opt/rocm-4.5.0/hsa"
 
-    # Output folders
+    # Make sure that the output folders exist
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
     mkpath(plots_dir)
@@ -654,15 +621,38 @@ function main()
     
     if measure_index != 0
         # Sub loop, running inside of a compute node
-        return run_measure(measures[measure_index], measure_index, inti_index)
+        run_measure(measures[measure_index], inti_index)
+        return
     end
 
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
     for (i, measure) in enumerate(measures)
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
-        run_measure(measure, i, inti_index)
-        run(gnuplot_cmd(measure.gnuplot_script))
+
+        # Create the files and plot script once at the beginning
+        create_all_data_files_and_plot(measure)
+        inti_index = 0
+
+        # For each 'number of processes' and 'threads distribution' combinaison, create a new job
+        for (processes, distribution) in build_inti_combinaisons(measure, inti_index)
+            # Launch a new INTI job on a compute node
+
+            processes == 1 || error("Running multiple processes at once is not yet implemented")  # TODO
+
+            inti_options = [
+                "-p", measure.node,
+                "-n", processes,                   # Number of processes
+                "-E", "-m block:$(distribution)",  # Threads distribution
+                # Allocate for the maximum number of threads needed
+                # To make sure that there is enough memory available, there is a minimum number of core allocated.
+                "-c", max(maximum(measure.threads), min_inti_cores)
+            ]
+            cmd = inti_cmd(inti_options, i, inti_index)
+            println("Starting INTI job: ", cmd)
+            run(cmd)
+            inti_index += 1
+        end
     end
 end
 

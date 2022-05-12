@@ -1,4 +1,7 @@
 
+using Printf
+
+
 scheme = :GAD_minmod
 riemann = :acoustic
 iterations = 4
@@ -21,7 +24,7 @@ tests = []
 cells_list = []
 
 base_file_name = ""
-legend_base = ""
+gnuplot_script = ""
 
 
 i = 1
@@ -92,8 +95,12 @@ while i <= length(ARGS)
             exit(1)
         end
         global use_gpu = true
+    elseif arg == "--block-size"
+        block_size = parse(Int, ARGS[i+1])
+        global i += 1
+        ENV["GPU_BLOCK_SIZE"] = block_size
     elseif arg == "--tests"
-        global tests = split(ARGS[i+1], ',')
+        global tests = Symbol.(split(ARGS[i+1], ','))
         global i += 1
     elseif arg == "--cells-list"
         list = split(ARGS[i+1], ',')
@@ -102,8 +109,8 @@ while i <= length(ARGS)
     elseif arg == "--data-file"
         global base_file_name = ARGS[i+1]
         global i += 1
-    elseif arg == "--legend"
-        global legend_base = ARGS[i+1]
+    elseif arg == "--gnuplot-script"
+        global gnuplot_script = ARGS[i+1]
         global i += 1
     else
         println("Wrong option: ", arg)
@@ -117,34 +124,31 @@ println("Loading...")
 include("armon_module_gpu.jl")
 using .Armon
 
+
 println("Compiling...")
 for test in tests
     armon(ArmonParameters(; ieee_bits, test=test, riemann, scheme, iterations, nbcell=10000, cfl, Dt, euler_projection, cst_dt, maxtime, maxcycle=1, silent=5, write_output=false, use_ccall, use_threading, use_simd, interleaving, use_gpu))
 end
 
 
-files = []
-legends = []
-
 for test in tests
-    data_file_name = base_file_name * test * ".csv"
+    data_file_name = base_file_name * string(test) * ".csv"
 
     for cells in cells_list
+        @printf(" - %s, %-10g cells: ", test, cells)
+
         cells_per_sec = armon(ArmonParameters(; ieee_bits, test, riemann, scheme, iterations, nbcell=cells, cfl, Dt, euler_projection, cst_dt, maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd, interleaving, use_gpu))
         
+        @printf("%.2g Giga cells/sec\n", cells_per_sec)
+
+        # Append the result to the data file
         open(data_file_name, "a") do data_file
             println(data_file, cells, ", ", cells_per_sec)
         end
-    end
 
-    push!(files, data_file)
-    push!(legends, "$(test), $(legend_base)")
-end
-
-
-# Print the data file names and their legends in a format easily parsable by the 'batch_measure.jl' script
-open("tmp_script_output.txt", "w") do output_file
-    for (i, (file, legend)) in enumerate(zip(files, legends))
-        println(output_file, "$(file)|$(legend)")
+        if !isempty(gnuplot_script)
+            # We redirect the output of gnuplot to null so that there is no warning messages displayed
+            run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
+        end
     end
 end

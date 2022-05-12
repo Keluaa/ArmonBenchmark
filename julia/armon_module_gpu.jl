@@ -1038,11 +1038,9 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 		println("Cells/sec:  ", round((cycle*nbcell) / (t2 - t1) * 1e3, digits=5), " Mega cells/sec")
 		println("Cycles: ", cycle)
 		println(" ")
-
-		return params.data_type((cycle*nbcell) / (t2 - t1))
 	end
 
-	return zero(params.data_type)
+	return params.data_type((cycle*nbcell) / (t2 - t1))
 end
 
 #
@@ -1132,7 +1130,11 @@ function armon(params::ArmonParameters)
 
 		params.silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
-		@time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, d_tmp_Erho)
+		if params.silent <= 3
+			@time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, d_tmp_Erho)
+		else
+			cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, d_tmp_Erho)
+		end
 
 		copyto!(x, d_x)
 		copyto!(X, d_X)
@@ -1148,7 +1150,11 @@ function armon(params::ArmonParameters)
 		copyto!(ustar_1, d_ustar_1)
 		copyto!(pstar_1, d_pstar_1)
 	else
-		@time cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+		if params.silent <= 3
+			@time cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+		else
+			cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+		end
 	end
 
 	if params.write_output
@@ -1164,53 +1170,6 @@ function armon(params::ArmonParameters)
 	end
 
 	return cells_per_sec
-end
-
-
-function __init__()
-	precompile(Tuple{typeof(Armon.armon), Armon.ArmonParameters{Float64}})
-	precompile(Tuple{typeof(Base.zeros), Type{Float64}, Int64})
-	precompile(Tuple{typeof(Base.iterate), Base.OneTo{Int64}, Int64})
-	precompile(Tuple{typeof(Armon.init_test), Armon.ArmonParameters{Float64}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}})
-	precompile(Tuple{typeof(Base.:(*)), Float64, Float64})
-	precompile(Tuple{typeof(Base.setindex!), Array{Float64, 1}, Float64, Int64})
-	precompile(Tuple{typeof(Base.sqrt), Float64})
-	precompile(Tuple{typeof(Base.haskey), Base.Dict{String, Float64}, String})
-	precompile(Tuple{typeof(Base.setindex!), Base.Dict{String, Float64}, UInt64, String})
-	precompile(Tuple{typeof(Base.print), Base.TTY, String, Bool, Vararg{Any}})
-	precompile(Tuple{typeof(Base.print), Base.TTY, Bool})
-	precompile(Tuple{typeof(Base.print), Base.TTY, String, Int64, Vararg{Any}})
-	precompile(Tuple{typeof(Base.print), Base.TTY, Int64})
-	precompile(Tuple{typeof(Base.print), Base.TTY, String, Symbol, Vararg{Any}})
-	precompile(Tuple{typeof(Base.print), Base.TTY, Symbol})
-	precompile(Tuple{typeof(Base.print), Base.TTY, String, Float64, Vararg{Any}})
-	precompile(Tuple{typeof(Base.print), Base.TTY, Float64})
-	precompile(Tuple{typeof(Armon.time_loop), Armon.ArmonParameters{Float64}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}})
-	precompile(Tuple{typeof(Base.:(<)), Float64, Float64})
-	precompile(Tuple{typeof(Armon.dtCFL), Float64, Float64, Float64, Array{Float64, 1}, Array{Float64, 1}, Int64, Int64})
-	precompile(Tuple{typeof(Armon.numericalFluxes!), Armon.ArmonParameters{Float64}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Float64, Array{Float64, 1}})
-	precompile(Tuple{typeof(Armon.cellUpdate!), Armon.ArmonParameters{Float64}, Float64, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}})
-	precompile(Tuple{typeof(Armon.perfectGasEOS!), Armon.ArmonParameters{Float64}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Float64})
-	precompile(Tuple{typeof(Base.getindex), Base.Dict{String, Float64}, String})
-	precompile(Tuple{typeof(Base.:(+)), Float64, UInt64})
-	precompile(Tuple{typeof(Base.println), String, Float64, Vararg{Any}})
-	precompile(Tuple{typeof(Base.prettyprint_getunits), Int64, Int64, Int64})
-	precompile(Tuple{Type{Float64}, Float64})
-	precompile(Tuple{typeof(Base.Ryu.writefixed), Float64, Int64})
-	precompile(Tuple{typeof(Armon.write_result), Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Array{Float64, 1}, Int64, Int64, Int64})
-	precompile(Tuple{typeof(Base.print), Base.IOStream, Float64, String, Vararg{Any}})
-	precompile(Tuple{typeof(Base.print), Base.IOStream, Float64})
-	precompile(Tuple{typeof(Base.println), String, String, Vararg{Any}})
-	precompile(Tuple{typeof(Base.println), Base.TTY, String, Vararg{Any}})
-	precompile(Tuple{typeof(Base.print), Base.TTY, String, String, Vararg{Any}})
-	precompile(Tuple{typeof(Base.print), Base.TTY, Array{String, 1}})
-	precompile(Tuple{typeof(Base.:(<=)), Int64, Int64})
-	precompile(Tuple{typeof(Base.replace), String, Pair{Char, Char}})
-	precompile(Tuple{typeof(Base.parse), Type{Float64}, String})
-	precompile(Tuple{typeof(Base.parse), Type{Bool}, String})
-	precompile(Tuple{Type{NamedTuple{(:ieee_bits, :test, :riemann, :scheme, :iterations, :nbcell, :cfl, :Dt, :maxtime, :maxcycle, :silent, :write_output, :use_ccall, :use_threading, :use_simd), T} where T<:Tuple}, Tuple{Int64, Symbol, Symbol, Symbol, Int64, Int64, Float64, Float64, Float64, Int64, Int64, Bool, Bool, Bool, Bool}})
-	precompile(Tuple{Core.var"#Type##kw", NamedTuple{(:ieee_bits, :test, :riemann, :scheme, :iterations, :nbcell, :cfl, :Dt, :maxtime, :maxcycle, :silent, :write_output, :use_ccall, :use_threading, :use_simd), Tuple{Int64, Symbol, Symbol, Symbol, Int64, Int64, Float64, Float64, Float64, Int64, Int64, Bool, Bool, Bool, Bool}}, Type{Armon.ArmonParameters{Flt_T} where Flt_T}})
-	precompile(Tuple{Type{Armon.ArmonParameters{Float64}}, Type, Symbol, Symbol, Symbol, Int64, Int64, Int64, Float64, Float64, Int64, Int64, Float64, Int64, Int64, Bool, Bool, Bool, Bool, Bool, Int64})
 end
 
 end
