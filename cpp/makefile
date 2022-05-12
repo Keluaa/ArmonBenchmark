@@ -1,7 +1,7 @@
 
 # CXXFLAGS = -g -fopenmp -Wall -std=c++17 -ffast-math
 # CXXFLAGS = -O3 -fopenmp -Wall -std=c++17 -ffast-math
-CXXFLAGS = -O1 -fopenmp -Wall -std=c++17
+CXXFLAGS = -O3 -fopenmp -Wall -std=c++17
 CFLAGS = -O3 -fopenmp -Wall -ffast-math
 
 ifdef use_clang
@@ -34,6 +34,8 @@ endif
 
 armon.exe: armon.cpp
 	$(CXX) $(CXXFLAGS) -DUSE_SIMD=$(use_simd) -DUSE_THREADING=$(use_threading) -DUSE_SINGLE_PRECISION=$(use_single_precision) armon.cpp -o armon.exe
+
+all: armon.exe
 
 clean:
 	rm -f ./armon.exe
