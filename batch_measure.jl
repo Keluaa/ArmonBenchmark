@@ -71,7 +71,7 @@ set key left top
 $(log_scale ? "set logscale x" : "")
 plot """
 
-gnuplot_plot_command(data_file, legend_title) = "'$(data_file)' w lp title '$(legend_title)'"
+gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
 
 
 function parse_measure_params(file_line_parser)    
@@ -439,6 +439,8 @@ end
 
 
 function run_armon(measure::MeasureParams, backend::Backend, threads::Int, exe_path::String, base_file_name::String)
+    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads")
+
     for test in measure.tests_list
         data_file_name = base_file_name * test * ".csv"
 
@@ -564,11 +566,22 @@ function create_all_data_files_and_plot(measure::MeasureParams)
     for (processes, distribution) in build_inti_combinaisons(measure, 0)
         for (threads, block_size, use_simd, ieee_bits, compiler, backend) in build_backend_combinaisons(measure)
             base_file_name, legend_base = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
+
+            if backend == CPP
+                point_type = 7
+            elseif backend == Julia
+                point_type = 5
+            elseif backend == Kokkos
+                point_type = 9
+            else
+                point_type = 1
+            end
+
             for test in measure.tests_list
                 data_file_name = base_file_name * test * ".csv"
                 open(data_file_name, "w") do _ end  # Create/Clear the file
                 legend = "$(test), $(legend_base)"
-                plot_cmd = gnuplot_plot_command(data_file_name, legend)
+                plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
                 push!(plot_commands, plot_cmd)
             end
         end
