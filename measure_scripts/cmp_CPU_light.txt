@@ -1,0 +1,22 @@
+name=cmp_CPU_euler_light_64bits
+device=CPU
+backends=cpp,julia,kokkos
+node=a100
+threads=1,8,16,32,64
+cells=12.5e3,25e3,50e3,100e3,200e3,400e3,800e3,1.6e6,3.2e6,6.4e6
+ieee_bits=64
+armon=--euler 1
+title=1D Eulerian 2nd-order hydro
+log_scale=true
+-
+name=cmp_CPU_euler_light_32bits
+device=CPU
+backends=cpp,julia,kokkos
+node=a100
+threads=1,8,16,32,64
+cells=12.5e3,25e3,50e3,100e3,200e3,400e3,800e3,1.6e6,3.2e6,6.4e6
+ieee_bits=32
+armon=--euler 1
+title=1D Eulerian 2nd-order hydro
+log_scale=true
+

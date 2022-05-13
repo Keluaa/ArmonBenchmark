@@ -378,9 +378,9 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, ieee_b
     armon_options = []
 
     if measure.device == CUDA
-        append!(armon_options, "--gpu", "CUDA")
+        append!(armon_options, ["--gpu", "CUDA"])
     elseif measure.device == ROCM
-        append!(armon_options, "--gpu", "ROCM")
+        append!(armon_options, ["--gpu", "ROCM"])
     else
         # no option needed for CPU
     end

@@ -84,7 +84,7 @@ while i <= length(ARGS)
 
     # Additionnal params
     elseif arg == "--gpu"
-        gpu = parse(Bool, ARGS[i+1])
+        gpu = ARGS[i+1]
         global i += 1
         if gpu == "ROCM"
             ENV["USE_ROCM_GPU"] = "true"
