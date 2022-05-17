@@ -1,0 +1,14 @@
+name=cmp_omp_params_32bits
+device=CPU
+node=
+backends=julia,cpp,kokkos
+threads=3
+cells=12.5e3, 25e3
+omp_schedule=static; nonmonotonic:dynamic,1024
+omp_proc_bind=close; spread
+omp_places=threads; cores
+tests=Sod
+ieee_bits=32
+armon=--euler 1
+log_scale=true
+title=1D Eulerian 2nd-order hydro - OpenMP Params overview

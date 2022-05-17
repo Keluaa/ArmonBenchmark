@@ -21,6 +21,10 @@
 #define USE_THREADING 1
 #endif
 
+#ifndef USE_STD_VECTOR
+#define USE_STD_VECTOR 0
+#endif
+
 #if USE_SIMD
 #define SIMD simd
 #else
@@ -31,7 +35,7 @@
 #define _PRAGMA(V) _Pragma(#V)
 #define OMP_FOR(...) _PRAGMA(omp parallel for SIMD default(none) __VA_ARGS__)
 #else
-#define OMP_FOR
+#define OMP_FOR(...)
 #endif // USE_THREADING
 
 
@@ -53,6 +57,44 @@ typedef float flt_t;
 #else
 typedef double flt_t;
 #endif
+
+
+#if USE_STD_VECTOR
+template<typename T>
+using Vector = std::vector<T>;
+#else
+template<typename T>
+class Vector
+{
+    T* _ptr = nullptr;
+public:
+    Vector() = default;
+
+    explicit Vector(size_t size)
+    { _ptr = (T*) malloc(size * sizeof(T)); }
+
+    ~Vector()
+    { free(_ptr); }
+
+    Vector(Vector<T>&& other) noexcept
+    { std::swap(_ptr, other._ptr); }
+
+    Vector& operator=(Vector<T>&& other) noexcept
+    { std::swap(_ptr, other._ptr); return *this; }
+
+    inline T operator[](int i) const
+    { return _ptr[i]; }
+
+    inline T operator[](size_t i) const
+    { return _ptr[i]; }
+
+    inline T& operator[](int i)
+    { return _ptr[i]; }
+
+    inline T& operator[](size_t i)
+    { return _ptr[i]; }
+};
+#endif // USE_STD_VECTOR
 
 
 enum class Test {
@@ -87,22 +129,22 @@ bool do_write_output = false;
 const char* output_file = "output_cpp";
 
 
-std::vector<flt_t> x;
-std::vector<flt_t> X;
-std::vector<flt_t> rho;
-std::vector<flt_t> umat;
-std::vector<flt_t> emat;
-std::vector<flt_t> Emat;
-std::vector<flt_t> pmat;
-std::vector<flt_t> cmat;
-std::vector<flt_t> gmat;
-std::vector<flt_t> ustar;
-std::vector<flt_t> pstar;
-std::vector<flt_t> ustar_1;
-std::vector<flt_t> pstar_1;
-std::vector<flt_t> tmp_rho;
-std::vector<flt_t> tmp_urho;
-std::vector<flt_t> tmp_Erho;
+Vector<flt_t> x;
+Vector<flt_t> X;
+Vector<flt_t> rho;
+Vector<flt_t> umat;
+Vector<flt_t> emat;
+Vector<flt_t> Emat;
+Vector<flt_t> pmat;
+Vector<flt_t> cmat;
+Vector<flt_t> gmat;
+Vector<flt_t> ustar;
+Vector<flt_t> pstar;
+Vector<flt_t> ustar_1;
+Vector<flt_t> pstar_1;
+Vector<flt_t> tmp_rho;
+Vector<flt_t> tmp_urho;
+Vector<flt_t> tmp_Erho;
 
 
 void BizarriumEOS()
@@ -163,6 +205,7 @@ void init_test()
         if (max_time == 0.0) max_time = 0.20;
         if (cfl == 0.0) cfl = 0.95;
 
+OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat, emat, Emat, cmat, gmat))
         for (int i = ideb; i <= ifin; i++) {
             x[i] = flt_t(i - nb_ghosts) / flt_t(nb_cells);
             if (x[i] < 0.5) {
@@ -181,7 +224,6 @@ void init_test()
             cmat[i] = std::sqrt(gamma*pmat[i]/rho[i]);
             gmat[i] = flt_t(0.5)*(1+gamma);
         }
-
         break;
     }
     case Test::Bizarrium:
@@ -189,6 +231,7 @@ void init_test()
         if (max_time == 0.0) max_time = 80e-6;
         if (cfl == 0.0) cfl = 0.6;
 
+OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat, emat, Emat))
         for (int i = ideb; i <= ifin; i++) {
             x[i] = flt_t(i - nb_ghosts) / flt_t(nb_cells);
             if (x[i] < 0.5) {
@@ -202,10 +245,8 @@ void init_test()
 			    emat[i] = 0.;
 			    Emat[i] = emat[i] + flt_t(0.5) * std::pow(umat[i], flt_t(2));
             }
-
-            BizarriumEOS();
         }
-
+        BizarriumEOS();
         break;
     }
     }
@@ -267,6 +308,7 @@ OMP_FOR(firstprivate(ideb, ifin) shared(x, umat, cmat) reduction(min:dt))
         }
     }
     else {
+OMP_FOR(firstprivate(ideb, ifin) shared(x, cmat) reduction(min:dt))
         for (int i = ideb; i < ifin; i++) {
             dt = std::min(dt, ((x[i+1] - x[i]) / cmat[i]));
         }
@@ -578,22 +620,22 @@ int main(int argc, const char* argv[])
     parse_arguments(argc, argv);
 
     int size = nb_cells + 2 * nb_ghosts;
-    x = std::vector<flt_t>(size);
-    X = std::vector<flt_t>(size);
-    rho = std::vector<flt_t>(size);
-    umat = std::vector<flt_t>(size);
-    emat = std::vector<flt_t>(size);
-    Emat = std::vector<flt_t>(size);
-    pmat = std::vector<flt_t>(size);
-    cmat = std::vector<flt_t>(size);
-    gmat = std::vector<flt_t>(size);
-    ustar = std::vector<flt_t>(size);
-    pstar = std::vector<flt_t>(size);
-    ustar_1 = std::vector<flt_t>(size);
-    pstar_1 = std::vector<flt_t>(size);
-    tmp_rho = std::vector<flt_t>(size);
-    tmp_urho = std::vector<flt_t>(size);
-    tmp_Erho = std::vector<flt_t>(size);
+    x = Vector<flt_t>(size);
+    X = Vector<flt_t>(size);
+    rho = Vector<flt_t>(size);
+    umat = Vector<flt_t>(size);
+    emat = Vector<flt_t>(size);
+    Emat = Vector<flt_t>(size);
+    pmat = Vector<flt_t>(size);
+    cmat = Vector<flt_t>(size);
+    gmat = Vector<flt_t>(size);
+    ustar = Vector<flt_t>(size);
+    pstar = Vector<flt_t>(size);
+    ustar_1 = Vector<flt_t>(size);
+    pstar_1 = Vector<flt_t>(size);
+    tmp_rho = Vector<flt_t>(size);
+    tmp_urho = Vector<flt_t>(size);
+    tmp_Erho = Vector<flt_t>(size);
 
     ideb = nb_ghosts;
     ifin = nb_ghosts + nb_cells;
@@ -609,6 +651,7 @@ int main(int argc, const char* argv[])
 #endif
         printf(" - use simd:   %d\n", USE_SIMD);
         printf(" - ieee bits:  %lu\n", 8 * sizeof(flt_t));
+        printf(" - std vector: %d\n", USE_STD_VECTOR),
         printf("\n");
         printf(" - test:       %s\n", (test == Test::Sod) ? "Sod" : "Bizarrium");
         printf(" - riemann:    %s\n", "acoustic");
