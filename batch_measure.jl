@@ -747,6 +747,7 @@ function main()
                     "-p", measure.node,
                     "-n", processes,                   # Number of processes
                     "-E", "-m block:$(distribution)",  # Threads distribution
+		    "-x",                              # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to further control threads/memory usage
                     # Allocate for the maximum number of threads needed
                     # To make sure that there is enough memory available, there is a minimum number of core allocated.
                     "-c", max(maximum(measure.threads), min_inti_cores)
@@ -754,7 +755,6 @@ function main()
                 cmd = inti_cmd(inti_options, i, inti_index)
                 println("Starting INTI job: ", cmd)
             end
-
             run(cmd)
             inti_index += 1
         end
