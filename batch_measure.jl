@@ -497,7 +497,7 @@ end
 
 
 function run_armon(measure::MeasureParams, backend::Backend, threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, exe_path::String, base_file_name::String)
-    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, binding: $(omp_proc_bind), places: $(omp_places)")
+    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places)")
 
     if threads == 1
         cells_list = filter(x -> x < max_cells_for_one_thread, measure.cells_list)
