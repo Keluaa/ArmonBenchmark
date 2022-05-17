@@ -37,6 +37,7 @@ mutable struct MeasureParams
 end
 
 
+no_inti_cmd(measure_index, inti_index) = `julia $(PROGRAM_FILE) $(ARGS[1]) $(measure_index) $(inti_index)`
 inti_cmd(options, measure_index, inti_index) = `ccc_mprun $(options) julia $(PROGRAM_FILE) $(ARGS[1]) $(measure_index) $(inti_index)`
 gnuplot_cmd(plot_file) = `gnuplot $(plot_file)`
 
@@ -649,20 +650,25 @@ function main()
 
         # For each 'number of processes' and 'threads distribution' combinaison, create a new job
         for (processes, distribution) in build_inti_combinaisons(measure, inti_index)
-            # Launch a new INTI job on a compute node
-
             processes == 1 || error("Running multiple processes at once is not yet implemented")  # TODO
 
-            inti_options = [
-                "-p", measure.node,
-                "-n", processes,                   # Number of processes
-                "-E", "-m block:$(distribution)",  # Threads distribution
-                # Allocate for the maximum number of threads needed
-                # To make sure that there is enough memory available, there is a minimum number of core allocated.
-                "-c", max(maximum(measure.threads), min_inti_cores)
-            ]
-            cmd = inti_cmd(inti_options, i, inti_index)
-            println("Starting INTI job: ", cmd)
+            if isempty(measure.node)
+                println("Running outside of INTI: cannot control processes count and distribution type")
+                cmd = no_inti_cmd(i, inti_index)
+            else
+                # Launch a new INTI job on a compute node
+                inti_options = [
+                    "-p", measure.node,
+                    "-n", processes,                   # Number of processes
+                    "-E", "-m block:$(distribution)",  # Threads distribution
+                    # Allocate for the maximum number of threads needed
+                    # To make sure that there is enough memory available, there is a minimum number of core allocated.
+                    "-c", max(maximum(measure.threads), min_inti_cores)
+                ]
+                cmd = inti_cmd(inti_options, i, inti_index)
+                println("Starting INTI job: ", cmd)
+            end
+
             run(cmd)
             inti_index += 1
         end
