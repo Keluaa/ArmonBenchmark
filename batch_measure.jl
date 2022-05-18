@@ -464,7 +464,7 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_si
         "--verbose", (measure.verbose ? 2 : 5)
     ])
 
-    println("Running Julia with: $(threads) threads (std: $(std_lib_threads)), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
+    println("Running Julia with: $(threads) threads (exclusive: $(exclusive))), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
 
     run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
 end
@@ -565,7 +565,7 @@ end
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, 
         threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, 
-        std_lib_threads::String, exclusive::Bool
+        std_lib_threads::String, exclusive::Bool,
         block_size::Int, use_simd::Int, ieee_bits::Int, 
         compiler::Compiler, backend::Backend)
     # Build a file name based on the measurement name and the parameters that don't have a single value
@@ -681,19 +681,27 @@ function build_data_file_base_name(measure::MeasureParams,
         block_size::Int, use_simd::Int, ieee_bits::Int, 
         compiler::Compiler, backend::Backend)
     # Overload used for the Kokkos' backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, 0, use_simd, ieee_bits, "", false, compiler, backend)
+    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, "", false, 0, use_simd, ieee_bits, compiler, backend)
 end
 
 
-function build_data_file_base_name(measure::MeasureParams, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, use_simd, ieee_bits, compiler, backend)
+function build_data_file_base_name(measure::MeasureParams, 
+        processes::Int, distribution::String, 
+        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
+        use_simd::Int, ieee_bits::Int, 
+        compiler::Compiler, backend::Backend)
     # Overload used for the C++'s backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, 0, use_simd, ieee_bits, "", false, compiler, backend)
+    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, "", false, 0, use_simd, ieee_bits, compiler, backend)
 end
 
 
-function build_data_file_base_name(measure::MeasureParams, processes, distribution, threads, block_size, use_simd, ieee_bits, std_lib_threads, exclusive, backend)
+function build_data_file_base_name(measure::MeasureParams, 
+        processes::Int, distribution::String, 
+        threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
+        std_lib_threads::String, exclusive::Bool,
+        backend::Backend)
     # Overload used for the Julia's backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, "", "", "", block_size, use_simd, ieee_bits, std_lib_threads, exclusive, GCC, backend)
+    return build_data_file_base_name(measure, processes, distribution, threads, "", "", "", std_lib_threads, exclusive, block_size, use_simd, ieee_bits, GCC, backend)
 end
 
 
