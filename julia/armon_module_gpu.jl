@@ -1004,6 +1004,7 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 	dt::params.data_type  = 0.
 
 	t1 = time_ns()
+	t_warmup = t1
 
 	while t < maxtime && cycle < maxcycle
 	    @time_pos params "boundaryConditions" boundaryConditions!(params, rho, umat, pmat, cmat, gmat)
@@ -1027,20 +1028,27 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 		if silent <= 1
 			println("Cycle = ", cycle, ", dt = ", dt, ", t = ", t)
 	    end
+
+		if cycle == 5
+			t_warmup = time_ns()
+		end
 	end
 
 	t2 = time_ns()
 	
+	grind_time = (t2 - t_warmup) / ((cycle - 5)*nbcell)
+
 	if silent < 3
 		println(" ")
 		println("Time:       ", round((t2 - t1) / 1e9, digits=5), " sec")
-		println("Grind time: ", round((t2 - t1) / (cycle*nbcell) / 1e3, digits=5), " µs/cell/cycle")
-		println("Cells/sec:  ", round((cycle*nbcell) / (t2 - t1) * 1e3, digits=5), " Mega cells/sec")
+		println("Warmup:     ", round(t_warmup / 1e9, digits=5), " sec")
+		println("Grind time: ", round(grind_time / 1e3, digits=5), " µs/cell/cycle")
+		println("Cells/sec:  ", round(1 / grind_time * 1e3, digits=5), " Mega cells/sec")
 		println("Cycles: ", cycle)
 		println(" ")
 	end
 
-	return params.data_type((cycle*nbcell) / (t2 - t1))
+	return params.data_type(grind_time)
 end
 
 #
