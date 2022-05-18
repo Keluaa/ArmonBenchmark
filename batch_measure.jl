@@ -770,8 +770,6 @@ function setup_env()
     ENV["HIP_CLANG"] = "/opt/rocm-4.5.0/llvm/bin"
     ENV["HSA_PATH"] = "/opt/rocm-4.5.0/hsa"
 
-    #ENV["JULIA_EXCLUSIVE"] = 1
-
     # Make sure that the output folders exist
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
