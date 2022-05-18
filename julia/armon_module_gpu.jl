@@ -140,6 +140,26 @@ end
 # Threading and SIMD control macros
 #
 
+
+const USE_STD_LIB_THREADS = haskey(ENV, "USE_STD_LIB_THREADS") && ENV["USE_STD_LIB_THREADS"] == "true"
+
+
+"""
+Controls which multi-threading librairy to use.
+"""
+macro threads(expr)
+    if USE_STD_LIB_THREADS
+        return esc(quote
+            Threads.@threads $(expr)
+        end)
+    else
+        return esc(quote
+            @batch $(expr)
+        end)
+    end
+end
+
+
 """
 Allows to enable/disable multithreading of the loop depending on the parameters.
 
@@ -154,7 +174,7 @@ macro threaded(expr)
 
     return esc(quote
         if params.use_threading
-            @inbounds @batch $(expr)
+            @inbounds @threads $(expr)
         else
             $(expr)
         end
@@ -210,7 +230,7 @@ macro simd_threaded_loop(expr)
                     __num_threads = Threads.nthreads()
                     __first_i = first(__loop_range)
                     __last_i = last(__loop_range)
-                    @batch for __i_thread = 1:__num_threads
+                    @threads for __i_thread = 1:__num_threads
                         @fastmath @inbounds @simd ivdep $(interleaved_loop_expr)
                     end
                 else
@@ -220,14 +240,14 @@ macro simd_threaded_loop(expr)
                     __batch = convert(Int, cld(__total_iter, __num_threads))::Int  # __total_iter ÷ __num_threads
                     __first_i = first(__loop_range)
                     __last_i = last(__loop_range)
-                    @batch for __i_thread = 1:__num_threads
+                    @threads for __i_thread = 1:__num_threads
                         __ideb = __first_i + (__i_thread - 1) * __batch
                         __ifin = ifelse(__i_thread == __num_threads, __last_i, __ideb + __batch)
                         @fastmath @inbounds @simd ivdep $(modified_loop_expr)
                     end
                 end
             else
-                @inbounds @batch $(expr)
+                @inbounds @threads $(expr)
             end
         else
             if params.use_simd

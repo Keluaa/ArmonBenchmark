@@ -112,6 +112,14 @@ while i <= length(ARGS)
     elseif arg == "--gnuplot-script"
         global gnuplot_script = ARGS[i+1]
         global i += 1
+    elseif arg == "--use-std-threads"
+        use_std_threads = parse(Bool, ARGS[i+1])
+        if use_std_threads
+            ENV["USE_STD_LIB_THREADS"] = "true"
+        else
+            ENV["USE_STD_LIB_THREADS"] = "false"
+        end
+        global i += 1
     else
         println("Wrong option: ", arg)
         exit(1)

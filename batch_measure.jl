@@ -24,6 +24,8 @@ mutable struct MeasureParams
     omp_schedule::Vector{String}
     omp_proc_bind::Vector{String}
     omp_places::Vector{String}
+    std_lib_threads::Vector{String}
+    exclusive::Vector{Bool}
 
     # Armon params
     cells_list::Vector{Int}
@@ -98,6 +100,8 @@ function parse_measure_params(file_line_parser)
     omp_schedule = ["static"]
     omp_proc_bind = ["spread"]
     omp_places = ["cores"]
+    use_std_lib_threads = ["false"]
+    jl_exclusive = [true]
     cells_list = [12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6]
     tests_list = ["Sod"]
     common_armon_params = [
@@ -184,6 +188,10 @@ function parse_measure_params(file_line_parser)
             omp_proc_bind = strip.(split(value, ';'))
         elseif option == "omp_places"
             omp_places = strip.(split(value, ';'))
+        elseif option == "jl_std_threads"
+            use_std_lib_threads = strip.(split(value, ','))
+        elseif option == "jl_exclusive"
+            jl_exclusive = parse.(Bool, split(value, ','))
         elseif option == "cells"
             cells_list = parse.(Float64, split(value, ','))
         elseif option == "tests"
@@ -230,7 +238,7 @@ function parse_measure_params(file_line_parser)
 
     return MeasureParams(device, node, distributions, processes, max_time,
         backends, threads, block_sizes, ieee_bits, use_simd, compilers,
-        omp_schedule, omp_proc_bind, omp_places,
+        omp_schedule, omp_proc_bind, omp_places, use_std_lib_threads, jl_exclusive,
         cells_list, tests_list, common_armon_params,
         name, gnuplot_script, plot_file, log_scale, plot_title, verbose)
 end
@@ -297,7 +305,9 @@ function parse_combinaisons(measure::MeasureParams, backend::Backend)
             measure.threads,
             measure.block_sizes,
             measure.use_simd,
-            measure.ieee_bits
+            measure.ieee_bits,
+            measure.std_lib_threads,
+            measure.exclusive
         )
     elseif backend == CPP
         return Iterators.product(
@@ -419,8 +429,12 @@ function maybe_recompile(device::Device, _, use_simd::Int, ieee_bits::Int, compi
 end
 
 
-function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, base_file_name::String)
+function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, std_lib_threads::String, exclusive::Bool, base_file_name::String)
     armon_options = []
+
+    if exclusive
+        ENV["JULIA_EXCLUSIVE"] = 1
+    end
 
     if measure.device == CUDA
         append!(armon_options, ["--gpu", "CUDA"])
@@ -444,12 +458,13 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_si
         "--ieee", ieee_bits,
         "--tests", join(measure.tests_list, ','),
         "--cells-list", join(string.(cells_list), ','),
+        "--use-std-threads", std_lib_threads,
         "--data-file", base_file_name,
         "--gnuplot-script", measure.gnuplot_script,
         "--verbose", (measure.verbose ? 2 : 5)
     ])
 
-    println("Running Julia with: $(threads) threads, $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
+    println("Running Julia with: $(threads) threads (std: $(std_lib_threads)), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
 
     run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
 end
@@ -550,6 +565,7 @@ end
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, 
         threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, 
+        std_lib_threads::String, exclusive::Bool
         block_size::Int, use_simd::Int, ieee_bits::Int, 
         compiler::Compiler, backend::Backend)
     # Build a file name based on the measurement name and the parameters that don't have a single value
@@ -643,21 +659,41 @@ function build_data_file_base_name(measure::MeasureParams,
             name *= "_$(omp_places)"
             legend *= ", places: $(omp_places)"
         end
+    elseif backend == Julia
+        if length(measure.std_lib_threads) > 1
+            name *= "_std_th=$(std_lib_threads)"
+            legend *= ", std threads: $(std_lib_threads)"
+        end
+        
+        if length(measure.exclusive) > 1
+            name *= "_excl=$(exclusive)"
+            legend *= ", exclusive: $(exclusive)"
+        end
     end
 
     return name * "_", legend
 end
 
 
-function build_data_file_base_name(measure::MeasureParams, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, use_simd, ieee_bits, compiler, backend)
-    # Overload used for the C++'s backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, 0, use_simd, ieee_bits, compiler, backend)
+function build_data_file_base_name(measure::MeasureParams, 
+        processes::Int, distribution::String, 
+        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
+        block_size::Int, use_simd::Int, ieee_bits::Int, 
+        compiler::Compiler, backend::Backend)
+    # Overload used for the Kokkos' backend parameters
+    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, 0, use_simd, ieee_bits, "", false, compiler, backend)
 end
 
 
-function build_data_file_base_name(measure::MeasureParams, processes, distribution, threads, block_size, use_simd, ieee_bits, backend)
+function build_data_file_base_name(measure::MeasureParams, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, use_simd, ieee_bits, compiler, backend)
+    # Overload used for the C++'s backend parameters
+    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, 0, use_simd, ieee_bits, "", false, compiler, backend)
+end
+
+
+function build_data_file_base_name(measure::MeasureParams, processes, distribution, threads, block_size, use_simd, ieee_bits, std_lib_threads, exclusive, backend)
     # Overload used for the Julia's backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, "", "", "", block_size, use_simd, ieee_bits, GCC, backend)
+    return build_data_file_base_name(measure, processes, distribution, threads, "", "", "", block_size, use_simd, ieee_bits, std_lib_threads, exclusive, GCC, backend)
 end
 
 
