@@ -53,6 +53,8 @@ min_inti_cores = 4  # Minimun number of cores which will be allocated for each I
 
 max_cells_for_one_thread = 1e6  # Serial programs can take too much time for large number of cells
 
+required_modules = ["cuda", "rocm", "hwloc"]
+
 base_make_options = "-j4"
 
 julia_script_path = "./julia/run_julia.jl"
@@ -727,6 +729,26 @@ function setup_env()
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
     mkpath(plots_dir)
+
+    # Are we in a login node?
+    in_login_node = readchomp(`hostname`) == "login1"
+    if in_login_node
+        # Check if all of the required modules are loaded
+        modules_list_raw = readchomp(`bash -c "module list"`)
+        missing_modules = copy(required_modules)
+        for module_name in eachmatch(r"\d+\)\s+([^\s]+)", modules_list_raw)
+            for (i, missing_module) in enumerate(missing_modules)
+                if startswith(module_name.captures[1], missing_module)
+                    deleteat!(missing_modules, i)
+                    break
+                end
+            end
+        end
+
+        if length(missing_modules) > 0
+            error("Missing modules: " * String(missing_modules))
+        end
+    end
 end
 
 
