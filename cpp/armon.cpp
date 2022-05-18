@@ -241,9 +241,9 @@ OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat,
             }
             else {
                 rho[i] =  10000.;
-			    umat[i] = 250.;
-			    emat[i] = 0.;
-			    Emat[i] = emat[i] + flt_t(0.5) * std::pow(umat[i], flt_t(2));
+                umat[i] = 250.;
+                emat[i] = 0.;
+                Emat[i] = emat[i] + flt_t(0.5) * std::pow(umat[i], flt_t(2));
             }
         }
         BizarriumEOS();

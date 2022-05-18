@@ -30,57 +30,57 @@ gnuplot_script = ""
 i = 1
 while i <= length(ARGS)
     arg = ARGS[i]
-	if arg == "-s"
-		global scheme=Symbol(replace(ARGS[i+1], '-' => '_'))
+    if arg == "-s"
+        global scheme=Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
-	elseif arg == "--ieee"
-		global ieee_bits = parse(Int, ARGS[i+1])
+    elseif arg == "--ieee"
+        global ieee_bits = parse(Int, ARGS[i+1])
         global i += 1
     elseif arg == "--cycle"
-		global maxcycle = parse(Int, ARGS[i+1])
+        global maxcycle = parse(Int, ARGS[i+1])
         global i += 1
     elseif arg == "--riemann"
-		global riemann = Symbol(replace(ARGS[i+1], '-' => '_'))
+        global riemann = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
-	elseif arg == "--iterations"
-		global iterations = parse(Int, ARGS[i+1])
+    elseif arg == "--iterations"
+        global iterations = parse(Int, ARGS[i+1])
         global i += 1
     elseif arg == "--verbose"
-		global silent = parse(Int, ARGS[i+1])
+        global silent = parse(Int, ARGS[i+1])
         global i += 1
-	elseif arg == "--time"
-		global maxtime = parse(Float64, ARGS[i+1])
+    elseif arg == "--time"
+        global maxtime = parse(Float64, ARGS[i+1])
         global i += 1
     elseif arg == "--cfl"
-		global cfl = parse(Float64, ARGS[i+1])
+        global cfl = parse(Float64, ARGS[i+1])
         global i += 1
-	elseif arg == "--dt"
-		global Dt = parse(Float64, ARGS[i+1])
+    elseif arg == "--dt"
+        global Dt = parse(Float64, ARGS[i+1])
         global i += 1
-	elseif arg == "--write-output"
-		global write_output = parse(Bool, ARGS[i+1])
-		global i += 1
-	elseif arg == "--use-ccall"
-		global use_ccall = parse(Bool, ARGS[i+1])
-		global i += 1
-	elseif arg == "--use-threading"
-		global use_threading = parse(Bool, ARGS[i+1])
-		global i += 1
-	elseif arg == "--use-simd"
-		global use_simd = parse(Bool, ARGS[i+1])
-		global i += 1
-	elseif arg == "--interleaving"
-		global interleaving = parse(Bool, ARGS[i+1])
-		global i += 1
-	elseif arg == "--use-gpu"
-		global use_gpu = parse(Bool, ARGS[i+1])
-		global i += 1
-	elseif arg == "--euler"
-		global euler_projection = parse(Bool, ARGS[i+1])
-		global i += 1
-	elseif arg == "--cst-dt"
-		global cst_dt = parse(Bool, ARGS[i+1])
-		global i += 1
+    elseif arg == "--write-output"
+        global write_output = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--use-ccall"
+        global use_ccall = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--use-threading"
+        global use_threading = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--use-simd"
+        global use_simd = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--interleaving"
+        global interleaving = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--use-gpu"
+        global use_gpu = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--euler"
+        global euler_projection = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--cst-dt"
+        global cst_dt = parse(Bool, ARGS[i+1])
+        global i += 1
 
     # Additionnal params
     elseif arg == "--gpu"
@@ -115,7 +115,7 @@ while i <= length(ARGS)
     else
         println("Wrong option: ", arg)
         exit(1)
-	end
+    end
     global i += 1
 end
 
