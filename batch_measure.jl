@@ -50,6 +50,7 @@ armon_base_options = [
     "--verbose", "2"
 ]
 min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
+max_inti_cores = 128  # Maximum number of cores in a node
 
 base_make_options = "-j4"
 
@@ -709,6 +710,8 @@ function setup_env()
     ENV["HIP_CLANG"] = "/opt/rocm-4.5.0/llvm/bin"
     ENV["HSA_PATH"] = "/opt/rocm-4.5.0/hsa"
 
+    #ENV["JULIA_EXCLUSIVE"] = 1
+
     # Make sure that the output folders exist
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
@@ -750,7 +753,7 @@ function main()
 		    "-x",                              # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to further control threads/memory usage
                     # Allocate for the maximum number of threads needed
                     # To make sure that there is enough memory available, there is a minimum number of core allocated.
-                    "-c", max(maximum(measure.threads), min_inti_cores)
+                    "-c", min(max(maximum(measure.threads), min_inti_cores), max_inti_cores)
                 ]
                 cmd = inti_cmd(inti_options, i, inti_index)
                 println("Starting INTI job: ", cmd)
