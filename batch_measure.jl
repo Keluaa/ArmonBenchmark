@@ -746,7 +746,8 @@ function setup_env()
         end
 
         if length(missing_modules) > 0
-            error("Missing modules: " * String(missing_modules))
+            println("Missing modules: ", missing_modules)
+            error("Some modules are missing")
         end
     end
 end
