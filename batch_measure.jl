@@ -52,6 +52,10 @@ armon_base_options = [
 min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
 max_inti_cores = 128  # Maximum number of cores in a node
 
+max_cells_for_one_thread = 1e6  # Serial programs can take too much time for large number of cells
+
+required_modules = ["cuda", "rocm", "hwloc"]
+
 base_make_options = "-j4"
 
 julia_script_path = "./julia/run_julia.jl"
@@ -426,6 +430,12 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_si
         # no option needed for CPU
     end
 
+    if threads == 1
+        cells_list = filter(x -> x < max_cells_for_one_thread, measure.cells_list)
+    else
+        cells_list = measure.cells_list
+    end
+
     append!(armon_options, armon_base_options)
     append!(armon_options, measure.common_armon_params)
     append!(armon_options, [
@@ -433,7 +443,7 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_si
         "--use-simd", use_simd,
         "--ieee", ieee_bits,
         "--tests", join(measure.tests_list, ','),
-        "--cells-list", join(string.(measure.cells_list), ','),
+        "--cells-list", join(string.(cells_list), ','),
         "--data-file", base_file_name,
         "--gnuplot-script", measure.gnuplot_script,
         "--verbose", (measure.verbose ? 2 : 5)
@@ -490,12 +500,18 @@ end
 
 
 function run_armon(measure::MeasureParams, backend::Backend, threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, exe_path::String, base_file_name::String)
-    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, binding: $(omp_proc_bind), places: $(omp_places)")
+    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places)")
+
+    if threads == 1
+        cells_list = filter(x -> x < max_cells_for_one_thread, measure.cells_list)
+    else
+        cells_list = measure.cells_list
+    end
 
     for test in measure.tests_list
         data_file_name = base_file_name * test * ".csv"
 
-        for cells in measure.cells_list
+        for cells in cells_list
             armon_options = [
                 "-t", test,
                 "--cells", cells
@@ -716,6 +732,26 @@ function setup_env()
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
     mkpath(plots_dir)
+
+    # Are we in a login node?
+    in_login_node = readchomp(`hostname`) == "login1"
+    if in_login_node
+        # Check if all of the required modules are loaded
+        modules_list_raw = readchomp(`bash -c "module list"`)
+        missing_modules = copy(required_modules)
+        for module_name in eachmatch(r"\d+\)\s+([^\s]+)", modules_list_raw)
+            for (i, missing_module) in enumerate(missing_modules)
+                if startswith(module_name.captures[1], missing_module)
+                    deleteat!(missing_modules, i)
+                    break
+                end
+            end
+        end
+
+        if length(missing_modules) > 0
+            error("Missing modules: " * String(missing_modules))
+        end
+    end
 end
 
 
@@ -750,7 +786,7 @@ function main()
                     "-p", measure.node,
                     "-n", processes,                   # Number of processes
                     "-E", "-m block:$(distribution)",  # Threads distribution
-		    "-x",                              # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to further control threads/memory usage
+                    "-x",                              # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to further control threads/memory usage
                     # Allocate for the maximum number of threads needed
                     # To make sure that there is enough memory available, there is a minimum number of core allocated.
                     "-c", min(max(maximum(measure.threads), min_inti_cores), max_inti_cores)
