@@ -25,6 +25,8 @@ cells_list = []
 
 base_file_name = ""
 gnuplot_script = ""
+gnuplot_hist_script = ""
+time_histogram = false
 
 
 i = 1
@@ -112,6 +114,12 @@ while i <= length(ARGS)
     elseif arg == "--gnuplot-script"
         global gnuplot_script = ARGS[i+1]
         global i += 1
+    elseif arg == "--gnuplot-hist-script"
+        global gnuplot_hist_script = ARGS[i+1]
+        global i += 1
+    elseif arg == "--time-histogram"
+        global time_histogram = parse(Bool, ARGS[i+1])
+        global i += 1
     elseif arg == "--use-std-threads"
         use_std_threads = parse(Bool, ARGS[i+1])
         if use_std_threads
@@ -141,11 +149,14 @@ end
 
 for test in tests
     data_file_name = base_file_name * string(test) * ".csv"
+    hist_file_name = base_file_name * string(test) * "_hist.csv"
+
+    total_time_contrib = nothing
 
     for cells in cells_list
         @printf(" - %s, %-10g cells: ", test, cells)
 
-        cells_per_sec = armon(ArmonParameters(; ieee_bits, test, riemann, scheme, iterations, nbcell=cells, cfl, Dt, euler_projection, cst_dt, maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd, interleaving, use_gpu))
+        cells_per_sec, time_contrib = armon(ArmonParameters(; ieee_bits, test, riemann, scheme, iterations, nbcell=cells, cfl, Dt, euler_projection, cst_dt, maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd, interleaving, use_gpu))
         
         @printf("%.2g Giga cells/sec\n", cells_per_sec)
 
@@ -157,6 +168,26 @@ for test in tests
         if !isempty(gnuplot_script)
             # We redirect the output of gnuplot to null so that there is no warning messages displayed
             run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
+        end
+
+        if isnothing(total_time_contrib)
+            total_time_contrib = time_contrib
+        else
+            total_time_contrib = map((e, e′) -> (e.first => (e.second + e′.second)), total_time_contrib, time_contrib)
+        end
+    end
+
+    if time_histogram
+        open(hist_file_name, "a") do data_file
+            for (label, time) in total_time_contrib
+                label = replace(label, '_' => "\\\\_", '!' => "")
+                println(data_file, '"', label, "\", ", time / length(cells_list))
+            end
+        end
+
+        if !isempty(gnuplot_hist_script)
+            # Update the histogram
+            run(pipeline(`gnuplot $(gnuplot_hist_script)`, stdout=devnull, stderr=devnull))
         end
     end
 end

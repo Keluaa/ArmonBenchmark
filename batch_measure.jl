@@ -39,6 +39,9 @@ mutable struct MeasureParams
     log_scale::Bool
     plot_title::String
     verbose::Bool
+    time_histogram::Bool
+    gnuplot_hist_script::String
+    hist_plot_file::String
 end
 
 
@@ -56,7 +59,7 @@ max_inti_cores = 128  # Maximum number of cores in a node
 
 max_cells_for_one_thread = 1e6  # Serial programs can take too much time for large number of cells
 
-required_modules = ["cuda", "rocm", "hwloc"]
+required_modules = ["cuda", "rocm", "hwloc"]  # Modules required by most backends to run properly
 
 base_make_options = "-j4"
 
@@ -80,10 +83,20 @@ set xlabel 'Cells count'
 set title "$(title)"
 set key left top
 $(log_scale ? "set logscale x" : "")
+`echo "$(graph_file_name)" > ./plots/last_update`
+plot """
+
+base_gnuplot_histogram_script_commands(graph_file_name, title) = """
+set terminal pdfcairo color size 10in, 6in
+set output '$(graph_file_name)'
+set ylabel 'Total loop time (%)'
+set title "$(title)"
+set key left top
+set style fill solid 1.00 border 0
 plot """
 
 gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
-
+gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
 
 function parse_measure_params(file_line_parser)    
     device = CPU
@@ -115,6 +128,7 @@ function parse_measure_params(file_line_parser)
     log_scale = true
     plot_title = nothing
     verbose = false
+    time_histogram = false
 
     last_i = 0
     for (i, line) in file_line_parser
@@ -210,6 +224,8 @@ function parse_measure_params(file_line_parser)
             log_scale = parse(Bool, value)
         elseif option == "verbose"
             verbose = parse(Bool, value)
+        elseif option == "time_hist"
+            time_histogram = parse(Bool, value)
         else
             error("Unknown option: $(option), at line $(i)")
         end
@@ -232,15 +248,23 @@ function parse_measure_params(file_line_parser)
         plot_title = "You forgot to add a title"
     end
 
+    if time_histogram && length(tests_list) > 1
+        error("The histogram can only be made when there is only a single test to do")
+    end
+
     mkpath(data_dir * name)
     gnuplot_script = plot_scripts_dir * gnuplot_script
     plot_file = plots_dir * plot_file
+
+    gnuplot_hist_script = plot_scripts_dir * name * "_hist.plot"
+    hist_plot_file = plots_dir * name * "_hist.pdf"
 
     return MeasureParams(device, node, distributions, processes, max_time,
         backends, threads, block_sizes, ieee_bits, use_simd, compilers,
         omp_schedule, omp_proc_bind, omp_places, use_std_lib_threads, jl_exclusive,
         cells_list, tests_list, common_armon_params,
-        name, gnuplot_script, plot_file, log_scale, plot_title, verbose)
+        name, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
+        time_histogram, gnuplot_hist_script, hist_plot_file)
 end
 
 
@@ -429,7 +453,9 @@ function maybe_recompile(device::Device, _, use_simd::Int, ieee_bits::Int, compi
 end
 
 
-function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, std_lib_threads::String, exclusive::Bool, base_file_name::String)
+function run_julia(measure::MeasureParams, 
+        threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
+        std_lib_threads::String, exclusive::Bool, base_file_name::String)
     armon_options = []
 
     if exclusive
@@ -461,10 +487,12 @@ function run_julia(measure::MeasureParams, threads::Int, block_size::Int, use_si
         "--use-std-threads", std_lib_threads,
         "--data-file", base_file_name,
         "--gnuplot-script", measure.gnuplot_script,
-        "--verbose", (measure.verbose ? 2 : 5)
+        "--verbose", (measure.verbose ? 2 : 5),
+        "--gnuplot-hist-script", measure.gnuplot_hist_script,
+        "--time-histogram", measure.time_histogram
     ])
 
-    println("Running Julia with: $(threads) threads (exclusive: $(exclusive))), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
+    println("Running Julia with: $(threads) threads (exclusive: $(exclusive)), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
 
     run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
 end
@@ -514,7 +542,9 @@ function run_and_parse_output(cmd, verbose)
 end
 
 
-function run_armon(measure::MeasureParams, backend::Backend, threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, exe_path::String, base_file_name::String)
+function run_armon(measure::MeasureParams, backend::Backend, 
+        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, 
+        exe_path::String, base_file_name::String)
     println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places)")
 
     if threads == 1
@@ -564,9 +594,7 @@ end
 
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, 
-        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, 
-        std_lib_threads::String, exclusive::Bool,
-        block_size::Int, use_simd::Int, ieee_bits::Int, 
+        threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
         compiler::Compiler, backend::Backend)
     # Build a file name based on the measurement name and the parameters that don't have a single value
     name = data_dir * measure.name * "/"
@@ -585,8 +613,8 @@ function build_data_file_base_name(measure::MeasureParams,
         legend *= "ROCM"
     end
 
-    name *= "_" * measure.node
-    legend *= isempty(measure.node) ? "" : ", " * measure.node
+    name *= isempty(measure.node) ? "_local" : "_" * measure.node
+    legend *= isempty(measure.node) ? ", local" : ", " * measure.node
 
     if length(measure.distributions) > 1
         name *= "_" * distribution
@@ -644,31 +672,31 @@ function build_data_file_base_name(measure::MeasureParams,
         legend *= ", $(threads) Threads"
     end
 
-    if backend == CPP || backend == Kokkos
-        if length(measure.omp_schedule) > 1
-            name *= "_$(omp_schedule)"
-            legend *= ", $(omp_schedule)"
-        end
+    return name, legend
+end
+
+
+function build_data_file_base_name(measure::MeasureParams, 
+        processes::Int, distribution::String, 
+        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
+        block_size::Int, use_simd::Int, ieee_bits::Int, 
+        compiler::Compiler, backend::Backend)
+    # Overload used by the Kokkos and C++ backends
+    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
     
-        if length(measure.omp_proc_bind) > 1
-            name *= "_$(omp_proc_bind)"
-            legend *= ", $(omp_proc_bind)"
-        end
-    
-        if length(measure.omp_places) > 1
-            name *= "_$(omp_places)"
-            legend *= ", places: $(omp_places)"
-        end
-    elseif backend == Julia
-        if length(measure.std_lib_threads) > 1
-            name *= "_std_th=$(std_lib_threads)"
-            legend *= ", std threads: $(std_lib_threads)"
-        end
-        
-        if length(measure.exclusive) > 1
-            name *= "_excl=$(exclusive)"
-            legend *= ", exclusive: $(exclusive)"
-        end
+    if length(measure.omp_schedule) > 1
+        name *= "_$(omp_schedule)"
+        legend *= ", $(omp_schedule)"
+    end
+
+    if length(measure.omp_proc_bind) > 1
+        name *= "_$(omp_proc_bind)"
+        legend *= ", $(omp_proc_bind)"
+    end
+
+    if length(measure.omp_places) > 1
+        name *= "_$(omp_places)"
+        legend *= ", places: $(omp_places)"
     end
 
     return name * "_", legend
@@ -678,20 +706,11 @@ end
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, 
         threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
-        block_size::Int, use_simd::Int, ieee_bits::Int, 
-        compiler::Compiler, backend::Backend)
-    # Overload used for the Kokkos' backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, "", false, 0, use_simd, ieee_bits, compiler, backend)
-end
-
-
-function build_data_file_base_name(measure::MeasureParams, 
-        processes::Int, distribution::String, 
-        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
         use_simd::Int, ieee_bits::Int, 
         compiler::Compiler, backend::Backend)
-    # Overload used for the C++'s backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, "", false, 0, use_simd, ieee_bits, compiler, backend)
+    # Overload used by the C++'s backend
+    name, legend = build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, 0, use_simd, ieee_bits, compiler, backend)
+    return name * "_", legend
 end
 
 
@@ -700,13 +719,26 @@ function build_data_file_base_name(measure::MeasureParams,
         threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
         std_lib_threads::String, exclusive::Bool,
         backend::Backend)
-    # Overload used for the Julia's backend parameters
-    return build_data_file_base_name(measure, processes, distribution, threads, "", "", "", std_lib_threads, exclusive, block_size, use_simd, ieee_bits, GCC, backend)
+    # Overload used by the Julia backend
+    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, GCC, backend)
+
+    if length(measure.std_lib_threads) > 1
+        name *= "_std_th=$(std_lib_threads)"
+        legend *= ", std threads: $(std_lib_threads)"
+    end
+    
+    if length(measure.exclusive) > 1
+        name *= "_excl=$(exclusive)"
+        legend *= ", exclusive: $(exclusive)"
+    end
+
+    return name * "_", legend
 end
 
 
 function create_all_data_files_and_plot(measure::MeasureParams)
     plot_commands = []
+    hist_commands = []
     for (processes, distribution) in build_inti_combinaisons(measure, 0)
         for backend in measure.backends
             # Marker style for the plot
@@ -728,6 +760,14 @@ function create_all_data_files_and_plot(measure::MeasureParams)
                     legend = "$(test), $(legend_base)"
                     plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
                     push!(plot_commands, plot_cmd)
+
+                    if measure.time_histogram
+                        hist_file_name = base_file_name * test * "_hist.csv"
+                        open(data_file_name, "w") do _ end  # Create/Clear the file
+                        legend = "$(test), $(legend_base)"
+                        plot_cmd = gnuplot_hist_plot_command(hist_file_name, legend, point_type)
+                        push!(hist_commands, plot_cmd)
+                    end
                 end
             end
         end
@@ -738,6 +778,15 @@ function create_all_data_files_and_plot(measure::MeasureParams)
         print(gnuplot_script, base_gnuplot_script_commands(measure.plot_file, measure.plot_title, measure.log_scale))
         plot_cmd = join(plot_commands, ", \\\n     ")
         println(gnuplot_script, plot_cmd)
+    end
+
+    if measure.time_histogram
+        # Same for the histogram plot script
+        open(measure.gnuplot_hist_script, "w") do gnuplot_script
+            print(gnuplot_script, base_gnuplot_histogram_script_commands(measure.hist_plot_file, measure.plot_title))
+            plot_cmd = join(hist_commands, ", \\\n     ")
+            println(gnuplot_script, plot_cmd)
+        end
     end
 end
 

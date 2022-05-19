@@ -1,4 +1,5 @@
-./cpp/armon.exe
-./data
-./plots
-./plot_scripts
+cpp/armon.exe
+data
+plots
+plot_scripts
+.idea

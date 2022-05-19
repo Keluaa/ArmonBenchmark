@@ -1126,10 +1126,10 @@ function armon(params::ArmonParameters)
 
     init_time = @elapsed init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
 
-     params.silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
+    silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
 
-    if params.silent <= -1
-        for i in params.ideb:params.ifin
+    if silent <= -1
+        for i in ideb:ifin
             println("Init, ", 0.5*(x[i]+x[i+1]), ", ", rho[i], ", ", umat[i], ", ", pmat[i], ", ", emat[i], ", ", cmat[i], ", ", gmat[i], "\n")
         end
     end
@@ -1156,9 +1156,9 @@ function armon(params::ArmonParameters)
             d_tmp_Erho = alloc_copy_GPU(tmp_Erho)
         end
 
-        params.silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
+        silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
-        if params.silent <= 3
+        if silent <= 3
             @time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, d_tmp_Erho)
         else
             cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, d_tmp_Erho)
@@ -1178,7 +1178,7 @@ function armon(params::ArmonParameters)
         copyto!(ustar_1, d_ustar_1)
         copyto!(pstar_1, d_pstar_1)
     else
-        if params.silent <= 3
+        if silent <= 3
             @time cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
         else
             cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
@@ -1197,7 +1197,7 @@ function armon(params::ArmonParameters)
         end
     end
 
-    return cells_per_sec
+    return cells_per_sec, sort(collect(time_contrib))
 end
 
 
