@@ -1,6 +1,7 @@
 
 using Printf
 
+include("omp_simili.jl")
 
 scheme = :GAD_minmod
 riemann = :acoustic
@@ -19,6 +20,8 @@ use_threading = true
 use_simd = true
 interleaving = false
 use_gpu = false
+threads_places = :cores
+threads_proc_bind = :close
 
 tests = []
 cells_list = []
@@ -128,12 +131,21 @@ while i <= length(ARGS)
             ENV["USE_STD_LIB_THREADS"] = "false"
         end
         global i += 1
+    elseif arg == "--threads-places"
+        global threads_places = Symbol(ARGS[i+1])
+        global i += 1
+    elseif arg == "--threads-proc-bind"
+        global threads_proc_bind = Symbol(ARGS[i+1])
+        global i += 1
     else
         println("Wrong option: ", arg)
         exit(1)
     end
     global i += 1
 end
+
+
+omp_bind_threads(threads_places, threads_proc_bind)
 
 
 println("Loading...")

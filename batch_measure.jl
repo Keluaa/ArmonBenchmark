@@ -26,6 +26,8 @@ mutable struct MeasureParams
     omp_places::Vector{String}
     std_lib_threads::Vector{String}
     exclusive::Vector{Bool}
+    jl_proc_bind::Vector{String}
+    jl_places::Vector{String}
 
     # Armon params
     cells_list::Vector{Int}
@@ -115,6 +117,8 @@ function parse_measure_params(file_line_parser)
     omp_places = ["cores"]
     use_std_lib_threads = ["false"]
     jl_exclusive = [true]
+    jl_places = ["cores"]
+    jl_proc_bind = ["spread"]
     cells_list = [12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6]
     tests_list = ["Sod"]
     common_armon_params = [
@@ -206,6 +210,10 @@ function parse_measure_params(file_line_parser)
             use_std_lib_threads = strip.(split(value, ','))
         elseif option == "jl_exclusive"
             jl_exclusive = parse.(Bool, split(value, ','))
+        elseif option == "jl_places"
+            jl_places = split(value, ',')
+        elseif option == "jl_proc_bind"
+            jl_proc_bind = split(value, ',')
         elseif option == "cells"
             cells_list = parse.(Float64, split(value, ','))
         elseif option == "tests"
@@ -261,7 +269,8 @@ function parse_measure_params(file_line_parser)
 
     return MeasureParams(device, node, distributions, processes, max_time,
         backends, threads, block_sizes, ieee_bits, use_simd, compilers,
-        omp_schedule, omp_proc_bind, omp_places, use_std_lib_threads, jl_exclusive,
+        omp_schedule, omp_proc_bind, omp_places, 
+        use_std_lib_threads, jl_exclusive, jl_proc_bind, jl_places, 
         cells_list, tests_list, common_armon_params,
         name, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
         time_histogram, gnuplot_hist_script, hist_plot_file)
@@ -326,6 +335,8 @@ end
 function parse_combinaisons(measure::MeasureParams, backend::Backend)
     if backend == Julia
         return Iterators.product(
+            measure.jl_places,
+            measure.jl_proc_bind,
             measure.threads,
             measure.block_sizes,
             measure.use_simd,
@@ -454,6 +465,7 @@ end
 
 
 function run_julia(measure::MeasureParams, 
+        jl_places::String, jl_proc_bind::String,
         threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
         std_lib_threads::String, exclusive::Bool, base_file_name::String)
     armon_options = []
@@ -485,6 +497,8 @@ function run_julia(measure::MeasureParams,
         "--tests", join(measure.tests_list, ','),
         "--cells-list", join(string.(cells_list), ','),
         "--use-std-threads", std_lib_threads,
+        "--threads-places", jl_places,
+        "--threads-proc-bind", jl_proc_bind,
         "--data-file", base_file_name,
         "--gnuplot-script", measure.gnuplot_script,
         "--verbose", (measure.verbose ? 2 : 5),
@@ -492,7 +506,7 @@ function run_julia(measure::MeasureParams,
         "--time-histogram", measure.time_histogram
     ])
 
-    println("Running Julia with: $(threads) threads (exclusive: $(exclusive)), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
+    println("Running Julia with: $(threads) threads (exclusive: $(exclusive), places: $(jl_places), bind: $(jl_proc_bind)), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
 
     run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
 end
@@ -691,7 +705,7 @@ function build_data_file_base_name(measure::MeasureParams,
 
     if length(measure.omp_proc_bind) > 1
         name *= "_$(omp_proc_bind)"
-        legend *= ", $(omp_proc_bind)"
+        legend *= ", bind: $(omp_proc_bind)"
     end
 
     if length(measure.omp_places) > 1
@@ -716,11 +730,22 @@ end
 
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, 
+        jl_places::String, jl_proc_bind::String,
         threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
         std_lib_threads::String, exclusive::Bool,
         backend::Backend)
     # Overload used by the Julia backend
     name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, GCC, backend)
+
+    if length(measure.jl_proc_bind) > 1
+        name *= "_$(jl_proc_bind)"
+        legend *= ", bind: $(jl_proc_bind)"
+    end
+
+    if length(measure.jl_places) > 1
+        name *= "_$(jl_places)"
+        legend *= ", places: $(jl_places)"
+    end
 
     if length(measure.std_lib_threads) > 1
         name *= "_std_th=$(std_lib_threads)"
