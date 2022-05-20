@@ -207,7 +207,7 @@ void init_test()
 
 OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat, emat, Emat, cmat, gmat))
         for (int i = ideb; i <= ifin; i++) {
-            x.emplate_back(flt_t(i - nb_ghosts) / flt_t(nb_cells));
+            x[i] = flt_t(i - nb_ghosts) / flt_t(nb_cells);
             if (x[i] < 0.5) {
                 rho[i] = 1.;
                 pmat[i] = 1.;

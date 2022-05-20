@@ -382,13 +382,13 @@ function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Int, compiler:
         # the makefile uses gcc by default
     elseif compiler == Clang
         println("using Clang")
-        push!(options, "use_clang=1")
+        push!(make_options, "use_clang=1")
     elseif compiler == ICC
         println("using ICC")
-        push!(options, "use_icc=1")
+        push!(make_options, "use_icc=1")
     else
         error("Wrong compiler")
-    end
+    end 
 
     run_cmd_print_on_error(Cmd(`make $(base_make_options) --quiet clean`, dir=cpp_make_dir))
     run_cmd_print_on_error(Cmd(`make $(base_make_options) $(make_options) $(cpp_make_target)`, dir=cpp_make_dir))
