@@ -145,7 +145,9 @@ while i <= length(ARGS)
 end
 
 
-omp_bind_threads(threads_places, threads_proc_bind)
+if !use_gpu
+    omp_bind_threads(threads_places, threads_proc_bind)
+end
 
 
 println("Loading...")

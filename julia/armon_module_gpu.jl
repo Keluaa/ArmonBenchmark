@@ -290,19 +290,13 @@ const block_size = haskey(ENV, "GPU_BLOCK_SIZE") ? parse(Int, ENV["GPU_BLOCK_SIZ
 const reduction_block_size = 1024;
 const reduction_block_size_log2 = convert(Int, log2(reduction_block_size))
 
+
 @kernel function gpu_acoustic_kernel!(i_0, ustar, pstar, @Const(rho), @Const(umat), @Const(pmat), @Const(cmat))
     i = @index(Global) + i_0
     rc_l = rho[i-1]*cmat[i-1]
     rc_r = rho[i]*cmat[i]
     ustar[i] = ( rc_l*umat[i-1] + rc_r*umat[i] + (pmat[i-1] - pmat[i]) ) / (rc_l + rc_r)
     pstar[i] = ( rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i]) ) / (rc_l + rc_r)
-end
-
-
-function gpu_acoustic!(ideb, ifin, ustar, pstar, rho, umat, pmat, cmat)
-    kernel = gpu_acoustic_kernel!(device, block_size)
-    event = kernel(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
-    wait(event)
 end
 
 
@@ -328,13 +322,6 @@ end
     
     ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p*(umat[i] - ustar_1[i]) - r_u_m*(ustar_1[i] - umat[i-1]))
     pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p*(pmat[i] - pstar_1[i]) - r_p_m*(pstar_1[i] - pmat[i-1]))
-end
-
-
-function gpu_acoustic_GAD_minmod!(ideb, ifin, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x)
-    kernel = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
-    event = kernel(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x, ndrange=length(ideb:ifin+1))
-    wait(event)
 end
 
 
@@ -385,19 +372,6 @@ end
 end
 
 
-function gpu_cell_update!(euler_proj, ideb, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, tmp_rho, tmp_urho, tmp_Erho)
-    if euler_proj
-        kernel = gpu_cell_update_euler_kernel!(device, block_size)
-        event = kernel(ideb - 1, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, ndrange=length(ideb:ifin))
-        wait(event)
-    else
-        kernel = gpu_cell_update_lagrange_kernel!(device, block_size)
-        event = kernel(ideb - 1, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, ndrange=length(ideb:ifin))
-        wait(event)
-    end
-end
-
-
 @kernel function gpu_first_order_euler_remap_kernel!(i_0, dt, X, @Const(ustar), rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
     i = @index(Global) + i_0
 
@@ -425,17 +399,6 @@ end
     rho[i] = tmp_rho[i]
     umat[i] = tmp_urho[i] / tmp_rho[i]
     Emat[i] = tmp_Erho[i] / tmp_rho[i]
-end
-
-
-function gpu_first_order_euler_remap!(ideb, ifin, dt, X, ustar, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
-    kernel_1 = gpu_first_order_euler_remap_kernel!(device, block_size)
-    kernel_2 = gpu_first_order_euler_remap_2_kernel!(device, block_size)
-
-    event = kernel_1(ideb - 1, dt, X, ustar, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
-    wait(event)
-    event = kernel_2(ideb - 1, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
-    wait(event)
 end
 
 
@@ -484,27 +447,6 @@ end
 end
 
 
-function gpu_update_EOS!(test, ideb, ifin, rho, emat, pmat, cmat, gmat)
-    if test == :Bizarrium
-        kernel = gpu_update_bizarrium_EOS_kernel!(device, block_size)
-        event = kernel(ideb - 1, rho, emat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
-    else
-        gamma::eltype(rho) = 0.0
-
-        if test == :Sod || test == :Woodward
-            gamma = 1.4
-        elseif test == :Leblanc
-            gamma = 5/3
-        end
-
-        kernel = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
-        event = kernel(ideb - 1, gamma, rho, emat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
-    end
-
-    wait(event)
-end
-
-
 @kernel function gpu_boundary_conditions_kernel!(test_bizarrium, ideb, ifin, rho, umat, pmat, cmat, gmat)
     rho[ideb-1]  = rho[ideb]
     umat[ideb-1] = -umat[ideb]
@@ -523,14 +465,6 @@ end
     else
         umat[ifin+1] = -umat[ifin]
     end
-end
-
-
-function gpu_boundary_conditions!(test, ideb, ifin, rho, umat, pmat, cmat, gmat)
-    test_bizarrium = test == :Bizarrium
-    kernel = gpu_boundary_conditions_kernel!(device, 1, 1)
-    event = kernel(test_bizarrium, ideb, ifin, rho, umat, pmat, cmat, gmat)
-    wait(event)
 end
 
 
@@ -573,15 +507,17 @@ end
 end
 
 
-function gpu_dtCFL_reduction!(euler, ideb, ifin, x, cmat, umat)
-    result = zeros(eltype(x), 1)
-    d_result = use_ROCM ? ROCArray(result) : CuArray(result)
-    kernel = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
-    event = kernel(euler, ideb, ifin, x, cmat, umat, d_result)
-    wait(event)
-    copyto!(result, d_result)
-    return result[1]
-end
+# Construction of the kernels for a common device and block size
+gpu_acoustic! = gpu_acoustic_kernel!(device, block_size)
+gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
+gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
+gpu_cell_update_euler! = gpu_cell_update_euler_kernel!(device, block_size)
+gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
+gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, block_size)
+gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
+gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
+gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, 1, 1)
+gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
 
 
 #
@@ -644,7 +580,7 @@ function acoustic!(params, ustar, pstar, rho, umat, pmat, cmat, dt, x)
                 Int32, Int32),
             ustar, pstar, rho, cmat, umat, pmat, ideb, ifin)
     elseif params.use_gpu
-        gpu_acoustic!(ideb, ifin, ustar, pstar, rho, umat, pmat, cmat)
+        gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
     else
         @simd_threaded_loop for i in ideb:ifin+1
             rc_l = rho[i-1]*cmat[i-1]
@@ -685,8 +621,8 @@ function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pst
             println("Only the limiter minmod is implemented for GPU")
             exit()
         end
-        gpu_acoustic!(ideb, ifin, ustar_1, pstar_1, rho, umat, pmat, cmat)
-        gpu_acoustic_GAD_minmod!(ideb, ifin, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x)
+        gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
+        gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x, ndrange=length(ideb:ifin+1))
         return
     end
 
@@ -836,7 +772,7 @@ function boundaryConditions!(params, rho, umat, pmat, cmat, gmat)
     (; test, ideb, ifin) = params
 
     if params.use_gpu
-        gpu_boundary_conditions!(test, ideb, ifin, rho, umat, pmat, cmat, gmat)
+        gpu_boundary_conditions!(test == :Bizarrium, ideb, ifin, rho, umat, pmat, cmat, gmat)
         return
     end
 
@@ -863,13 +799,16 @@ function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
 
     if params.cst_dt
         dt = Dt
+    elseif params.use_gpu && use_ROCM
+        # ROCM doesn't support Array Programming, so an explicit reduction kernel is needed
+        result = zeros(eltype(x), 1)  # temporary array of a single value, holding the result of the reduction
+        d_result = ROCArray(result)
+        gpu_dtCFL_reduction!(params.euler_projection, ideb, ifin, x, cmat, umat, d_result) |> wait
+        copyto!(result, d_result)
+        dt = result[1]
     elseif params.euler_projection
         if params.use_gpu
-            if use_ROCM
-                dt = gpu_dtCFL_reduction!(params.euler_projection, ideb, ifin, x, cmat, umat)
-            else
-                dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ max.(abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
-            end
+            dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ max.(abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
             @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
                 threadlocal = min(threadlocal, (x[i+1]-x[i])/max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])))
@@ -878,11 +817,7 @@ function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
         end
     else
         if params.use_gpu
-            if use_ROCM
-                dt = gpu_dtCFL_reduction!(params.euler_projection, ideb, ifin, x, cmat, umat)
-            else
-                dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ cmat[ideb:ifin]))
-            end
+            dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ cmat[ideb:ifin]))
         else
             @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
                 threadlocal = min(threadlocal, (x[i+1]-x[i])/cmat[i])
@@ -930,7 +865,8 @@ function first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho
     (; ideb, ifin) = params
 
     if params.use_gpu
-        gpu_first_order_euler_remap!(ideb, ifin, dt, X, ustar, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+        gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
+        gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
         return
     end
 
@@ -961,11 +897,15 @@ function first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho
 end
 
 
-function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat)
     (; ideb, ifin) = params
 
     if params.use_gpu
-        gpu_cell_update!(params.euler_projection, ideb, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+        if params.euler_projection
+            gpu_cell_update_euler!(ideb - 1, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, ndrange=length(ideb:ifin))
+        else
+            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, ndrange=length(ideb:ifin))
+        end
         return
     end
 
@@ -990,12 +930,7 @@ end
 
 
 function update_EOS!(params, pmat, cmat, gmat, rho, emat)
-    (; test) = params
-
-    if params.use_gpu
-        gpu_update_EOS!(test, params.ideb, params.ifin, rho, emat, pmat, cmat, gmat)
-        return
-    end
+    (; ideb, ifin, test) = params
 
     if test == :Sod || test == :Leblanc || test == :Woodward
         gamma::params.data_type = 0.0
@@ -1006,9 +941,17 @@ function update_EOS!(params, pmat, cmat, gmat, rho, emat)
             gamma = 5/3
         end
 
-        perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
+        if params.use_gpu
+            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, emat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+        else
+            perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
+        end
     elseif test == :Bizarrium
-        BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
+        if params.use_gpu
+            gpu_update_bizarrium_EOS!(ideb - 1, rho, emat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+        else
+            BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
+        end
     end
 end
 
@@ -1028,12 +971,9 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 
     while t < maxtime && cycle < maxcycle
         @time_pos params "boundaryConditions" boundaryConditions!(params, rho, umat, pmat, cmat, gmat)
-        
         @time_pos params "dtCFL" dt = dtCFL(params, dta, x, cmat, umat)
-
         @time_pos params "numericalFluxes!" numericalFluxes!(params, ustar, pstar, rho, umat, pmat, cmat, gmat, ustar_1, pstar_1, dt, x)
-
-        @time_pos params "cellUpdate!" cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+        @time_pos params "cellUpdate!" cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat)
 
         if params.euler_projection
             @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho, tmp_urho, tmp_Erho)
@@ -1107,6 +1047,7 @@ function armon(params::ArmonParameters)
         end
     end
     
+    # Allocate without initialisation in order to correctly map the NUMA space using the first-touch policy when working on CPU only
     x = Vector{data_type}(undef, nbcell + 2 * nghost)
     X = Vector{data_type}(undef, nbcell + 2 * nghost)
     rho = Vector{data_type}(undef, nbcell + 2 * nghost)

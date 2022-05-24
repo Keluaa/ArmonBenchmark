@@ -118,7 +118,7 @@ function parse_measure_params(file_line_parser)
     use_std_lib_threads = ["false"]
     jl_exclusive = [false]
     jl_places = ["cores"]
-    jl_proc_bind = ["spread"]
+    jl_proc_bind = ["close"]
     cells_list = [12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6]
     tests_list = ["Sod"]
     common_armon_params = [
