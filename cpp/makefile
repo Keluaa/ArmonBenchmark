@@ -1,7 +1,7 @@
 
 #CXXFLAGS = -g -fopenmp -Wall -std=c++17 -ffast-math
 #CXXFLAGS = -O3 -fopenmp -Wall -std=c++17 -ffast-math
-CXXFLAGS = -O3 -fopenmp -Wall -std=c++17
+CXXFLAGS = -O3 -fopenmp -Wall -std=c++17 -ffast-math
 CFLAGS = -O3 -fopenmp -Wall -ffast-math
 
 ifdef use_clang
