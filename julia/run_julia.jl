@@ -170,8 +170,14 @@ for test in tests
     for cells in cells_list
         @printf(" - %s, %-10g cells: ", test, cells)
 
-        cells_per_sec, time_contrib = armon(ArmonParameters(; ieee_bits, test, riemann, scheme, iterations, nbcell=cells, cfl, Dt, euler_projection, cst_dt, maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd, interleaving, use_gpu))
-        
+        cells_per_sec, time_contrib = -1., 0.
+        while cells_per_sec < 0
+            cells_per_sec, time_contrib = armon(ArmonParameters(; ieee_bits, test, riemann, scheme, iterations, nbcell=cells, cfl, Dt, euler_projection, cst_dt, maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd, interleaving, use_gpu))
+            if cells_per_sec < 0
+                print(" (negative throughput, restarting...) ")
+            end
+        end       
+ 
         @printf("%.2g Giga cells/sec\n", cells_per_sec)
 
         # Append the result to the data file
