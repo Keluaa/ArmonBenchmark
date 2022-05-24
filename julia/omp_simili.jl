@@ -15,7 +15,7 @@ function omp_bind_threads(places::Symbol, bind::Symbol)
         pinthreads(:sockets)
     elseif bind == :close
         if places == :threads
-            pinthreads(:compact, hyperthreading=true)
+            pinthreads(:compact, hyperthreads=true)
         elseif places == :cores
             pinthreads(:compact)
         elseif places == :numa_domains
@@ -25,7 +25,7 @@ function omp_bind_threads(places::Symbol, bind::Symbol)
         end
     elseif bind == :spread
         if places == :threads
-            pinthreads(:spread, hyperthreading=true)
+            pinthreads(:spread)
         elseif places == :cores
             pinthreads(:spread)
         elseif places == :numa_domains
@@ -35,7 +35,7 @@ function omp_bind_threads(places::Symbol, bind::Symbol)
         end
     elseif bind == :primary || bind == :master
         if places == :threads
-            pinthreads(:firstn, hyperthreading=true)
+            pinthreads(:firstn, hyperthreads=true)
         elseif places == :cores
             pinthreads(:firstn)
         elseif places == :numa_domains

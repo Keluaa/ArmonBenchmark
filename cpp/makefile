@@ -21,6 +21,8 @@ use_simd ?= 1
 use_threading ?= 1
 use_single_precision ?= 0
 use_std_vector ?= 0
+debug ?= 0
+scalasca ?= 0
 
 ifeq ($(use_simd), 1)
 	CFLAGS += -mavx2 -mavx
@@ -28,6 +30,11 @@ ifeq ($(use_simd), 1)
 else
 	CFLAGS += -mno-avx2 -mno-avx -mno-sse4.2 -mno-sse4.1 -mno-sse3
 	CXXFLAGS += -mno-avx2 -mno-avx -mno-sse4.2 -mno-sse4.1 -mno-sse3
+endif
+
+ifeq ($(debug), 1)
+	CFLAGS := -g $(CFLAGS)
+	CXXFLAGS := -g $(CXXFLAGS)
 endif
 
 

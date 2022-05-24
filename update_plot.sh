@@ -22,8 +22,8 @@ do
    then    
        last_update_timestamp=$file_timestamp
        updated_plot=`echo $(<$last_update_file_path)`
-       echo plot updated: $updated_plot
-       $display_cmd $updated_plot
+       #echo Updated plot '$updated_plot'
+       $display_cmd $updated_plot 2> /dev/null
    fi
    sleep 0.5
 done

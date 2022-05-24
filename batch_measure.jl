@@ -83,7 +83,7 @@ set output '$(graph_file_name)'
 set ylabel 'Giga Cells/sec'
 set xlabel 'Cells count'
 set title "$(title)"
-set key left top
+set key right top
 $(log_scale ? "set logscale x" : "")
 `echo "$(graph_file_name)" > ./plots/last_update`
 plot """
@@ -116,7 +116,7 @@ function parse_measure_params(file_line_parser)
     omp_proc_bind = ["spread"]
     omp_places = ["cores"]
     use_std_lib_threads = ["false"]
-    jl_exclusive = [true]
+    jl_exclusive = [false]
     jl_places = ["cores"]
     jl_proc_bind = ["spread"]
     cells_list = [12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6]
@@ -653,7 +653,7 @@ function build_data_file_base_name(measure::MeasureParams,
         end
     end
 
-    if length(measure.compilers) > 1
+    if length(measure.compilers) > 1 && backend != Julia
         if compiler == GCC
             name *= "_GCC"
             legend *= " GCC"
@@ -848,6 +848,11 @@ function setup_env()
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
     mkpath(plots_dir)
+
+    # KMP_AFFINITY overrides the OMP_* variables when it is defined for ICC
+    if haskey(ENV, "KMP_AFFINITY")
+        error("KMP_AFFINITY is defined and will interfere with measures using the Intel compiler")
+    end
 
     # Are we in a login node?
     in_login_node = readchomp(`hostname`) == "login1"
