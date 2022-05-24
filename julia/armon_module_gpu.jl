@@ -285,6 +285,54 @@ end
 # GPU Kernels
 #
 
+const use_native_CUDA = haskey(ENV, "USE_NATIVE_CUDA") && ENV["USE_NATIVE_CUDA"] == "true"
+
+if use_native_CUDA
+    # Replace KernelAbstractions.jl's macros with their CUDA.jl equivalent.
+
+    macro identity(expr) return esc(expr) end
+
+    macro make_return_nothing(func)
+        push!(func.args[2].args, Expr(:return, :nothing))
+        return esc(quote
+            $(func)
+        end)
+    end
+
+    macro cuda_index(scope)
+        if scope == :Local
+            return esc(quote
+                threadIdx().x
+            end)
+        elseif scope == :Global
+            return esc(quote
+                (blockIdx().x - 1) * blockDim().x + threadIdx().x
+            end)
+        else
+            error("Unknown index scope: " * string(scope))
+        end
+    end
+
+    macro cuda_synchronize()
+        return esc(quote 
+            sync_threads() 
+        end)
+    end
+
+    macro cuda_localmem(type, dims)
+        return esc(quote
+            CuStaticSharedArray(type, dims)
+        end)
+    end
+
+    var"@Const" = var"@identity"
+    var"@kernel" = var"@make_return_nothing"
+    var"@index" = var"@cuda_index"
+    var"@synchronize" = var"@cuda_synchronize"
+    var"@localmem" = var"@cuda_localmem"
+end
+
+
 const device = use_ROCM ? ROCDevice() : CUDADevice()
 const block_size = haskey(ENV, "GPU_BLOCK_SIZE") ? parse(Int, ENV["GPU_BLOCK_SIZE"]) : 32
 const reduction_block_size = 1024;
@@ -417,15 +465,15 @@ end
     data_type = eltype(rho)
     
     rho0::data_type = 10000.; 
-    K0::data_type     = 1e+11; 
-    Cv0::data_type     = 1000.; 
-    T0::data_type     = 300.; 
+    K0::data_type   = 1e+11; 
+    Cv0::data_type  = 1000.; 
+    T0::data_type   = 300.; 
     eps0::data_type = 0.; 
-    S0::data_type     = 0.; 
-    G0::data_type     = 1.5; 
-    s::data_type     = 1.5; 
-    q::data_type     = -42080895/14941154; 
-    r::data_type     = 727668333/149411540;
+    S0::data_type   = 0.; 
+    G0::data_type   = 1.5; 
+    s::data_type    = 1.5; 
+    q::data_type    = -42080895/14941154; 
+    r::data_type    = 727668333/149411540;
 
     x::data_type = rho[i]/rho0 - 1
     g::data_type = G0*(1-rho0/rho[i]); # formula (4b)
@@ -508,16 +556,46 @@ end
 
 
 # Construction of the kernels for a common device and block size
-gpu_acoustic! = gpu_acoustic_kernel!(device, block_size)
-gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
-gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
-gpu_cell_update_euler! = gpu_cell_update_euler_kernel!(device, block_size)
-gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
-gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, block_size)
-gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
-gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
-gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, 1, 1)
-gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
+if use_native_CUDA
+    global compiled_kernels = Dict{Function, CUDA.HostKernel}()
+
+    function convert_KA_to_CUDA_call(kernel, args...; ndrange=1, block_size=block_size)
+        if !haskey(compiled_kernels, kernel)
+            compiled_kernel = @cuda launch=false kernel(args...)
+            compiled_kernels[kernel] = compiled_kernel
+        end
+        
+        threads = block_size
+        blocks = cld(ndrange, threads)
+        return compiled_kernels[kernel](args...; threads, blocks)
+
+        # threads = block_size
+        # blocks = cld(ndrange, threads)
+        # return @cuda threads=threads blocks=blocks kernel(args...)
+    end
+
+    gpu_acoustic!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_kernel!, args...; ndrange, block_size)
+    gpu_acoustic_GAD_minmod!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_GAD_minmod_kernel!, args...; ndrange, block_size)
+    gpu_cell_update_lagrange!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_lagrange_kernel!, args...; ndrange, block_size)
+    gpu_cell_update_euler!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_euler_kernel!, args...; ndrange, block_size)
+    gpu_first_order_euler_remap_1!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_kernel!, args...; ndrange, block_size)
+    gpu_first_order_euler_remap_2!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_2_kernel!, args...; ndrange, block_size)
+    gpu_update_perfect_gas_EOS!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_update_perfect_gas_EOS_kernel!, args...; ndrange, block_size)
+    gpu_update_bizarrium_EOS!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_update_bizarrium_EOS_kernel!, args...; ndrange, block_size)
+    gpu_boundary_conditions!(args...) = convert_KA_to_CUDA_call(gpu_boundary_conditions_kernel!, args...; ndrange=1, block_size=1)
+    gpu_dtCFL_reduction!(args...) = convert_KA_to_CUDA_call(gpu_dtCFL_reduction_kernel!, args...; ndrange=reduction_block_size, block_size=reduction_block_size)
+else
+    gpu_acoustic! = gpu_acoustic_kernel!(device, block_size)
+    gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
+    gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
+    gpu_cell_update_euler! = gpu_cell_update_euler_kernel!(device, block_size)
+    gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
+    gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, block_size)
+    gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
+    gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
+    gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, 1, 1)
+    gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
+end
 
 
 #
