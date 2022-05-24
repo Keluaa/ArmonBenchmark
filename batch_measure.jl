@@ -61,7 +61,7 @@ max_inti_cores = 128  # Maximum number of cores in a node
 
 max_cells_for_one_thread = 1e6  # Serial programs can take too much time for large number of cells
 
-required_modules = ["cuda", "rocm", "hwloc"]  # Modules required by most backends to run properly
+required_modules = ["cuda", "rocm", "hwloc", "intel"]  # Modules required by most backends to run properly
 
 base_make_options = "-j4"
 
