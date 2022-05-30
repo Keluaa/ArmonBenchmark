@@ -11,6 +11,7 @@ if use_ROCM
     using AMDGPU
     using ROCKernels
     println("Using ROCM GPU")
+    macro cuda(args...) end
 else
     using CUDA
     using CUDAKernels
@@ -289,6 +290,7 @@ const use_native_CUDA = haskey(ENV, "USE_NATIVE_CUDA") && ENV["USE_NATIVE_CUDA"]
 
 if use_native_CUDA
     # Replace KernelAbstractions.jl's macros with their CUDA.jl equivalent.
+    println("Using native CUDA")
 
     macro identity(expr) return esc(expr) end
 
@@ -1073,6 +1075,12 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
     end
 
     t2 = time_ns()
+
+    if cycle <= 5
+        error("More than 5 cycles are needed to compute the grind time, got: $(cycle)")
+    elseif t2 < t_warmup
+        error("Clock error: $(t2) < $(t_warmup)")
+    end
     
     grind_time = (t2 - t_warmup) / ((cycle - 5)*nbcell)
 
