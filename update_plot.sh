@@ -25,5 +25,5 @@ do
        #echo Updated plot '$updated_plot'
        $display_cmd $updated_plot 2> /dev/null
    fi
-   sleep 0.5
+   sleep 0.1
 done

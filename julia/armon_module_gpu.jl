@@ -243,7 +243,7 @@ macro simd_threaded_loop(expr)
                     __last_i = last(__loop_range)
                     @threads for __i_thread = 1:__num_threads
                         __ideb = __first_i + (__i_thread - 1) * __batch
-                        __ifin = ifelse(__i_thread == __num_threads, __last_i, __ideb + __batch)
+                        __ifin = min(__ideb + __batch - 1, __last_i)
                         @fastmath @inbounds @simd ivdep $(modified_loop_expr)
                     end
                 end
@@ -797,7 +797,7 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
 
         gamma::params.data_type = 1.4
     
-        @threaded for i in ideb:ifin+1
+        @threaded for i in 1:nbcell+2*nghost
             x[i] = (i-1-nghost) / nbcell
     
             if x[i] < 0.5
@@ -823,7 +823,7 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
             params.cfl = 0.6
         end
     
-        @threaded for i in ideb:ifin+1
+        @threaded for i in 1:nbcell+2*nghost
             x[i] = (i-1-nghost) / nbcell
     
             if x[i] < 0.5
@@ -834,7 +834,7 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
                 rho[i] =  10000.
                 umat[i] = 250.
                 emat[i] = 0.
-                Emat[i] = emat[i] + 0.5*umat[i]^2
+                Emat[i] = 0.5*umat[i]^2
             end
         end
     
@@ -891,7 +891,8 @@ function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
             dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ max.(abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
             @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
-                threadlocal = min(threadlocal, (x[i+1]-x[i])/max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])))
+                dt_i = (x[i+1]-x[i])/max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
+                threadlocal = min(threadlocal, dt_i)
             end
             dt = minimum(threadlocal)
         end
@@ -939,7 +940,6 @@ end
 # 
 # Cell update
 # 
-
 
 function first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho, tmp_urho, tmp_Erho)
     (; ideb, ifin) = params
@@ -989,10 +989,10 @@ function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat)
         return
     end
 
-     @simd_threaded_loop for i in ideb:ifin+1
+    @simd_threaded_loop for i in ideb:ifin+1
         X[i] = x[i] + dt*ustar[i]
     end
-
+ 
     @simd_threaded_loop for i in ideb:ifin
         dm = rho[i]*(x[i+1]-x[i])
         rho[i] = dm/(X[i+1]-X[i])
@@ -1069,6 +1069,10 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
             println("Cycle = ", cycle, ", dt = ", dt, ", t = ", t)
         end
 
+        if !isfinite(dt) || dt <= 0.
+            error("Invalid dt at cycle $(cycle): $(dt)")
+        end
+
         if cycle == 5
             t_warmup = time_ns()
         end
@@ -1076,7 +1080,7 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 
     t2 = time_ns()
 
-    if cycle <= 5
+    if cycle <= 5 && maxcycle > 5
         error("More than 5 cycles are needed to compute the grind time, got: $(cycle)")
     elseif t2 < t_warmup
         error("Clock error: $(t2) < $(t_warmup)")
