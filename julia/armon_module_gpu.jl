@@ -518,7 +518,7 @@ end
 end
 
 
-@kernel function gpu_dtCFL_reduction_kernel!(euler, ideb, ifin, x, cmat, umat, result)
+@kernel function gpu_dtCFL_reduction_kernel!(euler, ideb, ifin, x, cmat, umat, result, tmp_values, tmp_err_i)
     tid = @index(Local)
 
     values = @localmem eltype(x) reduction_block_size
@@ -527,6 +527,10 @@ end
     if euler
         for i in ideb+tid-1:reduction_block_size:ifin
             dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
+            if isnan(dt_i) && tmp_err_i[tid] == -1
+                tmp_err_i[tid] = i
+                tmp_values[tid] = x[i+1] - x[i]
+            end
             min_val_thread = min(min_val_thread, dt_i)
         end
     else
@@ -536,6 +540,7 @@ end
         end
     end
     values[tid] = min_val_thread
+    #tmp_values[tid] = min_val_thread
 
     @synchronize
     
@@ -882,10 +887,23 @@ function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
     elseif params.use_gpu && use_ROCM
         # ROCM doesn't support Array Programming, so an explicit reduction kernel is needed
         result = zeros(eltype(x), 1)  # temporary array of a single value, holding the result of the reduction
+        tmp_values = ones(eltype(x), 1024)
+        d_tmp_values = ROCArray(tmp_values)
+        tmp_err_i = -ones(Int, 1024)
+        d_tmp_err_i = ROCArray(tmp_err_i)
         d_result = ROCArray(result)
-        gpu_dtCFL_reduction!(params.euler_projection, ideb, ifin, x, cmat, umat, d_result) |> wait
+        gpu_dtCFL_reduction!(params.euler_projection, ideb, ifin, x, cmat, umat, d_result, d_tmp_values, d_tmp_err_i) |> wait
         copyto!(result, d_result)
+        copyto!(tmp_values, d_tmp_values)
+        copyto!(tmp_err_i, d_tmp_err_i)
         dt = result[1]
+        println("ROCM reduction result: ", dt)
+        for (tid, (value, err)) in enumerate(zip(tmp_values, tmp_err_i))
+            #@printf("TID %2d: %f\n", tid, value)
+            #if err >= 0
+                @printf("TID %3d: err pos=%d, err=%g\n", tid, err, value)
+            #end
+        end
     elseif params.euler_projection
         if params.use_gpu
             dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ max.(abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
