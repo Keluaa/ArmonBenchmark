@@ -208,7 +208,7 @@ macro simd_threaded_loop(expr)
                 __last_i = last(__loop_range)
                 @batch for __i_thread = 1:__num_threads
                     __ideb = __first_i + (__i_thread - 1) * __batch
-                    __ifin = ifelse(__i_thread == __num_threads, __last_i, __ideb + __batch)
+                    __ifin = min(__ideb + __batch - 1, _last_i)
                     @fastmath @inbounds @simd ivdep $(modified_loop_expr)
                 end
             else
@@ -522,7 +522,7 @@ function BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
     # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state"
     # JCP 2009
 
-    rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; S0 = 0; G0 = 1.5; s = 1.5
+    rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
     q = -42080895/14941154; r = 727668333/149411540
 
     @simd_threaded_loop for i in ideb:ifin
@@ -601,7 +601,7 @@ function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pst
         return
     elseif params.use_gpu
         if params.scheme != :GAD_minmod
-            error("Only the limiter minmod is implemented for GPU")
+            error("Only the minmod limiter is implemented for GPU")
         end
         gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
         gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1,
@@ -707,7 +707,7 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
 
         gamma::params.data_type = 1.4
     
-        @threaded for i in ideb:ifin+1
+        @threaded for i in 1:nbcell+2*nghost
             x[i] = (i-1-nghost) / nbcell
     
             if x[i] < 0.5
@@ -731,7 +731,7 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
             params.cfl = 0.6
         end
     
-        @threaded for i in ideb:ifin+1
+        @threaded for i in 1:nbcell+2*nghost
             x[i] = (i-1-nghost) / nbcell
     
             if x[i] < 0.5
@@ -742,7 +742,7 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
                 rho[i] =  10000.
                 umat[i] = 250.
                 emat[i] = 0.
-                Emat[i] = emat[i] + 0.5*umat[i]^2
+                Emat[i] = 0.5 * umat[i]^2
             end
         end
     
@@ -809,9 +809,8 @@ function dtCFL(params, dta, x, cmat, umat)
                     abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
             @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
-                threadlocal = min(threadlocal, (x[i+1] - x[i]) / max(
-                    abs(umat[i] + cmat[i]), 
-                    abs(umat[i] - cmat[i])))
+                dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
+                threadlocal = min(threadlocal, dt_i)
             end
             dt = minimum(threadlocal)
         end
@@ -830,11 +829,11 @@ function dtCFL(params, dta, x, cmat, umat)
         if Dt != 0
             return Dt
         else
-            return cfl*dt
+            return cfl * dt
         end
     else
         # CFL condition and maximum increase per cycle of the time step
-        return convert(params.data_type, min(cfl*dt, 1.05*dta))
+        return convert(params.data_type, min(cfl * dt, 1.05 * dta))
     end
 end
 
@@ -996,6 +995,10 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
             println("Cycle = ", cycle, ", dt = ", dt, ", t = ", t)
         end
 
+        if !isfinite(dt) || dt <= 0.
+            error("Invalid dt at cycle $(cycle): $(dt)")
+        end
+
         if cycle == 5
             t_warmup = time_ns()
         end
@@ -1003,7 +1006,7 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 
     t2 = time_ns()
 
-    if cycle <= 5
+    if cycle <= 5 && maxcycle > 5
         error("More than 5 cycles are needed to compute the grind time, got: $(cycle)")
     elseif t2 < t_warmup
         error("Clock error: $(t2) < $(t_warmup)")

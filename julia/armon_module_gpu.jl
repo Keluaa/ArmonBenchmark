@@ -70,7 +70,8 @@ end
 function ArmonParameters(; ieee_bits = 64,
                            test = :Sod, riemann = :acoustic, scheme = :GAD_minmod,
                            iterations = 4, 
-                           nghost = 2, nbcell = 100, cfl = 0.6, Dt = 0., euler_projection = false, cst_dt = false,
+                           nghost = 2, nbcell = 100, cfl = 0.6, Dt = 0., 
+                           euler_projection = false, cst_dt = false,
                            maxtime = 0, maxcycle = 500_000,
                            silent = 0, write_output = true, measure_time = true,
                            use_ccall = false, use_threading = true, 
@@ -97,7 +98,8 @@ function ArmonParameters(; ieee_bits = 64,
     return ArmonParameters{flt_type}(flt_type, 
                                      test, riemann, scheme, 
                                      iterations, 
-                                     nghost, nbcell, cfl, Dt, ideb, ifin, euler_projection, cst_dt,
+                                     nghost, nbcell, cfl, Dt, ideb, ifin, 
+                                     euler_projection, cst_dt,
                                      maxtime, maxcycle,
                                      silent, write_output, measure_time,
                                      use_ccall, use_threading,
@@ -162,6 +164,8 @@ end
 
 
 """
+    @threaded(expr)
+
 Allows to enable/disable multithreading of the loop depending on the parameters.
 
     @threaded for i = 1:n
@@ -169,10 +173,6 @@ Allows to enable/disable multithreading of the loop depending on the parameters.
     end
 """
 macro threaded(expr)
-    # if !@isdefined params
-    #     throw(ArgumentError("Expected a 'param' variable in the current scope"))
-    # end
-
     return esc(quote
         if params.use_threading
             @inbounds @threads $(expr)
@@ -189,9 +189,11 @@ end
 Allows to enable/disable multithreading and/or SIMD of the loop depending on the parameters.
 When using SIMD, `@fastmath` and `@inbounds` are used.
 
-In order to use SIMD and multithreading at the same time, the range of the loop is split in even batches.
-Each batch has a size of `params.simd_batch` iterations, meaning that the inner `@simd` loop has a fixed number of iterations,
-while the outer threaded loop will have `N ÷ params.simd_batch` iterations.
+In order to use SIMD and multithreading at the same time, the range of the loop is split in even 
+batches.
+Each batch has a size of `params.simd_batch` iterations, meaning that the inner `@simd` loop has a
+fixed number of iterations, while the outer threaded loop will have `N ÷ params.simd_batch`
+iterations.
 
 The inner `@simd` loop assumes there is no dependencies between each iteration.
 
@@ -205,10 +207,6 @@ macro simd_threaded_loop(expr)
     if !Meta.isexpr(expr, :for, 2)
         throw(ArgumentError("Expected a valid for loop"))
     end
-
-    #if !@isdefined params
-    #    throw(ArgumentError("Expected a 'param' variable in the current scope"))
-    #end
 
     # Only in for the case of a threaded loop with SIMD:
     # Extract the range of the loop and replace it with the new variables
@@ -238,7 +236,8 @@ macro simd_threaded_loop(expr)
                     __loop_range = $(loop_range)
                     __total_iter = length(__loop_range)
                     __num_threads = Threads.nthreads()
-                    __batch = convert(Int, cld(__total_iter, __num_threads))::Int  # __total_iter ÷ __num_threads
+                    # Equivalent to __total_iter ÷ __num_threads
+                    __batch = convert(Int, cld(__total_iter, __num_threads))::Int
                     __first_i = first(__loop_range)
                     __last_i = last(__loop_range)
                     @threads for __i_thread = 1:__num_threads
@@ -341,16 +340,19 @@ const reduction_block_size = 1024;
 const reduction_block_size_log2 = convert(Int, log2(reduction_block_size))
 
 
-@kernel function gpu_acoustic_kernel!(i_0, ustar, pstar, @Const(rho), @Const(umat), @Const(pmat), @Const(cmat))
+@kernel function gpu_acoustic_kernel!(i_0, ustar, pstar, 
+        @Const(rho), @Const(umat), @Const(pmat), @Const(cmat))
     i = @index(Global) + i_0
-    rc_l = rho[i-1]*cmat[i-1]
-    rc_r = rho[i]*cmat[i]
-    ustar[i] = ( rc_l*umat[i-1] + rc_r*umat[i] + (pmat[i-1] - pmat[i]) ) / (rc_l + rc_r)
-    pstar[i] = ( rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i]) ) / (rc_l + rc_r)
+    rc_l = rho[i-1] * cmat[i-1]
+    rc_r = rho[i]   * cmat[i]
+    ustar[i] = (rc_l*umat[i-1] + rc_r*umat[i] +           (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
+    pstar[i] = (rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i])) / (rc_l + rc_r)
 end
 
 
-@kernel function gpu_acoustic_GAD_minmod_kernel!(i_0, ustar, pstar, @Const(rho), @Const(umat), @Const(pmat), @Const(cmat), @Const(ustar_1), @Const(pstar_1), dt, @Const(x))
+@kernel function gpu_acoustic_GAD_minmod_kernel!(i_0, ustar, pstar, 
+        @Const(rho), @Const(umat), @Const(pmat), @Const(cmat), @Const(ustar_1), @Const(pstar_1), 
+        dt, @Const(x))
     i = @index(Global) + i_0
 
     r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
@@ -363,34 +365,38 @@ end
     r_u_p = max(0., min(1., r_u_p))
     r_p_p = max(0., min(1., r_p_p))
 
-    dm_l = rho[i-1]*(x[i]-x[i-1])
-    dm_r = rho[i]  *(x[i+1]-x[i])
+    dm_l = rho[i-1] * (x[i] - x[i-1])
+    dm_r = rho[i]   * (x[i+1] - x[i])
     Dm = (dm_l + dm_r) / 2
-    rc_l = rho[i-1]*cmat[i-1]
-    rc_r = rho[i]*cmat[i]
+    rc_l = rho[i-1] * cmat[i-1]
+    rc_r = rho[i]   * cmat[i]
     θ = (rc_l + rc_r) / 2 * (dt / Dm)
     
-    ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p*(umat[i] - ustar_1[i]) - r_u_m*(ustar_1[i] - umat[i-1]))
-    pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p*(pmat[i] - pstar_1[i]) - r_p_m*(pstar_1[i] - pmat[i-1]))
+    ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * 
+        (r_u_p * (umat[i] - ustar_1[i]) - r_u_m * (ustar_1[i] - umat[i-1]))
+    pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * 
+        (r_p_p * (pmat[i] - pstar_1[i]) - r_p_m * (pstar_1[i] - pmat[i-1]))
 end
 
 
-@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, x_, X, @Const(ustar), @Const(pstar), rho, umat, emat, Emat)
+@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, 
+        x_, X, @Const(ustar), @Const(pstar), rho, umat, emat, Emat)
     i = @index(Global) + i_0
 
-    X[i] = x_[i] + dt*ustar[i]
+    X[i] = x_[i] + dt * ustar[i]
 
     if i == ifin
-        X[i+1] = x_[i+1] + dt*ustar[i+1]
+        X[i+1] = x_[i+1] + dt * ustar[i+1]
     end
 
     @synchronize
 
-    dm = rho[i]*(x_[i+1]-x_[i])
-    rho[i] = dm/(x_[i+1] + dt*ustar[i+1]-(x_[i] + dt*ustar[i]))  # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
-    umat[i] = umat[i] + dt/dm*(pstar[i]-pstar[i+1])
-    Emat[i] = Emat[i] + dt/dm*(pstar[i]*ustar[i]-pstar[i+1]*ustar[i+1])
-    emat[i] = Emat[i] - 0.5*umat[i]^2
+    dm = rho[i] * (x_[i+1] - x_[i])
+    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
+    rho[i]  = dm / (x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i]))
+    umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
+    Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
+    emat[i] = Emat[i] - 0.5 * umat[i]^2
 
     @synchronize
 
@@ -402,27 +408,30 @@ end
 end
 
 
-@kernel function gpu_cell_update_euler_kernel!(i_0, ifin, dt, x_, X, @Const(ustar), @Const(pstar), rho, umat, emat, Emat)
+@kernel function gpu_cell_update_euler_kernel!(i_0, ifin, dt, 
+        x_, X, @Const(ustar), @Const(pstar), rho, umat, emat, Emat)
     i = @index(Global) + i_0
 
-    X[i] = x_[i] + dt*ustar[i]
+    X[i] = x_[i] + dt * ustar[i]
 
     if i == ifin
-        X[i+1] = x_[i+1] + dt*ustar[i+1]
+        X[i+1] = x_[i+1] + dt * ustar[i+1]
     end
 
     @synchronize
 
-    dm = rho[i]*(x_[i+1]-x_[i])
-    dx = x_[i+1] + dt*ustar[i+1]-(x_[i] + dt*ustar[i]) # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
-    rho[i] = dm/dx  
-    umat[i] = umat[i] + dt/dm*(pstar[i]-pstar[i+1])
-    Emat[i] = Emat[i] + dt/dm*(pstar[i]*ustar[i]-pstar[i+1]*ustar[i+1])
-    emat[i] = Emat[i] - 0.5*umat[i]^2
+    dm = rho[i] * (x_[i+1] - x_[i])
+    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
+    dx = x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i])
+    rho[i]  = dm / dx
+    umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
+    Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
+    emat[i] = Emat[i] - 0.5 * umat[i]^2
 end
 
 
-@kernel function gpu_first_order_euler_remap_kernel!(i_0, dt, X, @Const(ustar), rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+@kernel function gpu_first_order_euler_remap_kernel!(i_0, dt, 
+        X, @Const(ustar), rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
     i = @index(Global) + i_0
 
     dx = X[i+1] - X[i]
@@ -442,62 +451,69 @@ end
 end
 
 
-@kernel function gpu_first_order_euler_remap_2_kernel!(i_0, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+@kernel function gpu_first_order_euler_remap_2_kernel!(i_0, 
+        rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
     i = @index(Global) + i_0
 
-    # (ρ, ρu, ρE) -> (ρ, u, E)
+    # (ρ, ρu, ρE) -> (ρ, u, E)
     rho[i] = tmp_rho[i]
     umat[i] = tmp_urho[i] / tmp_rho[i]
     Emat[i] = tmp_Erho[i] / tmp_rho[i]
 end
 
 
-@kernel function gpu_update_perfect_gas_EOS_kernel!(i_0, gamma, @Const(rho), @Const(emat), pmat, cmat, gmat)
+@kernel function gpu_update_perfect_gas_EOS_kernel!(i_0, gamma,
+        @Const(rho), @Const(emat), pmat, cmat, gmat)
     i = @index(Global) + i_0
     
-    pmat[i] = (gamma-1.)*rho[i]*emat[i]
-    cmat[i] = sqrt(gamma*pmat[i]/rho[i])
-    gmat[i] = (1+gamma)/2
+    pmat[i] = (gamma - 1.) * rho[i] * emat[i]
+    cmat[i] = sqrt(gamma * pmat[i] / rho[i])
+    gmat[i] = (1. + gamma) / 2
 end
 
 
-@kernel function gpu_update_bizarrium_EOS_kernel!(i_0, @Const(rho), @Const(emat), pmat, cmat, gmat)
+@kernel function gpu_update_bizarrium_EOS_kernel!(i_0, 
+        @Const(rho), @Const(emat), pmat, cmat, gmat)
     i = @index(Global) + i_0
 
     data_type = eltype(rho)
+
+    # O. Heuzé, S. Jaouen, H. Jourdren, 
+    # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state"
+    # JCP 2009
     
-    rho0::data_type = 10000.; 
-    K0::data_type   = 1e+11; 
-    Cv0::data_type  = 1000.; 
-    T0::data_type   = 300.; 
-    eps0::data_type = 0.; 
-    S0::data_type   = 0.; 
-    G0::data_type   = 1.5; 
-    s::data_type    = 1.5; 
-    q::data_type    = -42080895/14941154; 
-    r::data_type    = 727668333/149411540;
+    rho0::data_type = 10000.
+    K0::data_type   = 1e+11
+    Cv0::data_type  = 1000.
+    T0::data_type   = 300.
+    eps0::data_type = 0.
+    G0::data_type   = 1.5
+    s::data_type    = 1.5
+    q::data_type    = -42080895/14941154
+    r::data_type    = 727668333/149411540
 
-    x::data_type = rho[i]/rho0 - 1
-    g::data_type = G0*(1-rho0/rho[i]); # formula (4b)
+    x::data_type = rho[i] / rho0 - 1
+    g::data_type = G0 * (1-rho0 / rho[i])
 
-    f0::data_type = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)       # Formula (15b)
-    f1::data_type = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)      # Formula (16a)
-    f2::data_type = (2*q+6*r*x+2*s*f1)/(1-s*x)              # Formula (16b)
-    f3::data_type = (6*r+3*s*f2)/(1-s*x)                    # Formula (16c)
+    f0::data_type = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)
+    f1::data_type = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)
+    f2::data_type = (2*q+6*r*x+2*s*f1)/(1-s*x)
+    f3::data_type = (6*r+3*s*f2)/(1-s*x)
 
-    epsk0::data_type     = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                             # Formula (15a)
-    pk0::data_type       = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                         # Formula (17a)
-    pk0prime::data_type  = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)    # Formulae (17b) and (17c)
-    pk0second::data_type = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
+    epsk0::data_type     = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0
+    pk0::data_type       = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)
+    pk0prime::data_type  = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)
+    pk0second::data_type = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 
+                                                    6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
-    pmat[i] = pk0 + G0*rho0*(emat[i] - epsk0)                                         # Formula (5b)
-    cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]                       # Formula (8)
-
-    gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0))          # Formula (8) + (11)
+    pmat[i] = pk0 + G0 * rho0 * (emat[i] - epsk0)
+    cmat[i] = sqrt(G0 * rho0 * (pmat[i] - pk0) - pk0prime) / rho[i]
+    gmat[i] = 0.5 / (rho[i]^3 * cmat[i]^2) * (pk0second + (G0 * rho0)^2 * (pmat[i] - pk0))
 end
 
 
-@kernel function gpu_boundary_conditions_kernel!(test_bizarrium, ideb, ifin, rho, umat, pmat, cmat, gmat)
+@kernel function gpu_boundary_conditions_kernel!(test_bizarrium, ideb, ifin, 
+        rho, umat, pmat, cmat, gmat)
     rho[ideb-1]  = rho[ideb]
     umat[ideb-1] = -umat[ideb]
     pmat[ideb-1] = pmat[ideb]
@@ -505,7 +521,6 @@ end
     gmat[ideb-1] = gmat[ideb]
 
     rho[ifin+1]  = rho[ifin]
-    
     pmat[ifin+1] = pmat[ifin]
     cmat[ifin+1] = cmat[ifin]
     gmat[ifin+1] = gmat[ifin]
@@ -562,7 +577,7 @@ end
 end
 
 
-# Construction of the kernels for a common device and block size
+# Construction of the kernels for a common device and block size
 if use_native_CUDA
     global compiled_kernels = Dict{Function, CUDA.HostKernel}()
 
@@ -604,7 +619,6 @@ else
     gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
 end
 
-
 #
 # Equations of State
 #
@@ -612,9 +626,9 @@ end
 function perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
     (; ideb, ifin) = params
     @simd_threaded_loop for i in ideb:ifin
-        pmat[i] = (gamma-1.)*rho[i]*emat[i]
-        cmat[i] = sqrt(gamma*pmat[i]/rho[i])
-        gmat[i] = (1+gamma)/2
+        pmat[i] = (gamma - 1.) * rho[i] * emat[i]
+        cmat[i] = sqrt(gamma * pmat[i] / rho[i])
+        gmat[i] = (1. + gamma) / 2
     end
 end
 
@@ -622,28 +636,30 @@ end
 function BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
     (; ideb, ifin) = params
 
-    ###  O. Heuzé, S. Jaouen, H. Jourdren, "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state", JCP 2009)
+    # O. Heuzé, S. Jaouen, H. Jourdren, 
+    # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state",
+    # JCP 2009
 
-    rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; S0 = 0; G0 = 1.5; s = 1.5; q = -42080895/14941154; r = 727668333/149411540
+    rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
+    q = -42080895/14941154; r = 727668333/149411540
 
     @simd_threaded_loop for i in ideb:ifin
-
         x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]); # formula (4b)
 
-        f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)       # Formula (15b)
-        f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)      # Formula (16a)
-        f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)              # Formula (16b)
-        f3 = (6*r+3*s*f2)/(1-s*x)                    # Formula (16c)
+        f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)   # Formula (15b)
+        f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)  # Formula (16a)
+        f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)          # Formula (16b)
+        f3 = (6*r+3*s*f2)/(1-s*x)                # Formula (16c)
 
         epsk0 = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                                # Formula (15a)
         pk0 = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                              # Formula (17a)
-        pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)    # Formulae (17b) and (17c)
-        pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
+        pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)    # Formula (17b)
+        pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +           # Formula (17c)
+                                             6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
-        pmat[i] = pk0 + G0*rho0*(emat[i] - epsk0)                                         # Formula (5b)
-        cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]                       # Formula (8)
-
-        gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0))          # Formula (8) + (11)
+        pmat[i] = pk0 + G0*rho0*(emat[i] - epsk0)                                 # Formula (5b)
+        cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]               # Formula (8)
+        gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0))  # Formula (8) + (11)
     end
 end
 
@@ -651,7 +667,7 @@ end
 # Acoustic Riemann problem solvers
 # 
 
-function acoustic!(params, ustar, pstar, rho, umat, pmat, cmat, dt, x)
+function acoustic!(params, ustar, pstar, rho, umat, pmat, cmat)
     (; ideb, ifin) = params
     if params.use_ccall
         # void acoustic(double* restrict ustar, double* restrict pstar, 
@@ -668,10 +684,12 @@ function acoustic!(params, ustar, pstar, rho, umat, pmat, cmat, dt, x)
         gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
     else
         @simd_threaded_loop for i in ideb:ifin+1
-            rc_l = rho[i-1]*cmat[i-1]
-            rc_r = rho[i]*cmat[i]
-            ustar[i] = ( rc_l*umat[i-1] + rc_r*umat[i] +           (pmat[i-1] - pmat[i]) ) / (rc_l + rc_r)
-            pstar[i] = ( rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i]) ) / (rc_l + rc_r)
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
+            ustar[i] = (rc_l * umat[i-1] + rc_r * umat[i] +               (pmat[i-1] - pmat[i])) /
+                (rc_l + rc_r)
+            pstar[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] + rc_l * rc_r * (umat[i-1] - umat[i])) /
+                (rc_l + rc_r)
         end
     end
 end
@@ -682,7 +700,6 @@ function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pst
 
     if params.use_ccall
         scheme_int::Int32 = (scheme == :GAD_minmod) ? 1 : ((scheme == :GAD_superbee) ? 2 : 0)
-
         # void acoustic_GAD(double* restrict ustar, double* restrict pstar, 
         #           double* restrict ustar_1, double* restrict pstar_1,
         #           const double* restrict rho, const double* restrict cmat,
@@ -703,23 +720,25 @@ function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pst
         return
     elseif params.use_gpu
         if params.scheme != :GAD_minmod
-            println("Only the limiter minmod is implemented for GPU")
-            exit()
+            error("Only the minmod limiter is implemented for GPU")
         end
         gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
-        gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x, ndrange=length(ideb:ifin+1))
+        gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1,
+            dt, x, ndrange=length(ideb:ifin+1))
         return
     end
 
     # First order
     @simd_threaded_loop for i in ideb:ifin+1
-        rc_l = rho[i-1]*cmat[i-1]
-        rc_r = rho[i]*cmat[i]
-        ustar_1[i] = ( rc_l*umat[i-1] + rc_r*umat[i] +           (pmat[i-1] - pmat[i]) ) / (rc_l + rc_r)
-        pstar_1[i] = ( rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i]) ) / (rc_l + rc_r)
+        rc_l = rho[i-1] * cmat[i-1]
+        rc_r = rho[i]   * cmat[i]
+        ustar_1[i] = (rc_l * umat[i-1] + rc_r * umat[i] +               (pmat[i-1] - pmat[i])) /
+            (rc_l + rc_r)
+        pstar_1[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] + rc_l * rc_r * (umat[i-1] - umat[i])) /
+            (rc_l + rc_r)
     end
     
-    # Second order
+    # Second order, for each flow limiter
     if scheme == :GAD_minmod
         @simd_threaded_loop for i in ideb:ifin+1
             r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
@@ -732,15 +751,17 @@ function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pst
             r_u_p = max(0., min(1., r_u_p))
             r_p_p = max(0., min(1., r_p_p))
 
-            dm_l = rho[i-1]*(x[i]-x[i-1])
-            dm_r = rho[i]  *(x[i+1]-x[i])
+            dm_l = rho[i-1] * (x[i] - x[i-1])
+            dm_r = rho[i]   * (x[i+1] - x[i])
             Dm = (dm_l + dm_r) / 2
-            rc_l = rho[i-1]*cmat[i-1]
-            rc_r = rho[i]*cmat[i]
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
             θ = (rc_l + rc_r) / 2 * (dt / Dm)
             
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p*(umat[i] - ustar_1[i]) - r_u_m*(ustar_1[i] - umat[i-1]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p*(pmat[i] - pstar_1[i]) - r_p_m*(pstar_1[i] - pmat[i-1]))
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) -
+                                                     r_u_m * (ustar_1[i] - umat[i-1]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) - 
+                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
         end
     elseif scheme == :GAD_superbee
         @simd_threaded_loop for i in ideb:ifin+1
@@ -754,31 +775,34 @@ function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pst
             r_u_p = max(0., min(1., 2. * r_u_p), min(2., r_u_p))
             r_p_p = max(0., min(1., 2. * r_p_p), min(2., r_p_p))
     
-            dm_l = rho[i-1]*(x[i]-x[i-1])
-            dm_r = rho[i]  *(x[i+1]-x[i])
+            dm_l = rho[i-1] * (x[i] - x[i-1])
+            dm_r = rho[i]   * (x[i+1] - x[i])
             Dm = (dm_l + dm_r) / 2
-            rc_l = rho[i-1]*cmat[i-1]
-            rc_r = rho[i]*cmat[i]
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
             θ = (rc_l + rc_r) / 2 * (dt / Dm)
             
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p*(umat[i] - ustar_1[i]) - r_u_m*(ustar_1[i] - umat[i-1]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p*(pmat[i] - pstar_1[i]) - r_p_m*(pstar_1[i] - pmat[i-1]))
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) - 
+                                                     r_u_m * (ustar_1[i] - umat[i-1]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) -
+                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
         end
     elseif scheme == :GAD_no_limiter
         @simd_threaded_loop for i in ideb:ifin+1
-            dm_l = rho[i-1]*(x[i]-x[i-1])
-            dm_r = rho[i]  *(x[i+1]-x[i])
+            dm_l = rho[i-1] * (x[i] - x[i-1])
+            dm_r = rho[i]   * (x[i+1] - x[i])
             Dm = (dm_l + dm_r) / 2
-            rc_l = rho[i-1]*cmat[i-1]
-            rc_r = rho[i]*cmat[i]
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
             θ = (rc_l + rc_r) / 2 * (dt / Dm)
 
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p*(umat[i] - ustar_1[i]) - r_u_m*(ustar_1[i] - umat[i-1]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p*(pmat[i] - pstar_1[i]) - r_p_m*(pstar_1[i] - pmat[i-1]))
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) - 
+                                                     r_u_m * (ustar_1[i] - umat[i-1]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) - 
+                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
         end
     else
-        println("The choice of the scheme for the acoustic solver is not recognized: ", scheme)
-        exit()
+        error("The choice of the scheme for the acoustic solver is not recognized: ", scheme)
     end
 
     return
@@ -814,11 +838,9 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
                 pmat[i] = 0.1
                 umat[i] = 0.
             end
-    
-            emat[i] = Emat[i] = pmat[i]/((gamma-1.)*rho[i])
-            cmat[i] = sqrt(gamma*pmat[i]/rho[i])
-            gmat[i] = 0.5*(1.0+gamma)
         end
+
+        perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
     elseif test == :Bizarrium
         if params.maxtime == 0
             params.maxtime = 80e-6
@@ -839,7 +861,7 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
                 rho[i] =  10000.
                 umat[i] = 250.
                 emat[i] = 0.
-                Emat[i] = 0.5*umat[i]^2
+                Emat[i] = 0.5 * umat[i]^2
             end
         end
     
@@ -861,15 +883,21 @@ function boundaryConditions!(params, rho, umat, pmat, cmat, gmat)
         return
     end
 
-    rho[ideb-1] = rho[ideb]; umat[ideb-1] = -umat[ideb]; pmat[ideb-1] = pmat[ideb]; cmat[ideb-1] = cmat[ideb]; gmat[ideb-1]=gmat[ideb]
-    rho[ifin+1] = rho[ifin]; umat[ifin+1] = -umat[ifin]; pmat[ifin+1] = pmat[ifin]; cmat[ifin+1] = cmat[ifin]; gmat[ifin+1]=gmat[ifin]
+    rho[ideb-1]  = rho[ideb]
+    umat[ideb-1] = -umat[ideb]
+    pmat[ideb-1] = pmat[ideb]
+    cmat[ideb-1] = cmat[ideb]
+    gmat[ideb-1] = gmat[ideb]
+
+    rho[ifin+1]  = rho[ifin]
+    pmat[ifin+1] = pmat[ifin]
+    cmat[ifin+1] = cmat[ifin]
+    gmat[ifin+1] = gmat[ifin]
 
     if test == :Bizarrium
-        rho[ifin+1] = rho[ifin]
         umat[ifin+1] = umat[ifin]
-        pmat[ifin+1] = pmat[ifin]
-        cmat[ifin+1] = cmat[ifin]
-        gmat[ifin+1] = gmat[ifin]
+    else
+        umat[ifin+1] = -umat[ifin]
     end
 end
 
@@ -877,12 +905,13 @@ end
 # Time step computation
 #
 
-function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
+function dtCFL(params, dta, x, cmat, umat)
     (; cfl, Dt, ideb, ifin) = params
 
-    dt::typeof(Dt) = Inf
+    dt::params.data_type = Inf
 
     if params.cst_dt
+        # Constant time step
         dt = Dt
     elseif params.use_gpu && use_ROCM
         # ROCM doesn't support Array Programming, so an explicit reduction kernel is needed
@@ -906,7 +935,10 @@ function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
         end
     elseif params.euler_projection
         if params.use_gpu
-            dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ max.(abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
+            dt = reduce(min, @views (
+                (x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ max.(
+                    abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
+                    abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
             @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
                 dt_i = (x[i+1]-x[i])/max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
@@ -919,7 +951,7 @@ function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
             dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ cmat[ideb:ifin]))
         else
             @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
-                threadlocal = min(threadlocal, (x[i+1]-x[i])/cmat[i])
+                threadlocal = min(threadlocal, (x[i+1] - x[i]) / cmat[i])
             end
             dt = minimum(threadlocal)
         end
@@ -929,10 +961,11 @@ function dtCFL(params, dta, x, cmat, umat)::typeof(dta)
         if Dt != 0
             return Dt
         else
-            return cfl*dt
+            return cfl * dt
         end
     else
-        return min(cfl*dt, 1.05*dta)   # CFL condition and maximum increase per cycle of the time step
+        # CFL condition and maximum increase per cycle of the time step
+        return convert(params.data_type, min(cfl * dt, 1.05 * dta))
     end
 end
 
@@ -940,19 +973,16 @@ end
 # Numerical fluxes computation
 #
 
-function numericalFluxes!(params, ustar, pstar, rho, umat, pmat, cmat, gmat, ustar_1, pstar_1, dt, x)
-    if params.riemann == :acoustic    # 2-state acoustic solver (Godunov)
+function numericalFluxes!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x)
+    if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            acoustic!(params, ustar, pstar, rho, umat, pmat, cmat, dt, x)
+            acoustic!(params, ustar, pstar, rho, umat, pmat, cmat)
         else
             acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x)
         end
     else
-        println("The choice of Riemann solver is not recognized: ", params.riemann)
-        exit()
+        error("The choice of Riemann solver is not recognized: ", params.riemann)
     end
-
-    return
 end
 
 # 
@@ -963,8 +993,10 @@ function first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho
     (; ideb, ifin) = params
 
     if params.use_gpu
-        gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
-        gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
+        gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, Emat, 
+            tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
+        gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, Emat, 
+            tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
         return
     end
 
@@ -1000,23 +1032,25 @@ function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat)
 
     if params.use_gpu
         if params.euler_projection
-            gpu_cell_update_euler!(ideb - 1, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, ndrange=length(ideb:ifin))
+            gpu_cell_update_euler!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
+                rho, umat, emat, Emat, ndrange=length(ideb:ifin))
         else
-            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, X, ustar, pstar, rho, umat, emat, Emat, ndrange=length(ideb:ifin))
+            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
+                rho, umat, emat, Emat, ndrange=length(ideb:ifin))
         end
         return
     end
 
     @simd_threaded_loop for i in ideb:ifin+1
-        X[i] = x[i] + dt*ustar[i]
+        X[i] = x[i] + dt * ustar[i]
     end
  
     @simd_threaded_loop for i in ideb:ifin
-        dm = rho[i]*(x[i+1]-x[i])
-        rho[i] = dm/(X[i+1]-X[i])
-        umat[i] = umat[i] + dt/dm*(pstar[i]-pstar[i+1])
-        Emat[i] = Emat[i] + dt/dm*(pstar[i]*ustar[i]-pstar[i+1]*ustar[i+1])
-        emat[i] = Emat[i] - 0.5*umat[i]^2
+        dm = rho[i] * (x[i+1] - x[i])
+        rho[i] = dm / (X[i+1] - X[i])
+        umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
+        Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
+        emat[i] = Emat[i] - 0.5 * umat[i]^2
     end
 
     if !params.euler_projection
@@ -1040,13 +1074,15 @@ function update_EOS!(params, pmat, cmat, gmat, rho, emat)
         end
 
         if params.use_gpu
-            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, emat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, emat, 
+                pmat, cmat, gmat, ndrange=length(ideb:ifin))
         else
             perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
         end
     elseif test == :Bizarrium
         if params.use_gpu
-            gpu_update_bizarrium_EOS!(ideb - 1, rho, emat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+            gpu_update_bizarrium_EOS!(ideb - 1, rho, emat, 
+                pmat, cmat, gmat, ndrange=length(ideb:ifin))
         else
             BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
         end
@@ -1057,7 +1093,8 @@ end
 # Main time loop
 # 
 
-function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, 
+        ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
     (; maxtime, maxcycle, nbcell, silent) = params
     cycle = 0
     t::params.data_type   = 0.
@@ -1069,15 +1106,18 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 
     while t < maxtime && cycle < maxcycle
         @time_pos params "boundaryConditions" boundaryConditions!(params, rho, umat, pmat, cmat, gmat)
-        @time_pos params "dtCFL" dt = dtCFL(params, dta, x, cmat, umat)
-        @time_pos params "numericalFluxes!" numericalFluxes!(params, ustar, pstar, rho, umat, pmat, cmat, gmat, ustar_1, pstar_1, dt, x)
-        @time_pos params "cellUpdate!" cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat)
+        @time_pos params "dtCFL"              dt = dtCFL(params, dta, x, cmat, umat)
+        @time_pos params "numericalFluxes!"   numericalFluxes!(params, ustar, pstar, rho, 
+                                                  umat, pmat, cmat, ustar_1, pstar_1, dt, x)
+        @time_pos params "cellUpdate!"        cellUpdate!(params, dt, x, X, ustar, pstar, rho, 
+                                                  umat, emat, Emat)
 
         if params.euler_projection
-            @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho, tmp_urho, tmp_Erho)
+            @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, dt, X, rho,
+                umat, Emat, ustar, tmp_rho, tmp_urho, tmp_Erho)
         end
 
-        @time_pos params "update_EOS!" update_EOS!(params, pmat, cmat, gmat, rho, emat)
+        @time_pos params "update_EOS!"        update_EOS!(params, pmat, cmat, gmat, rho, emat)
 
         dta = dt
         cycle += 1
@@ -1108,10 +1148,10 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
 
     if silent < 3
         println(" ")
-        println("Time:       ", round((t2 - t1) / 1e9, digits=5), " sec")
+        println("Time:       ", round((t2 - t1) / 1e9, digits=5),       " sec")
         println("Warmup:     ", round((t_warmup - t1) / 1e9, digits=5), " sec")
-        println("Grind time: ", round(grind_time / 1e3, digits=5), " µs/cell/cycle")
-        println("Cells/sec:  ", round(1 / grind_time * 1e3, digits=5), " Mega cells/sec")
+        println("Grind time: ", round(grind_time / 1e3, digits=5),      " µs/cell/cycle")
+        println("Cells/sec:  ", round(1 / grind_time * 1e3, digits=5),  " Mega cells/sec")
         println("Cycles: ", cycle)
         println(" ")
     end
@@ -1127,7 +1167,9 @@ function write_result(x, rho, umat, pmat, emat, cmat, gmat, ustar, pstar, ideb, 
     f = open("output", "w")
 
     for i in ideb:ifin
-        print(f, 0.5*(x[i]+x[i+1]), ", ", rho[i], ", ", umat[i], ", ", pmat[i], ", ", emat[i], ", ", cmat[i], ", ", gmat[i], ", ", ustar[i], ", ", pstar[i], "\n")
+        print(f, 0.5*(x[i]+x[i+1]), ", ", 
+            rho[i],  ", ", umat[i], ", ", pmat[i],  ", ", emat[i],  ", ", 
+            cmat[i], ", ", gmat[i], ", ", ustar[i], ", ", pstar[i], "\n")
     end
     
     close(f)
@@ -1155,33 +1197,29 @@ function armon(params::ArmonParameters)
         end
     end
     
-    # Allocate without initialisation in order to correctly map the NUMA space using the first-touch policy when working on CPU only
-    x = Vector{data_type}(undef, nbcell + 2 * nghost)
-    X = Vector{data_type}(undef, nbcell + 2 * nghost)
-    rho = Vector{data_type}(undef, nbcell + 2 * nghost)
-    umat = Vector{data_type}(undef, nbcell + 2 * nghost)
-    emat = Vector{data_type}(undef, nbcell + 2 * nghost)
-    Emat = Vector{data_type}(undef, nbcell + 2 * nghost)
-    pmat = Vector{data_type}(undef, nbcell + 2 * nghost)
-    cmat = Vector{data_type}(undef, nbcell + 2 * nghost)
-    gmat = Vector{data_type}(undef, nbcell + 2 * nghost)
-    ustar = Vector{data_type}(undef, nbcell + 2 * nghost)
-    pstar = Vector{data_type}(undef, nbcell + 2 * nghost)
-    ustar_1 = Vector{data_type}(undef, nbcell + 2 * nghost)
-    pstar_1 = Vector{data_type}(undef, nbcell + 2 * nghost)
-    tmp_rho  = Vector{data_type}(undef, nbcell + 2 * nghost)
-    tmp_urho = Vector{data_type}(undef, nbcell + 2 * nghost)
-    tmp_Erho = Vector{data_type}(undef, nbcell + 2 * nghost)
+    # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
+    # policy when working on CPU only
+    data_size = nbcell + 2 * nghost
+    x = Vector{data_type}(undef, data_size)
+    X = Vector{data_type}(undef, data_size)
+    rho = Vector{data_type}(undef, data_size)
+    umat = Vector{data_type}(undef, data_size)
+    emat = Vector{data_type}(undef, data_size)
+    Emat = Vector{data_type}(undef, data_size)
+    pmat = Vector{data_type}(undef, data_size)
+    cmat = Vector{data_type}(undef, data_size)
+    gmat = Vector{data_type}(undef, data_size)
+    ustar = Vector{data_type}(undef, data_size)
+    pstar = Vector{data_type}(undef, data_size)
+    ustar_1 = Vector{data_type}(undef, data_size)
+    pstar_1 = Vector{data_type}(undef, data_size)
+    tmp_rho  = Vector{data_type}(undef, data_size)
+    tmp_urho = Vector{data_type}(undef, data_size)
+    tmp_Erho = Vector{data_type}(undef, data_size)
 
     init_time = @elapsed init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
 
     silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
-
-    if silent <= -1
-        for i in ideb:ifin
-            println("Init, ", 0.5*(x[i]+x[i+1]), ", ", rho[i], ", ", umat[i], ", ", pmat[i], ", ", emat[i], ", ", cmat[i], ", ", gmat[i], "\n")
-        end
-    end
 
     if params.use_gpu
         alloc_copy_GPU = use_ROCM ? ROCArray : CuArray
@@ -1208,9 +1246,13 @@ function armon(params::ArmonParameters)
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
         if silent <= 3
-            @time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, d_tmp_Erho)
+            @time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat,
+                d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, 
+                d_tmp_Erho)
         else
-            cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, d_tmp_Erho)
+            cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, 
+                d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho,
+                d_tmp_Erho)
         end
 
         copyto!(x, d_x)
@@ -1228,14 +1270,17 @@ function armon(params::ArmonParameters)
         copyto!(pstar_1, d_pstar_1)
     else
         if silent <= 3
-            @time cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+            @time cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat,
+                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
         else
-            cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+            cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, 
+                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
         end
     end
 
     if params.write_output
-        write_result(x, rho, umat, pmat, emat, cmat, gmat, ustar, pstar, params.ideb, params.ifin, silent)
+        write_result(x, rho, umat, pmat, emat, cmat, gmat, ustar, pstar, params.ideb, params.ifin, 
+            silent)
     end
 
     if params.measure_time && silent < 3
@@ -1248,6 +1293,5 @@ function armon(params::ArmonParameters)
 
     return cells_per_sec, sort(collect(time_contrib))
 end
-
 
 end
