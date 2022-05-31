@@ -7,14 +7,16 @@ CFLAGS = -O3 -fopenmp -Wall -ffast-math
 ifdef use_clang
 	C = clang
 	CXX = clang++
-#	CXXFLAGS += -Rpass=loop-vectorize -Rpass-analysis=loop-vectorize
+	CXXFLAGS += -march=native -mtune=native
+	CFLAGS += -march=native -mtune=native
 else ifdef use_icc
 	C = icc
 	CXX = icpc
 else
 	C = gcc
 	CXX = g++
-#	CXXFLAGS += -ftree-vectorizer-verbose=10
+	CXXFLAGS += -march=native -mtune=native
+	CFLAGS += -march=native -mtune=native
 endif
 
 use_simd ?= 1
