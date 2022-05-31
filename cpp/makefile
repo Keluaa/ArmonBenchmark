@@ -1,6 +1,4 @@
 
-#CXXFLAGS = -g -fopenmp -Wall -std=c++17 -ffast-math
-#CXXFLAGS = -O3 -fopenmp -Wall -std=c++17 -ffast-math
 CXXFLAGS = -O3 -fopenmp -Wall -std=c++17 -ffast-math
 CFLAGS = -O3 -fopenmp -Wall -ffast-math
 
@@ -24,7 +22,6 @@ use_threading ?= 1
 use_single_precision ?= 0
 use_std_vector ?= 0
 debug ?= 0
-scalasca ?= 0
 
 ifeq ($(use_simd), 1)
 	CFLAGS += -mavx2 -mavx
