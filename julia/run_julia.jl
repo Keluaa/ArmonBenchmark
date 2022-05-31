@@ -176,7 +176,7 @@ for test in tests
             if cells_per_sec < 0
                 print(" (negative throughput, restarting...) ")
             end
-        end       
+        end
  
         @printf("%.2g Giga cells/sec\n", cells_per_sec)
 

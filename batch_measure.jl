@@ -398,9 +398,9 @@ end
 
 
 function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler)
-    # error("TODO : block_size, compiler")
-    # TODO : block_size
-    # TODO : compiler
+    if block_size != 256
+        println("WARNING: Kokkos doesn't support custom GPU block sizes. It is choosen at runtime depending on the kernels.")
+    end
 
     make_options = [
         "--quiet",    # Don't print unuseful info
@@ -409,7 +409,18 @@ function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_s
         "use_single=$(convert(Int, ieee_bits == 32))"
     ]
 
-    println("Recompiling the C++ Kokkos code with: block_size=$(block_size), ieee_bits=$(ieee_bits), use_simd=$(use_simd)")
+    if compiler == GCC
+        push!(make_options, "use_gcc=1")
+        compiler_str = "GCC"
+    elseif compiler == Clang
+        push!(make_options, "use_clang=1")
+        compiler_str = "Clang"
+    elseif compiler == ICC
+        push!(make_options, "use_icc=1")
+        compiler_str = "ICC"
+    end
+
+    println("Recompiling the C++ Kokkos code with: block_size=$(block_size), ieee_bits=$(ieee_bits), use_simd=$(use_simd) using the $(compiler_str) compiler")
 
     if device == CPU
         make_target = "build-omp"
@@ -420,6 +431,7 @@ function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_s
     elseif device == ROCM
         make_target = "build-hip"
         make_run_target = "run-hip"
+        println("WARNING: Kokkos on ROCM GPU can only use the hipcc compiler")
     else
         error("Wrong device")
     end
