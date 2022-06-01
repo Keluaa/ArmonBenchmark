@@ -380,7 +380,7 @@ end
 
 
 @kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, 
-        x_, X, @Const(ustar), @Const(pstar), rho, umat, emat, Emat)
+        x_, X, @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat)
     i = @index(Global) + i_0
 
     X[i] = x_[i] + dt * ustar[i]
@@ -396,7 +396,7 @@ end
     rho[i]  = dm / (x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i]))
     umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
     Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
-    emat[i] = Emat[i] - 0.5 * umat[i]^2
+    emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
 
     @synchronize
 
@@ -409,7 +409,7 @@ end
 
 
 @kernel function gpu_cell_update_euler_kernel!(i_0, ifin, dt, 
-        x_, X, @Const(ustar), @Const(pstar), rho, umat, emat, Emat)
+        x_, X, @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat)
     i = @index(Global) + i_0
 
     X[i] = x_[i] + dt * ustar[i]
@@ -426,12 +426,12 @@ end
     rho[i]  = dm / dx
     umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
     Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
-    emat[i] = Emat[i] - 0.5 * umat[i]^2
+    emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
 end
 
 
 @kernel function gpu_first_order_euler_remap_kernel!(i_0, dt, 
-        X, @Const(ustar), rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+        X, @Const(ustar), rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
     i = @index(Global) + i_0
 
     dx = X[i+1] - X[i]
@@ -445,6 +445,9 @@ end
     tmp_urho[i] = (L₁ * rho[i-1] * umat[i-1] 
                  + L₂ * rho[i]   * umat[i] 
                  + L₃ * rho[i+1] * umat[i+1]) / dx
+    tmp_vrho[i] = (L₁ * rho[i-1] * vmat[i-1] 
+                 + L₂ * rho[i]   * vmat[i] 
+                 + L₃ * rho[i+1] * vmat[i+1]) / dx
     tmp_Erho[i] = (L₁ * rho[i-1] * Emat[i-1] 
                  + L₂ * rho[i]   * Emat[i] 
                  + L₃ * rho[i+1] * Emat[i+1]) / dx
@@ -452,12 +455,13 @@ end
 
 
 @kernel function gpu_first_order_euler_remap_2_kernel!(i_0, 
-        rho, umat, Emat, tmp_rho, tmp_urho, tmp_Erho)
+        rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
     i = @index(Global) + i_0
 
-    # (ρ, ρu, ρE) -> (ρ, u, E)
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
     rho[i] = tmp_rho[i]
     umat[i] = tmp_urho[i] / tmp_rho[i]
+    vmat[i] = tmp_vrho[i] / tmp_rho[i]
     Emat[i] = tmp_Erho[i] / tmp_rho[i]
 end
 
@@ -513,14 +517,16 @@ end
 
 
 @kernel function gpu_boundary_conditions_kernel!(test_bizarrium, ideb, ifin, 
-        rho, umat, pmat, cmat, gmat)
+        rho, umat, vmat, pmat, cmat, gmat)
     rho[ideb-1]  = rho[ideb]
     umat[ideb-1] = -umat[ideb]
+    vmat[ideb-1] = vmat[ideb]
     pmat[ideb-1] = pmat[ideb]
     cmat[ideb-1] = cmat[ideb]
     gmat[ideb-1] = gmat[ideb]
 
     rho[ifin+1]  = rho[ifin]
+    vmat[ifin-1] = vmat[ifin]
     pmat[ifin+1] = pmat[ifin]
     cmat[ifin+1] = cmat[ifin]
     gmat[ifin+1] = gmat[ifin]
@@ -812,7 +818,7 @@ end
 # Test initialisation
 # 
 
-function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
+function init_test(params, x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat)
     (; test, nghost, nbcell, ideb, ifin) = params
 
     if test == :Sod
@@ -833,10 +839,12 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
                 rho[i] = 1.
                 pmat[i] = 1.
                 umat[i] = 0.
+                vmat[i] = 0.
             else
                 rho[i] = 0.125
                 pmat[i] = 0.1
                 umat[i] = 0.
+                vmat[i] = 0.
             end
         end
 
@@ -856,10 +864,12 @@ function init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
             if x[i] < 0.5
                 rho[i] = 1.42857142857e+4
                 umat[i] = 0.
+                vmat[i] = 0.
                 emat[i] = Emat[i] = 4.48657821135e+6
             else
                 rho[i] =  10000.
                 umat[i] = 250.
+                vmat[i] = 0.
                 emat[i] = 0.
                 Emat[i] = 0.5 * umat[i]^2
             end
@@ -875,21 +885,23 @@ end
 # Boundary conditions
 #
 
-function boundaryConditions!(params, rho, umat, pmat, cmat, gmat)
+function boundaryConditions!(params, rho, umat, vmat, pmat, cmat, gmat)
     (; test, ideb, ifin) = params
 
     if params.use_gpu
-        gpu_boundary_conditions!(test == :Bizarrium, ideb, ifin, rho, umat, pmat, cmat, gmat)
+        gpu_boundary_conditions!(test == :Bizarrium, ideb, ifin, rho, umat, vmat, pmat, cmat, gmat)
         return
     end
 
     rho[ideb-1]  = rho[ideb]
     umat[ideb-1] = -umat[ideb]
+    vmat[ideb-1] = vmat[ideb]
     pmat[ideb-1] = pmat[ideb]
     cmat[ideb-1] = cmat[ideb]
     gmat[ideb-1] = gmat[ideb]
 
     rho[ifin+1]  = rho[ifin]
+    vmat[ifin-1] = vmat[ifin]
     pmat[ifin+1] = pmat[ifin]
     cmat[ifin+1] = cmat[ifin]
     gmat[ifin+1] = gmat[ifin]
@@ -941,7 +953,7 @@ function dtCFL(params, dta, x, cmat, umat)
                     abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
             @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
-                dt_i = (x[i+1]-x[i])/max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
+                dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
                 threadlocal = min(threadlocal, dt_i)
             end
             dt = minimum(threadlocal)
@@ -989,14 +1001,15 @@ end
 # Cell update
 # 
 
-function first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho, tmp_urho, tmp_Erho)
+function first_order_euler_remap!(params, dt, X, rho, umat, vmat, Emat, ustar, 
+        tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
     (; ideb, ifin) = params
 
     if params.use_gpu
-        gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, Emat, 
-            tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
-        gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, Emat, 
-            tmp_rho, tmp_urho, tmp_Erho, ndrange=length(ideb:ifin))
+        gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, vmat, Emat, 
+            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
+        gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
+            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
         return
     end
 
@@ -1013,30 +1026,34 @@ function first_order_euler_remap!(params, dt, X, rho, umat, Emat, ustar, tmp_rho
         tmp_urho[i] = (L₁ * rho[i-1] * umat[i-1] 
                      + L₂ * rho[i]   * umat[i] 
                      + L₃ * rho[i+1] * umat[i+1]) / dx
+        tmp_vrho[i] = (L₁ * rho[i-1] * vmat[i-1] 
+                     + L₂ * rho[i]   * vmat[i] 
+                     + L₃ * rho[i+1] * vmat[i+1]) / dx
         tmp_Erho[i] = (L₁ * rho[i-1] * Emat[i-1] 
                      + L₂ * rho[i]   * Emat[i] 
                      + L₃ * rho[i+1] * Emat[i+1]) / dx
     end
 
-    # (ρ, ρu, ρE) -> (ρ, u, E)
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
     @simd_threaded_loop for i in ideb:ifin+1
         rho[i]  = tmp_rho[i]
         umat[i] = tmp_urho[i] / tmp_rho[i]
+        vmat[i] = tmp_vrho[i] / tmp_rho[i]
         Emat[i] = tmp_Erho[i] / tmp_rho[i]
     end
 end
 
 
-function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat)
+function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, vmat, emat, Emat)
     (; ideb, ifin) = params
 
     if params.use_gpu
         if params.euler_projection
             gpu_cell_update_euler!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
-                rho, umat, emat, Emat, ndrange=length(ideb:ifin))
+                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin))
         else
             gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
-                rho, umat, emat, Emat, ndrange=length(ideb:ifin))
+                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin))
         end
         return
     end
@@ -1049,8 +1066,9 @@ function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, emat, Emat)
         dm = rho[i] * (x[i+1] - x[i])
         rho[i] = dm / (X[i+1] - X[i])
         umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
+        vmat[i] = vmat[i]
         Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
-        emat[i] = Emat[i] - 0.5 * umat[i]^2
+        emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
     end
 
     if !params.euler_projection
@@ -1093,8 +1111,8 @@ end
 # Main time loop
 # 
 
-function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar, pstar, 
-        ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+function time_loop(params, x, X, rho, umat, vmat, pmat, cmat, gmat, emat, Emat, ustar, pstar, 
+        ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
     (; maxtime, maxcycle, nbcell, silent) = params
     cycle = 0
     t::params.data_type   = 0.
@@ -1105,16 +1123,16 @@ function time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, ustar,
     t_warmup = t1
 
     while t < maxtime && cycle < maxcycle
-        @time_pos params "boundaryConditions" boundaryConditions!(params, rho, umat, pmat, cmat, gmat)
+        @time_pos params "boundaryConditions" boundaryConditions!(params, rho, umat, vmat, pmat, cmat, gmat)
         @time_pos params "dtCFL"              dt = dtCFL(params, dta, x, cmat, umat)
         @time_pos params "numericalFluxes!"   numericalFluxes!(params, ustar, pstar, rho, 
                                                   umat, pmat, cmat, ustar_1, pstar_1, dt, x)
         @time_pos params "cellUpdate!"        cellUpdate!(params, dt, x, X, ustar, pstar, rho, 
-                                                  umat, emat, Emat)
+                                                  umat, vmat, emat, Emat)
 
         if params.euler_projection
             @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, dt, X, rho,
-                umat, Emat, ustar, tmp_rho, tmp_urho, tmp_Erho)
+                umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
         end
 
         @time_pos params "update_EOS!"        update_EOS!(params, pmat, cmat, gmat, rho, emat)
@@ -1163,12 +1181,12 @@ end
 # Output 
 #
 
-function write_result(x, rho, umat, pmat, emat, cmat, gmat, ustar, pstar, ideb, ifin, silent)
+function write_result(x, rho, umat, vmat, pmat, emat, cmat, gmat, ustar, pstar, ideb, ifin, silent)
     f = open("output", "w")
 
     for i in ideb:ifin
         print(f, 0.5*(x[i]+x[i+1]), ", ", 
-            rho[i],  ", ", umat[i], ", ", pmat[i],  ", ", emat[i],  ", ", 
+            rho[i],  ", ", umat[i], ", ", vmat[i],  ", ", pmat[i],  ", ", emat[i],  ", ", 
             cmat[i], ", ", gmat[i], ", ", ustar[i], ", ", pstar[i], "\n")
     end
     
@@ -1202,8 +1220,9 @@ function armon(params::ArmonParameters)
     data_size = nbcell + 2 * nghost
     x = Vector{data_type}(undef, data_size)
     X = Vector{data_type}(undef, data_size)
-    rho = Vector{data_type}(undef, data_size)
+    rho  = Vector{data_type}(undef, data_size)
     umat = Vector{data_type}(undef, data_size)
+    vmat = Vector{data_type}(undef, data_size)
     emat = Vector{data_type}(undef, data_size)
     Emat = Vector{data_type}(undef, data_size)
     pmat = Vector{data_type}(undef, data_size)
@@ -1215,9 +1234,10 @@ function armon(params::ArmonParameters)
     pstar_1 = Vector{data_type}(undef, data_size)
     tmp_rho  = Vector{data_type}(undef, data_size)
     tmp_urho = Vector{data_type}(undef, data_size)
+    tmp_vrho = Vector{data_type}(undef, data_size)
     tmp_Erho = Vector{data_type}(undef, data_size)
 
-    init_time = @elapsed init_test(params, x, rho, pmat, umat, emat, Emat, cmat, gmat)
+    init_time = @elapsed init_test(params, x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat)
 
     silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
 
@@ -1229,6 +1249,7 @@ function armon(params::ArmonParameters)
             d_X = alloc_copy_GPU(X)
             d_rho = alloc_copy_GPU(rho)
             d_umat = alloc_copy_GPU(umat)
+            d_vmat = alloc_copy_GPU(vmat)
             d_emat = alloc_copy_GPU(emat)
             d_Emat = alloc_copy_GPU(Emat)
             d_pmat = alloc_copy_GPU(pmat)
@@ -1240,25 +1261,27 @@ function armon(params::ArmonParameters)
             d_pstar_1 = alloc_copy_GPU(pstar_1)
             d_tmp_rho = alloc_copy_GPU(tmp_rho)
             d_tmp_urho = alloc_copy_GPU(tmp_urho)
+            d_tmp_vrho = alloc_copy_GPU(tmp_vrho)
             d_tmp_Erho = alloc_copy_GPU(tmp_Erho)
         end
 
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
         if silent <= 3
-            @time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat,
+            @time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_vmat, d_pmat, d_cmat, d_gmat,
                 d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, 
-                d_tmp_Erho)
+                d_tmp_vrho, d_tmp_Erho)
         else
-            cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_pmat, d_cmat, d_gmat, 
+            cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_vmat, d_pmat, d_cmat, d_gmat, 
                 d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho,
-                d_tmp_Erho)
+                d_tmp_vrho, d_tmp_Erho)
         end
 
         copyto!(x, d_x)
         copyto!(X, d_X)
         copyto!(rho, d_rho)
         copyto!(umat, d_umat)
+        copyto!(vmat, d_vmat)
         copyto!(emat, d_emat)
         copyto!(Emat, d_Emat)
         copyto!(pmat, d_pmat)
@@ -1266,21 +1289,19 @@ function armon(params::ArmonParameters)
         copyto!(gmat, d_gmat)
         copyto!(ustar, d_ustar)
         copyto!(pstar, d_pstar)
-        copyto!(ustar_1, d_ustar_1)
-        copyto!(pstar_1, d_pstar_1)
     else
         if silent <= 3
-            @time cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat,
-                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+            @time cells_per_sec = time_loop(params, x, X, rho, umat, vmat, pmat, cmat, gmat, emat, Emat,
+                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
         else
-            cells_per_sec = time_loop(params, x, X, rho, umat, pmat, cmat, gmat, emat, Emat, 
-                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_Erho)
+            cells_per_sec = time_loop(params, x, X, rho, umat, vmat, pmat, cmat, gmat, emat, Emat, 
+                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
         end
     end
 
     if params.write_output
-        write_result(x, rho, umat, pmat, emat, cmat, gmat, ustar, pstar, params.ideb, params.ifin, 
-            silent)
+        write_result(x, rho, umat, vmat, pmat, emat, cmat, gmat, ustar, pstar, 
+            params.ideb, params.ifin, silent)
     end
 
     if params.measure_time && silent < 3
