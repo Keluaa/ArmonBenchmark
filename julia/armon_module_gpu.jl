@@ -846,9 +846,11 @@ function init_test(params, x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat)
                 umat[i] = 0.
                 vmat[i] = 0.
             end
-        end
 
-        perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
+            emat[i] = Emat[i] = pmat[i]/((gamma-1.)*rho[i])
+            cmat[i] = sqrt(gamma*pmat[i]/rho[i])
+            gmat[i] = 0.5*(1.0+gamma)
+        end
     elseif test == :Bizarrium
         if params.maxtime == 0
             params.maxtime = 80e-6
