@@ -1005,7 +1005,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     gmat[ideb-1] = gmat[ideb]
 
     rho[ifin+1]  = rho[ifin]
-    vmat[ifin-1] = vmat[ifin]
+    vmat[ifin+1] = vmat[ifin]
     pmat[ifin+1] = pmat[ifin]
     cmat[ifin+1] = cmat[ifin]
     gmat[ifin+1] = gmat[ifin]
