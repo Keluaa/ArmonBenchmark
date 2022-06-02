@@ -161,7 +161,7 @@ struct ArmonData{Flt_T}
 end
 
 
-function ArmonData(type::Type, size::UInt64)
+function ArmonData(type::Type, size::Int64)
     return ArmonData{type}(
         Vector{type}(undef, size),
         Vector{type}(undef, size),
