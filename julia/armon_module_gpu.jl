@@ -27,9 +27,6 @@ export ArmonParameters, armon
 # 
 
 mutable struct ArmonParameters{Flt_T}
-    # Floating point type (Float32 or Float64)
-    data_type::Type
-
     # Test problem type, riemann solver and solver scheme
     test::Symbol
     riemann::Symbol
@@ -95,8 +92,7 @@ function ArmonParameters(; ieee_bits = 64,
     ideb = nghost + 1
     ifin = nghost + nbcell
     
-    return ArmonParameters{flt_type}(flt_type, 
-                                     test, riemann, scheme, 
+    return ArmonParameters{flt_type}(test, riemann, scheme, 
                                      iterations, 
                                      nghost, nbcell, cfl, Dt, ideb, ifin, 
                                      euler_projection, cst_dt,
@@ -108,7 +104,7 @@ function ArmonParameters(; ieee_bits = 64,
 end
 
 
-function print_parameters(p::ArmonParameters)
+function print_parameters(p::ArmonParameters{T}) where T
     println("Parameters:")
     print(" - multithreading: ", p.use_threading)
     if p.use_threading
@@ -124,7 +120,7 @@ function print_parameters(p::ArmonParameters)
     println(" - use_simd:   ", p.use_simd)
     println(" - use_ccall:  ", p.use_ccall)
     println(" - use_gpu:    ", p.use_gpu)
-    println(" - ieee_bits:  ", sizeof(p.data_type) * 8)
+    println(" - ieee_bits:  ", sizeof(T) * 8)
     println("")
     println(" - test:       ", p.test)
     println(" - riemann:    ", p.riemann)
@@ -138,6 +134,98 @@ function print_parameters(p::ArmonParameters)
     println(" - maxtime:    ", p.maxtime)
     println(" - maxcycle:   ", p.maxcycle)
 end
+
+#
+# Data
+#
+
+struct ArmonData{Flt_T}
+    x::Vector{Flt_T}
+    X::Vector{Flt_T}
+    rho::Vector{Flt_T}
+    umat::Vector{Flt_T}
+    vmat::Vector{Flt_T}
+    emat::Vector{Flt_T}
+    Emat::Vector{Flt_T}
+    pmat::Vector{Flt_T}
+    cmat::Vector{Flt_T}
+    gmat::Vector{Flt_T}
+    ustar::Vector{Flt_T}
+    pstar::Vector{Flt_T}
+    ustar_1::Vector{Flt_T}
+    pstar_1::Vector{Flt_T}
+    tmp_rho::Vector{Flt_T}
+    tmp_urho::Vector{Flt_T}
+    tmp_vrho::Vector{Flt_T}
+    tmp_Erho::Vector{Flt_T}
+end
+
+
+function ArmonData(type::Type, size::UInt64)
+    return ArmonData{type}(
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size),
+        Vector{type}(undef, size)
+    )
+end
+
+
+function data_to_gpu(data::ArmonData{T}) where T
+    alloc_copy_GPU = use_ROCM ? ROCArray : CuArray
+    return ArmonData{T}(
+        alloc_copy_GPU(data.x),
+        alloc_copy_GPU(data.X),
+        alloc_copy_GPU(data.rho),
+        alloc_copy_GPU(data.umat),
+        alloc_copy_GPU(data.vmat),
+        alloc_copy_GPU(data.emat),
+        alloc_copy_GPU(data.Emat),
+        alloc_copy_GPU(data.pmat),
+        alloc_copy_GPU(data.cmat),
+        alloc_copy_GPU(data.gmat),
+        alloc_copy_GPU(data.ustar),
+        alloc_copy_GPU(data.pstar),
+        alloc_copy_GPU(data.ustar_1),
+        alloc_copy_GPU(data.pstar_1),
+        alloc_copy_GPU(data.tmp_rho),
+        alloc_copy_GPU(data.tmp_urho),
+        alloc_copy_GPU(data.tmp_vrho),
+        alloc_copy_GPU(data.tmp_Erho)
+    )
+end
+
+
+function data_from_gpu(host_data::ArmonData{T}, device_data::ArmonData{T}) where T
+    # We only need to copy the non-temporary arrays 
+    copyto!(host_data.x, device_data.x)
+    copyto!(host_data.X, device_data.X)
+    copyto!(host_data.rho, device_data.rho)
+    copyto!(host_data.umat, device_data.umat)
+    copyto!(host_data.vmat, device_data.vmat)
+    copyto!(host_data.emat, device_data.emat)
+    copyto!(host_data.Emat, device_data.Emat)
+    copyto!(host_data.pmat, device_data.pmat)
+    copyto!(host_data.cmat, device_data.cmat)
+    copyto!(host_data.gmat, device_data.gmat)
+    copyto!(host_data.ustar, device_data.ustar)
+    copyto!(host_data.pstar, device_data.pstar)
+end
+
 
 #
 # Threading and SIMD control macros
@@ -480,34 +568,34 @@ end
         @Const(rho), @Const(emat), pmat, cmat, gmat)
     i = @index(Global) + i_0
 
-    data_type = eltype(rho)
+    type = eltype(rho)
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
     # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state"
     # JCP 2009
     
-    rho0::data_type = 10000.
-    K0::data_type   = 1e+11
-    Cv0::data_type  = 1000.
-    T0::data_type   = 300.
-    eps0::data_type = 0.
-    G0::data_type   = 1.5
-    s::data_type    = 1.5
-    q::data_type    = -42080895/14941154
-    r::data_type    = 727668333/149411540
+    rho0::type = 10000.
+    K0::type   = 1e+11
+    Cv0::type  = 1000.
+    T0::type   = 300.
+    eps0::type = 0.
+    G0::type   = 1.5
+    s::type    = 1.5
+    q::type    = -42080895/14941154
+    r::type    = 727668333/149411540
 
-    x::data_type = rho[i] / rho0 - 1
-    g::data_type = G0 * (1-rho0 / rho[i])
+    x::type = rho[i] / rho0 - 1
+    g::type = G0 * (1-rho0 / rho[i])
 
-    f0::data_type = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)
-    f1::data_type = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)
-    f2::data_type = (2*q+6*r*x+2*s*f1)/(1-s*x)
-    f3::data_type = (6*r+3*s*f2)/(1-s*x)
+    f0::type = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)
+    f1::type = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)
+    f2::type = (2*q+6*r*x+2*s*f1)/(1-s*x)
+    f3::type = (6*r+3*s*f2)/(1-s*x)
 
-    epsk0::data_type     = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0
-    pk0::data_type       = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)
-    pk0prime::data_type  = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)
-    pk0second::data_type = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 
+    epsk0::type     = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0
+    pk0::type       = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)
+    pk0prime::type  = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)
+    pk0second::type = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 
                                                     6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
     pmat[i] = pk0 + G0 * rho0 * (emat[i] - epsk0)
@@ -629,8 +717,10 @@ end
 # Equations of State
 #
 
-function perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
+function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{T}, gamma::T) where T
+    (; pmat, cmat, gmat, rho, emat) = data
     (; ideb, ifin) = params
+
     @simd_threaded_loop for i in ideb:ifin
         pmat[i] = (gamma - 1.) * rho[i] * emat[i]
         cmat[i] = sqrt(gamma * pmat[i] / rho[i])
@@ -639,7 +729,8 @@ function perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
 end
 
 
-function BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
+function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{T}) where T
+    (; pmat, cmat, gmat, rho, emat) = data
     (; ideb, ifin) = params
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
@@ -673,17 +764,19 @@ end
 # Acoustic Riemann problem solvers
 # 
 
-function acoustic!(params, ustar, pstar, rho, umat, pmat, cmat)
+function acoustic!(params::ArmonParameters{T}, data::ArmonData{T}) where T
+    (; ustar, pstar, rho, umat, pmat, cmat) = data
     (; ideb, ifin) = params
+
     if params.use_ccall
         # void acoustic(double* restrict ustar, double* restrict pstar, 
         #       const double* restrict rho, const double* restrict cmat,
         #       const double* restrict umat, const double* restrict pmat, 
         #       int ideb, int ifin)
         ccall((:acoustic, "./libacoustic.so"), Cvoid, (
-                Ref{Float64}, Ref{Float64}, 
-                Ref{Float64}, Ref{Float64}, 
-                Ref{Float64}, Ref{Float64}, 
+                Ref{T}, Ref{T}, 
+                Ref{T}, Ref{T}, 
+                Ref{T}, Ref{T}, 
                 Int32, Int32),
             ustar, pstar, rho, cmat, umat, pmat, ideb, ifin)
     elseif params.use_gpu
@@ -701,7 +794,8 @@ function acoustic!(params, ustar, pstar, rho, umat, pmat, cmat)
 end
 
 
-function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x)
+function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
+    (; ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, x) = data
     (; scheme, ideb, ifin) = params
 
     if params.use_ccall
@@ -714,11 +808,11 @@ function acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pst
         #           double dt, int ideb, int ifin,
         #           int scheme)
         ccall((:acoustic_GAD, "./libacoustic.so"), Cvoid, (
-                Ref{Float64}, Ref{Float64}, 
-                Ref{Float64}, Ref{Float64}, 
-                Ref{Float64}, Ref{Float64}, 
-                Ref{Float64}, Ref{Float64}, 
-                Ref{Float64},
+                Ref{T}, Ref{T}, 
+                Ref{T}, Ref{T}, 
+                Ref{T}, Ref{T}, 
+                Ref{T}, Ref{T}, 
+                Ref{T},
                 Int32, Int32,
                 Int32),
             ustar, pstar, ustar_1, pstar_1, rho, cmat, umat, pmat, x, ideb, ifin, scheme_int)
@@ -818,8 +912,9 @@ end
 # Test initialisation
 # 
 
-function init_test(params, x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat)
-    (; test, nghost, nbcell, ideb, ifin) = params
+function init_test(params::ArmonParameters{T}, data::ArmonData{T}) where T
+    (; x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat) = data
+    (; test, nghost, nbcell) = params
 
     if test == :Sod
         if params.maxtime == 0
@@ -830,7 +925,7 @@ function init_test(params, x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat)
             params.cfl = 0.95
         end
 
-        gamma::params.data_type = 1.4
+        gamma::T = 1.4
     
         @threaded for i in 1:nbcell+2*nghost
             x[i] = (i-1-nghost) / nbcell
@@ -877,7 +972,7 @@ function init_test(params, x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat)
             end
         end
     
-        BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
+        BizarriumEOS!(params, data)
     end
     
     return
@@ -887,7 +982,8 @@ end
 # Boundary conditions
 #
 
-function boundaryConditions!(params, rho, umat, vmat, pmat, cmat, gmat)
+function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{T}) where T
+    (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, ideb, ifin) = params
 
     if params.use_gpu
@@ -919,18 +1015,19 @@ end
 # Time step computation
 #
 
-function dtCFL(params, dta, x, cmat, umat)
+function dtCFL(params::ArmonParameters{T}, data::ArmonData{T}, dta::T) where T
+    (; x, cmat, umat) = data
     (; cfl, Dt, ideb, ifin) = params
 
-    dt::params.data_type = Inf
+    dt::T = Inf
 
     if params.cst_dt
         # Constant time step
         dt = Dt
     elseif params.use_gpu && use_ROCM
         # ROCM doesn't support Array Programming, so an explicit reduction kernel is needed
-        result = zeros(eltype(x), 1)  # temporary array of a single value, holding the result of the reduction
-        tmp_values = ones(eltype(x), 1024)
+        result = zeros(T, 1)  # temporary array of a single value, holding the result of the reduction
+        tmp_values = ones(T, 1024)
         d_tmp_values = ROCArray(tmp_values)
         tmp_err_i = -ones(Int, 1024)
         d_tmp_err_i = ROCArray(tmp_err_i)
@@ -954,7 +1051,7 @@ function dtCFL(params, dta, x, cmat, umat)
                     abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
                     abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
-            @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
+            @batch threadlocal=typemax(T) for i in ideb:ifin
                 dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
                 threadlocal = min(threadlocal, dt_i)
             end
@@ -964,7 +1061,7 @@ function dtCFL(params, dta, x, cmat, umat)
         if params.use_gpu
             dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ cmat[ideb:ifin]))
         else
-            @batch threadlocal=typemax(typeof(dta)) for i in ideb:ifin
+            @batch threadlocal=typemax(T) for i in ideb:ifin
                 threadlocal = min(threadlocal, (x[i+1] - x[i]) / cmat[i])
             end
             dt = minimum(threadlocal)
@@ -979,7 +1076,7 @@ function dtCFL(params, dta, x, cmat, umat)
         end
     else
         # CFL condition and maximum increase per cycle of the time step
-        return convert(params.data_type, min(cfl * dt, 1.05 * dta))
+        return convert(T, min(cfl * dt, 1.05 * dta))
     end
 end
 
@@ -987,12 +1084,12 @@ end
 # Numerical fluxes computation
 #
 
-function numericalFluxes!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x)
+function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            acoustic!(params, ustar, pstar, rho, umat, pmat, cmat)
+            acoustic!(params, data)
         else
-            acoustic_GAD!(params, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, dt, x)
+            acoustic_GAD!(params, data, dt)
         end
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
@@ -1003,8 +1100,8 @@ end
 # Cell update
 # 
 
-function first_order_euler_remap!(params, dt, X, rho, umat, vmat, Emat, ustar, 
-        tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
+    (; X, rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
     (; ideb, ifin) = params
 
     if params.use_gpu
@@ -1046,7 +1143,8 @@ function first_order_euler_remap!(params, dt, X, rho, umat, vmat, Emat, ustar,
 end
 
 
-function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, vmat, emat, Emat)
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
+    (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat) = data
     (; ideb, ifin) = params
 
     if params.use_gpu
@@ -1081,11 +1179,11 @@ function cellUpdate!(params, dt, x, X, ustar, pstar, rho, umat, vmat, emat, Emat
 end
 
 
-function update_EOS!(params, pmat, cmat, gmat, rho, emat)
+function update_EOS!(params::ArmonParameters{T}, data::ArmonData{T}) where T
     (; ideb, ifin, test) = params
 
     if test == :Sod || test == :Leblanc || test == :Woodward
-        gamma::params.data_type = 0.0
+        gamma::T = 0.0
 
         if test == :Sod || test == :Woodward
             gamma = 1.4
@@ -1097,14 +1195,14 @@ function update_EOS!(params, pmat, cmat, gmat, rho, emat)
             gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, emat, 
                 pmat, cmat, gmat, ndrange=length(ideb:ifin))
         else
-            perfectGasEOS!(params, pmat, cmat, gmat, rho, emat, gamma)
+            perfectGasEOS!(params, data, gamma)
         end
     elseif test == :Bizarrium
         if params.use_gpu
             gpu_update_bizarrium_EOS!(ideb - 1, rho, emat, 
                 pmat, cmat, gmat, ndrange=length(ideb:ifin))
         else
-            BizarriumEOS!(params, pmat, cmat, gmat, rho, emat)
+            BizarriumEOS!(params, data)
         end
     end
 end
@@ -1113,31 +1211,28 @@ end
 # Main time loop
 # 
 
-function time_loop(params, x, X, rho, umat, vmat, pmat, cmat, gmat, emat, Emat, ustar, pstar, 
-        ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+function time_loop(params::ArmonParameters{T}, data::ArmonData{T}) where T
     (; maxtime, maxcycle, nbcell, silent) = params
-    cycle = 0
-    t::params.data_type   = 0.
-    dta::params.data_type = 0.
-    dt::params.data_type  = 0.
+
+    cycle  = 0
+    t::T   = 0.
+    dta::T = 0.
+    dt::T  = 0.
 
     t1 = time_ns()
     t_warmup = t1
 
     while t < maxtime && cycle < maxcycle
-        @time_pos params "boundaryConditions" boundaryConditions!(params, rho, umat, vmat, pmat, cmat, gmat)
-        @time_pos params "dtCFL"              dt = dtCFL(params, dta, x, cmat, umat)
-        @time_pos params "numericalFluxes!"   numericalFluxes!(params, ustar, pstar, rho, 
-                                                  umat, pmat, cmat, ustar_1, pstar_1, dt, x)
-        @time_pos params "cellUpdate!"        cellUpdate!(params, dt, x, X, ustar, pstar, rho, 
-                                                  umat, vmat, emat, Emat)
+        @time_pos params "boundaryConditions" boundaryConditions!(params, data)
+        @time_pos params "dtCFL"              dt = dtCFL(params, data, dta)
+        @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt)
+        @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt)
 
         if params.euler_projection
-            @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, dt, X, rho,
-                umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+            @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt)
         end
 
-        @time_pos params "update_EOS!"        update_EOS!(params, pmat, cmat, gmat, rho, emat)
+        @time_pos params "update_EOS!"        update_EOS!(params, data)
 
         dta = dt
         cycle += 1
@@ -1176,14 +1271,17 @@ function time_loop(params, x, X, rho, umat, vmat, pmat, cmat, gmat, emat, Emat, 
         println(" ")
     end
 
-    return params.data_type(1 / grind_time)
+    return convert(T, 1 / grind_time)
 end
 
 #
 # Output 
 #
 
-function write_result(x, rho, umat, vmat, pmat, emat, cmat, gmat, ustar, pstar, ideb, ifin, silent)
+function write_result(params::ArmonParameters{T}, data::ArmonData{T}) where T
+    (; x, rho, umat, vmat, pmat, emat, cmat, gmat, ustar, pstar) = data
+    (; ideb, ifin, silent) = params
+
     f = open("output", "w")
 
     for i in ideb:ifin
@@ -1203,8 +1301,8 @@ end
 # Main function
 # 
 
-function armon(params::ArmonParameters)
-    (; data_type, nghost, nbcell, silent) = params
+function armon(params::ArmonParameters{T}) where T
+    (; nghost, nbcell, silent) = params
 
     if params.measure_time
         empty!(time_contrib)
@@ -1220,90 +1318,32 @@ function armon(params::ArmonParameters)
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
     data_size = nbcell + 2 * nghost
-    x = Vector{data_type}(undef, data_size)
-    X = Vector{data_type}(undef, data_size)
-    rho  = Vector{data_type}(undef, data_size)
-    umat = Vector{data_type}(undef, data_size)
-    vmat = Vector{data_type}(undef, data_size)
-    emat = Vector{data_type}(undef, data_size)
-    Emat = Vector{data_type}(undef, data_size)
-    pmat = Vector{data_type}(undef, data_size)
-    cmat = Vector{data_type}(undef, data_size)
-    gmat = Vector{data_type}(undef, data_size)
-    ustar = Vector{data_type}(undef, data_size)
-    pstar = Vector{data_type}(undef, data_size)
-    ustar_1 = Vector{data_type}(undef, data_size)
-    pstar_1 = Vector{data_type}(undef, data_size)
-    tmp_rho  = Vector{data_type}(undef, data_size)
-    tmp_urho = Vector{data_type}(undef, data_size)
-    tmp_vrho = Vector{data_type}(undef, data_size)
-    tmp_Erho = Vector{data_type}(undef, data_size)
+    data = ArmonData(T, data_size)
 
-    init_time = @elapsed init_test(params, x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat)
-
+    init_time = @elapsed init_test(params, data)
     silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
 
     if params.use_gpu
-        alloc_copy_GPU = use_ROCM ? ROCArray : CuArray
-
-        copy_time = @elapsed begin
-            d_x = alloc_copy_GPU(x)
-            d_X = alloc_copy_GPU(X)
-            d_rho = alloc_copy_GPU(rho)
-            d_umat = alloc_copy_GPU(umat)
-            d_vmat = alloc_copy_GPU(vmat)
-            d_emat = alloc_copy_GPU(emat)
-            d_Emat = alloc_copy_GPU(Emat)
-            d_pmat = alloc_copy_GPU(pmat)
-            d_cmat = alloc_copy_GPU(cmat)
-            d_gmat = alloc_copy_GPU(gmat)
-            d_ustar = alloc_copy_GPU(ustar)
-            d_pstar = alloc_copy_GPU(pstar)
-            d_ustar_1 = alloc_copy_GPU(ustar_1)
-            d_pstar_1 = alloc_copy_GPU(pstar_1)
-            d_tmp_rho = alloc_copy_GPU(tmp_rho)
-            d_tmp_urho = alloc_copy_GPU(tmp_urho)
-            d_tmp_vrho = alloc_copy_GPU(tmp_vrho)
-            d_tmp_Erho = alloc_copy_GPU(tmp_Erho)
-        end
-
+        copy_time = @elapsed d_data = data_to_gpu(data)
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
         if silent <= 3
-            @time cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_vmat, d_pmat, d_cmat, d_gmat,
-                d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho, 
-                d_tmp_vrho, d_tmp_Erho)
+            @time cells_per_sec = time_loop(params, d_data)
         else
-            cells_per_sec = time_loop(params, d_x, d_X, d_rho, d_umat, d_vmat, d_pmat, d_cmat, d_gmat, 
-                d_emat, d_Emat, d_ustar, d_pstar, d_ustar_1, d_pstar_1, d_tmp_rho, d_tmp_urho,
-                d_tmp_vrho, d_tmp_Erho)
+            cells_per_sec = time_loop(params, d_data)
         end
 
-        copyto!(x, d_x)
-        copyto!(X, d_X)
-        copyto!(rho, d_rho)
-        copyto!(umat, d_umat)
-        copyto!(vmat, d_vmat)
-        copyto!(emat, d_emat)
-        copyto!(Emat, d_Emat)
-        copyto!(pmat, d_pmat)
-        copyto!(cmat, d_cmat)
-        copyto!(gmat, d_gmat)
-        copyto!(ustar, d_ustar)
-        copyto!(pstar, d_pstar)
+        data_from_gpu(data, d_data)
     else
         if silent <= 3
-            @time cells_per_sec = time_loop(params, x, X, rho, umat, vmat, pmat, cmat, gmat, emat, Emat,
-                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+            @time cells_per_sec = time_loop(params, data)
         else
-            cells_per_sec = time_loop(params, x, X, rho, umat, vmat, pmat, cmat, gmat, emat, Emat, 
-                ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+            cells_per_sec = time_loop(params, data)
         end
     end
 
     if params.write_output
-        write_result(x, rho, umat, vmat, pmat, emat, cmat, gmat, ustar, pstar, 
-            params.ideb, params.ifin, silent)
+        write_result(params, data)
     end
 
     if params.measure_time && silent < 3
