@@ -933,7 +933,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
         gamma::T = 1.4
     
-        @threaded for i in 1:nbcell+2*nghost
+        @simd_threaded_loop for i in 1:nbcell+2*nghost
             x[i] = (i-1-nghost) / nbcell
     
             if x[i] < 0.5
@@ -948,9 +948,9 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 vmat[i] = 0.
             end
 
-            emat[i] = Emat[i] = pmat[i]/((gamma-1.)*rho[i])
-            cmat[i] = sqrt(gamma*pmat[i]/rho[i])
-            gmat[i] = 0.5*(1.0+gamma)
+            emat[i] = Emat[i] = pmat[i] / ((gamma - 1.) * rho[i])
+            cmat[i] = sqrt(gamma * pmat[i] / rho[i])
+            gmat[i] = 0.5 * (1. + gamma)
         end
     elseif test == :Bizarrium
         if params.maxtime == 0
@@ -961,7 +961,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             params.cfl = 0.6
         end
     
-        @threaded for i in 1:nbcell+2*nghost
+        @simd_threaded_loop for i in 1:nbcell+2*nghost
             x[i] = (i-1-nghost) / nbcell
     
             if x[i] < 0.5
