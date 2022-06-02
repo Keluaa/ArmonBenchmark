@@ -289,6 +289,7 @@ Each batch has a size of `params.simd_batch` iterations, meaning that the inner 
 fixed number of iterations, while the outer threaded loop will have `N ÷ params.simd_batch`
 iterations.
 
+The loop range must have a step of 1, i.e. this is forbidden: 1:4:450
 The inner `@simd` loop assumes there is no dependencies between each iteration.
 
 ```julia
