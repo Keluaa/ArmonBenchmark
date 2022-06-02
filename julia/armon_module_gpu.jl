@@ -167,7 +167,7 @@ end
 
 
 function ArmonData(type::Type, size::Int64)
-    return ArmonData{Vector{type}, type}(
+    return ArmonData{Vector{type}}(
         Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
@@ -215,7 +215,8 @@ function data_to_gpu(data::ArmonData{V}) where {T, V <: AbstractArray{T}}
 end
 
 
-function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{V}) where V
+function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{W}) where 
+        {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     # We only need to copy the non-temporary arrays 
     copyto!(host_data.x, device_data.x)
     copyto!(host_data.X, device_data.X)
@@ -1185,6 +1186,7 @@ end
 
 
 function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+    (; rho, emat, pmat, cmat, gmat) = data
     (; ideb, ifin, test) = params
 
     if test == :Sod || test == :Leblanc || test == :Woodward
