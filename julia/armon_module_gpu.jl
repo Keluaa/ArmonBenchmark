@@ -139,30 +139,35 @@ end
 # Data
 #
 
-struct ArmonData{Flt_T}
-    x::Vector{Flt_T}
-    X::Vector{Flt_T}
-    rho::Vector{Flt_T}
-    umat::Vector{Flt_T}
-    vmat::Vector{Flt_T}
-    emat::Vector{Flt_T}
-    Emat::Vector{Flt_T}
-    pmat::Vector{Flt_T}
-    cmat::Vector{Flt_T}
-    gmat::Vector{Flt_T}
-    ustar::Vector{Flt_T}
-    pstar::Vector{Flt_T}
-    ustar_1::Vector{Flt_T}
-    pstar_1::Vector{Flt_T}
-    tmp_rho::Vector{Flt_T}
-    tmp_urho::Vector{Flt_T}
-    tmp_vrho::Vector{Flt_T}
-    tmp_Erho::Vector{Flt_T}
+"""
+Generic array holder for all variables and temporary variables used throughout the solver.
+'V' can be a Vector of floats (Float32 or Float64) on CPU, CuArray or ROCArray on GPU.
+Vector, CuArray and ROCArray are all subtypes of AbstractArray.
+"""
+struct ArmonData{V}
+    x::V
+    X::V
+    rho::V
+    umat::V
+    vmat::V
+    emat::V
+    Emat::V
+    pmat::V
+    cmat::V
+    gmat::V
+    ustar::V
+    pstar::V
+    ustar_1::V
+    pstar_1::V
+    tmp_rho::V
+    tmp_urho::V
+    tmp_vrho::V
+    tmp_Erho::V
 end
 
 
 function ArmonData(type::Type, size::Int64)
-    return ArmonData{type}(
+    return ArmonData{Vector{type}, type}(
         Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
@@ -185,32 +190,32 @@ function ArmonData(type::Type, size::Int64)
 end
 
 
-function data_to_gpu(data::ArmonData{T}) where T
-    alloc_copy_GPU = use_ROCM ? ROCArray : CuArray
-    return ArmonData{T}(
-        alloc_copy_GPU(data.x),
-        alloc_copy_GPU(data.X),
-        alloc_copy_GPU(data.rho),
-        alloc_copy_GPU(data.umat),
-        alloc_copy_GPU(data.vmat),
-        alloc_copy_GPU(data.emat),
-        alloc_copy_GPU(data.Emat),
-        alloc_copy_GPU(data.pmat),
-        alloc_copy_GPU(data.cmat),
-        alloc_copy_GPU(data.gmat),
-        alloc_copy_GPU(data.ustar),
-        alloc_copy_GPU(data.pstar),
-        alloc_copy_GPU(data.ustar_1),
-        alloc_copy_GPU(data.pstar_1),
-        alloc_copy_GPU(data.tmp_rho),
-        alloc_copy_GPU(data.tmp_urho),
-        alloc_copy_GPU(data.tmp_vrho),
-        alloc_copy_GPU(data.tmp_Erho)
+function data_to_gpu(data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+    device_type = use_ROCM ? ROCArray : CuArray
+    return ArmonData{device_type{T}}(
+        device_type(data.x),
+        device_type(data.X),
+        device_type(data.rho),
+        device_type(data.umat),
+        device_type(data.vmat),
+        device_type(data.emat),
+        device_type(data.Emat),
+        device_type(data.pmat),
+        device_type(data.cmat),
+        device_type(data.gmat),
+        device_type(data.ustar),
+        device_type(data.pstar),
+        device_type(data.ustar_1),
+        device_type(data.pstar_1),
+        device_type(data.tmp_rho),
+        device_type(data.tmp_urho),
+        device_type(data.tmp_vrho),
+        device_type(data.tmp_Erho)
     )
 end
 
 
-function data_from_gpu(host_data::ArmonData{T}, device_data::ArmonData{T}) where T
+function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{V}) where V
     # We only need to copy the non-temporary arrays 
     copyto!(host_data.x, device_data.x)
     copyto!(host_data.X, device_data.X)
@@ -717,7 +722,7 @@ end
 # Equations of State
 #
 
-function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{T}, gamma::T) where T
+function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T) where {T, V <: AbstractArray{T}}
     (; pmat, cmat, gmat, rho, emat) = data
     (; ideb, ifin) = params
 
@@ -729,7 +734,7 @@ function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{T}, gamma::T
 end
 
 
-function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{T}) where T
+function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; pmat, cmat, gmat, rho, emat) = data
     (; ideb, ifin) = params
 
@@ -764,7 +769,7 @@ end
 # Acoustic Riemann problem solvers
 # 
 
-function acoustic!(params::ArmonParameters{T}, data::ArmonData{T}) where T
+function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, umat, pmat, cmat) = data
     (; ideb, ifin) = params
 
@@ -794,7 +799,7 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{T}) where T
 end
 
 
-function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
+function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1, x) = data
     (; scheme, ideb, ifin) = params
 
@@ -912,7 +917,7 @@ end
 # Test initialisation
 # 
 
-function init_test(params::ArmonParameters{T}, data::ArmonData{T}) where T
+function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat) = data
     (; test, nghost, nbcell) = params
 
@@ -982,7 +987,7 @@ end
 # Boundary conditions
 #
 
-function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{T}) where T
+function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, ideb, ifin) = params
 
@@ -1015,7 +1020,7 @@ end
 # Time step computation
 #
 
-function dtCFL(params::ArmonParameters{T}, data::ArmonData{T}, dta::T) where T
+function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
     (; x, cmat, umat) = data
     (; cfl, Dt, ideb, ifin) = params
 
@@ -1084,7 +1089,7 @@ end
 # Numerical fluxes computation
 #
 
-function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
+function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
             acoustic!(params, data)
@@ -1100,7 +1105,7 @@ end
 # Cell update
 # 
 
-function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
+function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; X, rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
     (; ideb, ifin) = params
 
@@ -1143,7 +1148,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{T}
 end
 
 
-function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) where T
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat) = data
     (; ideb, ifin) = params
 
@@ -1179,7 +1184,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{T}, dt::T) wher
 end
 
 
-function update_EOS!(params::ArmonParameters{T}, data::ArmonData{T}) where T
+function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; ideb, ifin, test) = params
 
     if test == :Sod || test == :Leblanc || test == :Woodward
@@ -1211,7 +1216,7 @@ end
 # Main time loop
 # 
 
-function time_loop(params::ArmonParameters{T}, data::ArmonData{T}) where T
+function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; maxtime, maxcycle, nbcell, silent) = params
 
     cycle  = 0
@@ -1278,7 +1283,7 @@ end
 # Output 
 #
 
-function write_result(params::ArmonParameters{T}, data::ArmonData{T}) where T
+function write_result(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, rho, umat, vmat, pmat, emat, cmat, gmat, ustar, pstar) = data
     (; ideb, ifin, silent) = params
 
