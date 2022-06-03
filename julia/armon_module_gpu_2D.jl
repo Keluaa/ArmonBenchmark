@@ -65,6 +65,7 @@ mutable struct ArmonParameters{Flt_T}
     # Output
     silent::Int
     write_output::Bool
+    write_ghosts::Bool
     measure_time::Bool
 
     # Performance
@@ -82,7 +83,7 @@ function ArmonParameters(; ieee_bits = 64,
                            nghost = 2, nx = 10, ny = 10, cfl = 0.6, Dt = 0., 
                            euler_projection = false, cst_dt = false, transpose_dims = false,
                            maxtime = 0, maxcycle = 500_000,
-                           silent = 0, write_output = true, measure_time = true,
+                           silent = 0, write_output = true, write_ghosts = false, measure_time = true,
                            use_ccall = false, use_threading = true, 
                            use_simd = true, interleaving = false,
                            use_gpu = false)
@@ -122,7 +123,7 @@ function ArmonParameters(; ieee_bits = 64,
                                      ideb, ifin, index_start,
                                      cfl, Dt, euler_projection, cst_dt, transpose_dims,
                                      maxtime, maxcycle,
-                                     silent, write_output, measure_time,
+                                     silent, write_output, write_ghosts, measure_time,
                                      use_ccall, use_threading, use_simd, use_gpu)
 end
 
@@ -406,13 +407,19 @@ end
 
 macro indexing_vars(params)
     return esc(quote
-        (; index_start, row_length) = $(params)
+        (; index_start, row_length, nghost) = $(params)
     end)
 end
 
 macro i(i, j)
     return esc(quote
         index_start + $(j) * row_length + $(i)
+    end)
+end
+
+macro I(i)
+    return esc(quote
+        (($(i)-1) % row_length) + 1 - nghost, (($(i)-1) ÷ row_length) + 1 - nghost
     end)
 end
 
@@ -833,7 +840,6 @@ end
 function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; x, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1) = data
     (; scheme, ideb, ifin) = params
-    @indexing_vars(params)
 
     if params.use_gpu
         if params.scheme != :GAD_minmod
@@ -1102,10 +1108,18 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
                     abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
                     abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
+            (; nx, ny) = params
+            @indexing_vars(params)
             @batch threadlocal=typemax(T) for i in ideb:ifin
-                dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), 
-                                             abs(umat[i] - cmat[i]))
-                threadlocal = min(threadlocal, dt_i)
+                ix, iy = @I(i)
+                if 1 ≤ ix ≤ nx && 1 ≤ iy ≤ ny
+                    dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), 
+                                                 abs(umat[i] - cmat[i]))
+                    threadlocal = min(threadlocal, dt_i)
+                end
+                # dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), 
+                #                              abs(umat[i] - cmat[i]))
+                # threadlocal = min(threadlocal, dt_i)
             end
             dt = minimum(threadlocal)
         end
@@ -1155,7 +1169,6 @@ end
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; X, rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
     (; ideb, ifin) = params
-    @indexing_vars(params)
 
     if params.use_gpu
         gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, vmat, Emat, 
@@ -1199,7 +1212,6 @@ end
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat) = data
     (; ideb, ifin) = params
-    @indexing_vars(params)
 
     if params.use_gpu
         if params.euler_projection
@@ -1217,8 +1229,12 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
     end
 
     @simd_threaded_loop for i in ideb:ifin
-        dm  = rho[i] * (x[i+1] - x[i])
-        rho[i]  = dm / (X[i+1] - X[i])
+        dx  = 1. / nx
+        #dm  = rho[idx] * (x[idx+1] - x[idx])
+        dm  = rho[idx] * dx
+        #rho[idx]  = dm / (X[idx+1] - X[idx])
+        rho[idx]  = dm / (dx + dt * (ustar[idx+1] - ustar[idx]))
+
         umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
         vmat[i] = vmat[i]
         Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
@@ -1337,14 +1353,22 @@ end
 
 function write_result(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, y, rho) = data
-    (; silent, nx, ny) = params
+    (; silent, write_ghosts, nx, ny, nghost) = params
     @indexing_vars(params)
 
     f = open("output", "w")
 
-    for j in 1:ny
-        for i in 1:nx
-            print(f, x[@i(i, j)], ", ", y[@i(i, j)], ", ", rho[@i(i, j)], "\n")
+    if write_ghosts
+        for j in 1-nghost:ny+nghost
+            for i in 1-nghost:nx+nghost
+                print(f, x[@i(i, j)], ", ", y[@i(i, j)], ", ", rho[@i(i, j)], "\n")
+            end
+        end
+    else
+        for j in 1:ny
+            for i in 1:nx
+                print(f, x[@i(i, j)], ", ", y[@i(i, j)], ", ", rho[@i(i, j)], "\n")
+            end
         end
     end
     
