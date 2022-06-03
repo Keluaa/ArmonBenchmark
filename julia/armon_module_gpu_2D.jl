@@ -29,6 +29,9 @@ export ArmonParameters, armon
 # Passer en for j in ny, for i in nx
 # Transposition rho, Emat (emat à mettre dans update EOS)
 
+# EOS à l'init
+# NAN aléatoires
+
 #
 # Parameters
 # 
@@ -1211,7 +1214,7 @@ end
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat) = data
-    (; ideb, ifin) = params
+    (; ideb, ifin, nx) = params
 
     if params.use_gpu
         if params.euler_projection
@@ -1230,10 +1233,10 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
 
     @simd_threaded_loop for i in ideb:ifin
         dx  = 1. / nx
-        #dm  = rho[idx] * (x[idx+1] - x[idx])
-        dm  = rho[idx] * dx
-        #rho[idx]  = dm / (X[idx+1] - X[idx])
-        rho[idx]  = dm / (dx + dt * (ustar[idx+1] - ustar[idx]))
+        #dm  = rho[i] * (x[i+1] - x[i])
+        dm  = rho[i] * dx
+        #rho[i]  = dm / (X[i+1] - X[i])
+        rho[i]  = dm / (dx + dt * (ustar[i+1] - ustar[i]))
 
         umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
         vmat[i] = vmat[i]
@@ -1401,8 +1404,50 @@ function armon(params::ArmonParameters{T}) where T
     # policy when working on CPU only
     data = ArmonData(T, params.nbcell)
 
+    x .= NaN
+    X .= NaN
+    y .= NaN
+    Y .= NaN
+    rho .= NaN
+    umat .= NaN
+    vmat .= NaN
+    emat .= NaN
+    Emat .= NaN
+    pmat .= NaN
+    cmat .= NaN
+    gmat .= NaN
+    ustar .= NaN
+    pstar .= NaN
+    ustar_1 .= NaN
+    pstar_1 .= NaN
+    tmp_rho .= NaN
+    tmp_urho .= NaN
+    tmp_vrho .= NaN
+    tmp_Erho .= NaN
+
     init_time = @elapsed init_test(params, data)
     silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
+
+    println("x:        ", x)
+    println("X:        ", X)
+    println("y:        ", y)
+    println("Y:        ", Y)
+    println("rho:      ", rho)
+    println("umat:     ", umat)
+    println("vmat:     ", vmat)
+    println("emat:     ", emat)
+    println("Emat:     ", Emat)
+    println("pmat:     ", pmat)
+    println("cmat:     ", cmat)
+    println("gmat:     ", gmat)
+    println("ustar:    ", ustar)
+    println("pstar:    ", pstar)
+    println("ustar_1:  ", ustar_1)
+    println("pstar_1:  ", pstar_1)
+    println("tmp_rho:  ", tmp_rho)
+    println("tmp_urho: ", tmp_urho)
+    println("tmp_vrho: ", tmp_vrho)
+    println("tmp_Erho: ", tmp_Erho)
 
     if params.use_gpu
         copy_time = @elapsed d_data = data_to_gpu(data)
