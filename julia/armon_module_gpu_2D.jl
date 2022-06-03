@@ -111,10 +111,10 @@ function ArmonParameters(; ieee_bits = 64,
 
     row_length = nghost * 2 + nx
     col_length = nghost * 2 + ny
-    ideb = row_length * 2 + nghost + 1
-    ifin = row_length * (ny - 1 + 2) + nghost + nx
+    ideb = row_length * nghost + nghost + 1
+    ifin = row_length * (ny - 1 + nghost) + nghost + nx
     nbcell = row_length * col_length
-    index_start =  ideb - row_length - 1
+    index_start = ideb - row_length - 1
     
     return ArmonParameters{flt_type}(test, riemann, scheme, 
                                      iterations, 
@@ -406,13 +406,13 @@ end
 
 macro indexing_vars(params)
     return esc(quote
-        (; index_start, row_length) = params
+        (; index_start, row_length) = $(params)
     end)
 end
 
 macro i(i, j)
     return esc(quote
-        index_start + j * row_length + i
+        index_start + $(j) * row_length + $(i)
     end)
 end
 
@@ -828,14 +828,14 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
     else
         @simd_threaded_loop for j in 1:ny
-            for i in 1:nx
+            for i in 1:nx+1
                 idx = @i(i,j)
                 rc_l = rho[idx-1] * cmat[idx-1]
                 rc_r = rho[idx]   * cmat[idx]
                 ustar[idx] = (rc_l * umat[idx-1] + rc_r * umat[idx] +
-                    (pmat[idx-1] - pmat[idx])) / (rc_l + rc_r)
+                                  (pmat[idx-1] - pmat[idx])) / (rc_l + rc_r)
                 pstar[idx] = (rc_r * pmat[idx-1] + rc_l * pmat[idx] + 
-                    (umat[idx-1] - umat[idx])) / (rc_l + rc_r) * rc_l * rc_r
+                    rc_l * rc_r * (umat[idx-1] - umat[idx])) / (rc_l + rc_r)
             end
         end
     end
@@ -859,21 +859,21 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
 
     # First order
     @simd_threaded_loop for j in 1:ny
-        for i in 1:nx
+        for i in 1:nx+1
             idx = @i(i,j)
             rc_l = rho[idx-1] * cmat[idx-1]
             rc_r = rho[idx]   * cmat[idx]
             ustar_1[idx] = (rc_l * umat[idx-1] + rc_r * umat[idx] +
-                (pmat[idx-1] - pmat[idx])) / (rc_l + rc_r)
+                              (pmat[idx-1] - pmat[idx])) / (rc_l + rc_r)
             pstar_1[idx] = (rc_r * pmat[idx-1] + rc_l * pmat[idx] +
-                (umat[idx-1] - umat[idx])) / (rc_l + rc_r) * rc_l * rc_r
+                rc_l * rc_r * (umat[idx-1] - umat[idx])) / (rc_l + rc_r)
         end
     end
     
     # Second order, for each flow limiter
     if scheme == :GAD_minmod
         @simd_threaded_loop for j in 1:ny
-            for i in 1:nx
+            for i in 1:nx+1
                 idx = @i(i,j)
                 r_u_m = (ustar_1[idx+1] - umat[idx]) / (ustar_1[idx] - umat[idx-1] + 1e-6)
                 r_p_m = (pstar_1[idx+1] - pmat[idx]) / (pstar_1[idx] - pmat[idx-1] + 1e-6)
@@ -900,7 +900,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
         end
     elseif scheme == :GAD_superbee
         @simd_threaded_loop for j in 1:ny
-            for i in 1:nx
+            for i in 1:nx+1
                 idx = @i(i,j)
                 r_u_m = (ustar_1[idx+1] - umat[idx]) / (ustar_1[idx] - umat[idx-1] + 1e-6)
                 r_p_m = (pstar_1[idx+1] - pmat[idx]) / (pstar_1[idx] - pmat[idx-1] + 1e-6)
@@ -927,7 +927,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
         end
     elseif scheme == :GAD_no_limiter
         @simd_threaded_loop for j in 1:ny
-            for i in 1:nx
+            for i in 1:nx+1
                 idx = @i(i,j)
                 dm_l = rho[idx-1] * (x[idx] - x[idx-1])
                 dm_r = rho[idx]   * (x[idx+1] - x[idx])
@@ -969,11 +969,11 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         gamma::T = 1.4
     
         @simd_threaded_loop for i in 1:nbcell
-            ix = i % row_length
-            iy = i ÷ row_length
+            ix = (i-1) % row_length
+            iy = (i-1) ÷ row_length
 
-            x[i] = (ix-1-nghost) / nx
-            y[i] = (iy-1-nghost) / ny
+            x[i] = (ix-nghost) / nx
+            y[i] = (iy-nghost) / ny
     
             if x[i] < 0.5
                 rho[i] = 1.
@@ -1001,11 +1001,11 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         end
     
         @simd_threaded_loop for i in 1:nbcell
-            ix = i % row_length
-            iy = i ÷ row_length
+            ix = (i-1) % row_length
+            iy = (i-1) ÷ row_length
 
-            x[i] = (ix-1-nghost) / nx
-            y[i] = (iy-1-nghost) / ny
+            x[i] = (ix-nghost) / nx
+            y[i] = (iy-nghost) / ny
     
             if x[i] < 0.5
                 rho[i] = 1.42857142857e+4
@@ -1054,7 +1054,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
         gmat[@i(0,j)] = gmat[@i(1,j)]
 
         # Condition for the right border of the domain
-        rho[@i(nx+1, j)]  = rho[@i(nx,j)]
+        rho[@i(nx+1, j)] = rho[@i(nx,j)]
         umat[@i(nx+1,j)] = umat[@i(nx,j)] * u_factor_right
         vmat[@i(nx+1,j)] = vmat[@i(nx,j)]
         pmat[@i(nx+1,j)] = pmat[@i(nx,j)]
@@ -1062,6 +1062,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
         gmat[@i(nx+1,j)] = gmat[@i(nx,j)]
     end
 
+    #=
     @threaded for i in 1:nx
         # Condition for the bottom border of the domain
         rho[@i(i,0)]  = rho[@i(i,1)]
@@ -1079,6 +1080,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
         cmat[@i(i,ny+1)] = cmat[@i(i,ny)]
         gmat[@i(i,ny+1)] = gmat[@i(i,ny)]
     end
+    =#
 end
 
 #
@@ -1244,7 +1246,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
     end
 
     @simd_threaded_loop for j in 1:ny
-        for i in 1:nx
+        for i in 1:nx+1
             idx = @i(i, j)
             X[idx] = x[idx] + dt * ustar[idx]
         end
@@ -1264,7 +1266,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
  
     if !params.euler_projection
         @simd_threaded_loop for j in 1:ny
-            for i in 1:nx
+            for i in 1:nx+1
                 idx = @i(i, j)
                 x[idx] = X[idx]
             end
@@ -1307,7 +1309,7 @@ end
 # 
 
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; maxtime, maxcycle, nbcell, silent) = params
+    (; maxtime, maxcycle, nx, ny, silent) = params
     
     cycle  = 0
     t::T   = 0.
@@ -1355,7 +1357,8 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         error("Clock error: $(t2) < $(t_warmup)")
     end
     
-    grind_time = (t2 - t_warmup) / ((cycle - 5)*nbcell)
+    nb_cells = nx * ny
+    grind_time = (t2 - t_warmup) / ((cycle - 5)*nb_cells)
 
     if silent < 3
         println(" ")
@@ -1442,7 +1445,7 @@ function armon(params::ArmonParameters{T}) where T
         write_result(params, data)
     end
 
-    if params.measure_time && silent < 3
+    if params.measure_time && silent < 3 && !isempty(time_contrib)
         total_time = mapreduce(x->x[2], +, collect(time_contrib))
         println("\nTotal time of each step:")
         for (label, time_) in sort(collect(time_contrib))
