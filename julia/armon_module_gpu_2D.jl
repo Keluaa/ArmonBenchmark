@@ -766,24 +766,19 @@ end
 
 function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T) where {T, V <: AbstractArray{T}}
     (; pmat, cmat, gmat, rho, emat) = data
-    (; nx, ny) = params
-    @indexing_vars(params)
+    (; ideb, ifin) = params
 
-    @simd_threaded_loop for j in 1:ny
-        for i in 1:nx
-            idx = @i(i,j)
-            pmat[idx] = (gamma - 1.) * rho[idx] * emat[idx]
-            cmat[idx] = sqrt(gamma * pmat[idx] / rho[idx])
-            gmat[idx] = (1. + gamma) / 2
-        end
+    @simd_threaded_loop for i in ideb:ifin
+        pmat[i] = (gamma - 1.) * rho[i] * emat[i]
+        cmat[i] = sqrt(gamma * pmat[i] / rho[i])
+        gmat[i] = (1. + gamma) / 2
     end
 end
 
 
 function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; pmat, cmat, gmat, rho, emat) = data
-    (; nx, ny) = params
-    @indexing_vars(params)
+    (; ideb, ifin) = params
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
     # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state",
@@ -792,26 +787,23 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
     rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
     q = -42080895/14941154; r = 727668333/149411540
 
-    @simd_threaded_loop for j in 1:ny
-        for i in 1:nx
-            idx = @i(i,j)
-            x = rho[idx]/rho0 - 1; g = G0*(1-rho0/rho[idx]) # formula (4b)
+    @simd_threaded_loop for i in ideb:ifin
+        x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # formula (4b)
 
-            f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)   # Formula (15b)
-            f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)  # Formula (16a)
-            f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)          # Formula (16b)
-            f3 = (6*r+3*s*f2)/(1-s*x)                # Formula (16c)
+        f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)   # Formula (15b)
+        f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)  # Formula (16a)
+        f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)          # Formula (16b)
+        f3 = (6*r+3*s*f2)/(1-s*x)                # Formula (16c)
 
-            epsk0 = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                                # Formula (15a)
-            pk0 = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                              # Formula (17a)
-            pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)    # Formula (17b)
-            pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +           # Formula (17c)
-                                                6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
+        epsk0 = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                                # Formula (15a)
+        pk0 = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                              # Formula (17a)
+        pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)    # Formula (17b)
+        pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +           # Formula (17c)
+                                            6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
-            pmat[idx] = pk0 + G0*rho0*(emat[idx] - epsk0)                                     # Formula (5b)
-            cmat[idx] = sqrt(G0*rho0*(pmat[idx] - pk0) - pk0prime) / rho[idx]                 # Formula (8)
-            gmat[idx] = 0.5/(rho[idx]^3*cmat[idx]^2)*(pk0second+(G0*rho0)^2*(pmat[idx]-pk0))  # Formula (8) + (11)
-        end
+        pmat[i] = pk0 + G0*rho0*(emat[i] - epsk0)                                     # Formula (5b)
+        cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]                 # Formula (8)
+        gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0))  # Formula (8) + (11)
     end
 end
 
@@ -821,22 +813,18 @@ end
 
 function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, umat, pmat, cmat) = data
-    (; ideb, ifin, nx, ny) = params
-    @indexing_vars(params)
+    (; ideb, ifin) = params
 
     if params.use_gpu
         gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
     else
-        @simd_threaded_loop for j in 1:ny
-            for i in 1:nx+1
-                idx = @i(i,j)
-                rc_l = rho[idx-1] * cmat[idx-1]
-                rc_r = rho[idx]   * cmat[idx]
-                ustar[idx] = (rc_l * umat[idx-1] + rc_r * umat[idx] +
-                                  (pmat[idx-1] - pmat[idx])) / (rc_l + rc_r)
-                pstar[idx] = (rc_r * pmat[idx-1] + rc_l * pmat[idx] + 
-                    rc_l * rc_r * (umat[idx-1] - umat[idx])) / (rc_l + rc_r)
-            end
+        @simd_threaded_loop for i in ideb:ifin+1
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
+            ustar[i] = (rc_l * umat[i-1] + rc_r * umat[i] +
+                              (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
+            pstar[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] + 
+                rc_l * rc_r * (umat[i-1] - umat[i])) / (rc_l + rc_r)
         end
     end
 end
@@ -844,7 +832,7 @@ end
 
 function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; x, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1) = data
-    (; scheme, ideb, ifin, nx, ny) = params
+    (; scheme, ideb, ifin) = params
     @indexing_vars(params)
 
     if params.use_gpu
@@ -858,89 +846,77 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
     end
 
     # First order
-    @simd_threaded_loop for j in 1:ny
-        for i in 1:nx+1
-            idx = @i(i,j)
-            rc_l = rho[idx-1] * cmat[idx-1]
-            rc_r = rho[idx]   * cmat[idx]
-            ustar_1[idx] = (rc_l * umat[idx-1] + rc_r * umat[idx] +
-                              (pmat[idx-1] - pmat[idx])) / (rc_l + rc_r)
-            pstar_1[idx] = (rc_r * pmat[idx-1] + rc_l * pmat[idx] +
-                rc_l * rc_r * (umat[idx-1] - umat[idx])) / (rc_l + rc_r)
-        end
+    @simd_threaded_loop for i in ideb:ifin
+        rc_l = rho[i-1] * cmat[i-1]
+        rc_r = rho[i]   * cmat[i]
+        ustar_1[i] = (rc_l * umat[i-1] + rc_r * umat[i] +
+                          (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
+        pstar_1[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] +
+            rc_l * rc_r * (umat[i-1] - umat[i])) / (rc_l + rc_r)
     end
     
     # Second order, for each flow limiter
     if scheme == :GAD_minmod
-        @simd_threaded_loop for j in 1:ny
-            for i in 1:nx+1
-                idx = @i(i,j)
-                r_u_m = (ustar_1[idx+1] - umat[idx]) / (ustar_1[idx] - umat[idx-1] + 1e-6)
-                r_p_m = (pstar_1[idx+1] - pmat[idx]) / (pstar_1[idx] - pmat[idx-1] + 1e-6)
-                r_u_p = (umat[idx-1] - ustar_1[idx-1]) / (umat[idx] - ustar_1[idx] + 1e-6)
-                r_p_p = (pmat[idx-1] - pstar_1[idx-1]) / (pmat[idx] - pstar_1[idx] + 1e-6)
+        @simd_threaded_loop for i in ideb:ifin+1
+            r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
+            r_p_m = (pstar_1[i+1] - pmat[i]) / (pstar_1[i] - pmat[i-1] + 1e-6)
+            r_u_p = (umat[i-1] - ustar_1[i-1]) / (umat[i] - ustar_1[i] + 1e-6)
+            r_p_p = (pmat[i-1] - pstar_1[i-1]) / (pmat[i] - pstar_1[i] + 1e-6)
 
-                r_u_m = max(0., min(1., r_u_m))
-                r_p_m = max(0., min(1., r_p_m))
-                r_u_p = max(0., min(1., r_u_p))
-                r_p_p = max(0., min(1., r_p_p))
+            r_u_m = max(0., min(1., r_u_m))
+            r_p_m = max(0., min(1., r_p_m))
+            r_u_p = max(0., min(1., r_u_p))
+            r_p_p = max(0., min(1., r_p_p))
 
-                dm_l = rho[idx-1] * (x[idx] - x[idx-1])
-                dm_r = rho[idx]   * (x[idx+1] - x[idx])
-                rc_l = rho[idx-1] * cmat[idx-1]
-                rc_r = rho[idx]   * cmat[idx]
-                Dm = (dm_l + dm_r) / 2
-                θ  = (rc_l + rc_r) / 2 * (dt / Dm)
-                
-                ustar[idx] = ustar_1[idx] + 1/2 * (1 - θ) * (r_u_p * (umat[idx] - ustar_1[idx]) -
-                                                             r_u_m * (ustar_1[idx] - umat[idx-1]))
-                pstar[idx] = pstar_1[idx] + 1/2 * (1 - θ) * (r_p_p * (pmat[idx] - pstar_1[idx]) - 
-                                                             r_p_m * (pstar_1[idx] - pmat[idx-1]))
-            end
+            dm_l = rho[i-1] * (x[i] - x[i-1])
+            dm_r = rho[i]   * (x[i+1] - x[i])
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
+            Dm = (dm_l + dm_r) / 2
+            θ  = (rc_l + rc_r) / 2 * (dt / Dm)
+            
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) -
+                                                     r_u_m * (ustar_1[i] - umat[i-1]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) - 
+                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
         end
     elseif scheme == :GAD_superbee
-        @simd_threaded_loop for j in 1:ny
-            for i in 1:nx+1
-                idx = @i(i,j)
-                r_u_m = (ustar_1[idx+1] - umat[idx]) / (ustar_1[idx] - umat[idx-1] + 1e-6)
-                r_p_m = (pstar_1[idx+1] - pmat[idx]) / (pstar_1[idx] - pmat[idx-1] + 1e-6)
-                r_u_p = (umat[idx-1] - ustar_1[idx-1]) / (umat[idx] - ustar_1[idx] + 1e-6)
-                r_p_p = (pmat[idx-1] - pstar_1[idx-1]) / (pmat[idx] - pstar_1[idx] + 1e-6)
+        @simd_threaded_loop for i in ideb:ifin+1
+            r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
+            r_p_m = (pstar_1[i+1] - pmat[i]) / (pstar_1[i] - pmat[i-1] + 1e-6)
+            r_u_p = (umat[i-1] - ustar_1[i-1]) / (umat[i] - ustar_1[i] + 1e-6)
+            r_p_p = (pmat[i-1] - pstar_1[i-1]) / (pmat[i] - pstar_1[i] + 1e-6)
 
-                r_u_m = max(0., min(1., 2. * r_u_m), min(2., r_u_m))
-                r_p_m = max(0., min(1., 2. * r_p_m), min(2., r_p_m))
-                r_u_p = max(0., min(1., 2. * r_u_p), min(2., r_u_p))
-                r_p_p = max(0., min(1., 2. * r_p_p), min(2., r_p_p))
-        
-                dm_l = rho[idx-1] * (x[idx] - x[idx-1])
-                dm_r = rho[idx]   * (x[idx+1] - x[idx])
-                rc_l = rho[idx-1] * cmat[idx-1]
-                rc_r = rho[idx]   * cmat[idx]
-                Dm = (dm_l + dm_r) / 2
-                θ  = (rc_l + rc_r) / 2 * (dt / Dm)
-                
-                ustar[idx] = ustar_1[idx] + 1/2 * (1 - θ) * (r_u_p * (umat[idx] - ustar_1[idx]) - 
-                                                             r_u_m * (ustar_1[idx] - umat[idx-1]))
-                pstar[idx] = pstar_1[idx] + 1/2 * (1 - θ) * (r_p_p * (pmat[idx] - pstar_1[idx]) -
-                                                             r_p_m * (pstar_1[idx] - pmat[idx-1]))
-            end
+            r_u_m = max(0., min(1., 2. * r_u_m), min(2., r_u_m))
+            r_p_m = max(0., min(1., 2. * r_p_m), min(2., r_p_m))
+            r_u_p = max(0., min(1., 2. * r_u_p), min(2., r_u_p))
+            r_p_p = max(0., min(1., 2. * r_p_p), min(2., r_p_p))
+    
+            dm_l = rho[i-1] * (x[i] - x[i-1])
+            dm_r = rho[i]   * (x[i+1] - x[i])
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
+            Dm = (dm_l + dm_r) / 2
+            θ  = (rc_l + rc_r) / 2 * (dt / Dm)
+            
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) - 
+                                                     r_u_m * (ustar_1[i] - umat[i-1]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) -
+                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
         end
     elseif scheme == :GAD_no_limiter
-        @simd_threaded_loop for j in 1:ny
-            for i in 1:nx+1
-                idx = @i(i,j)
-                dm_l = rho[idx-1] * (x[idx] - x[idx-1])
-                dm_r = rho[idx]   * (x[idx+1] - x[idx])
-                rc_l = rho[idx-1] * cmat[idx-1]
-                rc_r = rho[idx]   * cmat[idx]
-                Dm = (dm_l + dm_r) / 2
-                θ  = (rc_l + rc_r) / 2 * (dt / Dm)
+        @simd_threaded_loop for i in ideb:ifin+1
+            dm_l = rho[i-1] * (x[i] - x[i-1])
+            dm_r = rho[i]   * (x[i+1] - x[i])
+            rc_l = rho[i-1] * cmat[i-1]
+            rc_r = rho[i]   * cmat[i]
+            Dm = (dm_l + dm_r) / 2
+            θ  = (rc_l + rc_r) / 2 * (dt / Dm)
 
-                ustar[idx] = ustar_1[idx] + 1/2 * (1 - θ) * (r_u_p * (umat[idx] - ustar_1[idx]) - 
-                                                             r_u_m * (ustar_1[idx] - umat[idx-1]))
-                pstar[idx] = pstar_1[idx] + 1/2 * (1 - θ) * (r_p_p * (pmat[idx] - pstar_1[idx]) - 
-                                                             r_p_m * (pstar_1[idx] - pmat[idx-1]))
-            end
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) - 
+                                                     r_u_m * (ustar_1[i] - umat[i-1]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) - 
+                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
         end
     else
         error("The choice of the scheme for the acoustic solver is not recognized: ", scheme)
@@ -1089,7 +1065,7 @@ end
 
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
     (; x, cmat, umat) = data
-    (; cfl, Dt, ideb, ifin, ny, nx) = params
+    (; cfl, Dt, ideb, ifin) = params
     @indexing_vars(params)
 
     dt::T = Inf
@@ -1126,13 +1102,10 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
                     abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
                     abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
         else
-            @batch threadlocal=typemax(T) for j in 1:ny
-                for i in 1:nx
-                    idx = @i(i,j)
-                    dt_i = (x[idx+1] - x[idx]) / max(abs(umat[idx] + cmat[idx]), 
-                                                     abs(umat[idx] - cmat[idx]))
-                    threadlocal = min(threadlocal, dt_i)
-                end
+            @batch threadlocal=typemax(T) for i in ideb:ifin
+                dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), 
+                                             abs(umat[i] - cmat[i]))
+                threadlocal = min(threadlocal, dt_i)
             end
             dt = minimum(threadlocal)
         end
@@ -1181,7 +1154,7 @@ end
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; X, rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
-    (; ideb, ifin, nx, ny) = params
+    (; ideb, ifin) = params
     @indexing_vars(params)
 
     if params.use_gpu
@@ -1193,45 +1166,39 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 
     # Projection of the conservative variables
-    @simd_threaded_loop for j in 1:ny
-        for i in 1:nx
-            idx = @i(i,j)
-            dx = X[idx+1] - X[idx]
-            L₁ =  max(0, ustar[idx]) * dt
-            L₃ = -min(0, ustar[idx+1]) * dt
-            L₂ = dx - L₁ - L₃
-            
-            tmp_rho[idx]  = (L₁ * rho[idx-1] 
-                           + L₂ * rho[idx] 
-                           + L₃ * rho[idx+1]) / dx
-            tmp_urho[idx] = (L₁ * rho[idx-1] * umat[idx-1] 
-                           + L₂ * rho[idx]   * umat[idx] 
-                           + L₃ * rho[idx+1] * umat[idx+1]) / dx
-            tmp_vrho[idx] = (L₁ * rho[idx-1] * vmat[idx-1] 
-                           + L₂ * rho[idx]   * vmat[idx] 
-                           + L₃ * rho[idx+1] * vmat[idx+1]) / dx
-            tmp_Erho[idx] = (L₁ * rho[idx-1] * Emat[idx-1] 
-                           + L₂ * rho[idx]   * Emat[idx] 
-                           + L₃ * rho[idx+1] * Emat[idx+1]) / dx
-        end
+    @simd_threaded_loop for i in ideb:ifin
+        dx = X[i+1] - X[i]
+        L₁ =  max(0, ustar[i]) * dt
+        L₃ = -min(0, ustar[i+1]) * dt
+        L₂ = dx - L₁ - L₃
+        
+        tmp_rho[i]  = (L₁ * rho[i-1] 
+                        + L₂ * rho[i] 
+                        + L₃ * rho[i+1]) / dx
+        tmp_urho[i] = (L₁ * rho[i-1] * umat[i-1] 
+                        + L₂ * rho[i]   * umat[i] 
+                        + L₃ * rho[i+1] * umat[i+1]) / dx
+        tmp_vrho[i] = (L₁ * rho[i-1] * vmat[i-1] 
+                        + L₂ * rho[i]   * vmat[i] 
+                        + L₃ * rho[i+1] * vmat[i+1]) / dx
+        tmp_Erho[i] = (L₁ * rho[i-1] * Emat[i-1] 
+                        + L₂ * rho[i]   * Emat[i] 
+                        + L₃ * rho[i+1] * Emat[i+1]) / dx
     end
 
     # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
-    @simd_threaded_loop for j in 1:ny
-        for i in 1:nx
-            idx = @i(i,j)
-            rho[idx]  = tmp_rho[idx]
-            umat[idx] = tmp_urho[idx] / tmp_rho[idx]
-            vmat[idx] = tmp_vrho[idx] / tmp_rho[idx]
-            Emat[idx] = tmp_Erho[idx] / tmp_rho[idx]
-        end
+    @simd_threaded_loop for i in ideb:ifin
+        rho[i]  = tmp_rho[i]
+        umat[i] = tmp_urho[i] / tmp_rho[i]
+        vmat[i] = tmp_vrho[i] / tmp_rho[i]
+        Emat[i] = tmp_Erho[i] / tmp_rho[i]
     end
 end
 
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat) = data
-    (; ideb, ifin, nx, ny) = params
+    (; ideb, ifin) = params
     @indexing_vars(params)
 
     if params.use_gpu
@@ -1245,31 +1212,22 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
         return
     end
 
-    @simd_threaded_loop for j in 1:ny
-        for i in 1:nx+1
-            idx = @i(i, j)
-            X[idx] = x[idx] + dt * ustar[idx]
-        end
+    @simd_threaded_loop for i in ideb:ifin
+        X[i] = x[i] + dt * ustar[i]
     end
 
-    @simd_threaded_loop for j in 1:ny
-        for i in 1:nx
-            idx = @i(i, j)
-            dm  = rho[idx] * (x[idx+1] - x[idx])
-            rho[idx]  = dm / (X[idx+1] - X[idx])
-            umat[idx] = umat[idx] + dt / dm * (pstar[idx] - pstar[idx+1])
-            vmat[idx] = vmat[idx]
-            Emat[idx] = Emat[idx] + dt / dm * (pstar[idx] * ustar[idx] - pstar[idx+1] * ustar[idx+1])
-            emat[idx] = Emat[idx] - 0.5 * (umat[idx]^2 + vmat[idx]^2)
-        end
+    @simd_threaded_loop for i in ideb:ifin
+        dm  = rho[i] * (x[i+1] - x[i])
+        rho[i]  = dm / (X[i+1] - X[i])
+        umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
+        vmat[i] = vmat[i]
+        Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
+        emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
     end
  
     if !params.euler_projection
-        @simd_threaded_loop for j in 1:ny
-            for i in 1:nx+1
-                idx = @i(i, j)
-                x[idx] = X[idx]
-            end
+        @simd_threaded_loop for i in ideb:ifin
+            x[i] = X[i]
         end
     end
 end
