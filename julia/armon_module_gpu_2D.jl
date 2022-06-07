@@ -23,14 +23,13 @@ end
 export ArmonParameters, armon
 
 
-# TODO : dtCFL ?
+# TODO : fix ROCM dtCFL (+ take into account the ghost cells)
 # TODO : boundaryConditions (y) ?
-# p, c, g? -> scalaire
-# Passer en for j in ny, for i in nx
-# Transposition rho, Emat (emat à mettre dans update EOS)
+# Transposition of rho and Emat (+ emat in update EOS)
 
-# EOS à l'init
-# NAN aléatoires
+# GPU + perf measure
+# for 2D, add vstar
+# try to remove X and Y
 
 #
 # Parameters
@@ -524,78 +523,58 @@ end
 end
 
 
-@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, 
-        x_, X, @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat)
+@kernel function gpu_cell_update_kernel!(i_0, dx, dt, 
+        @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat)
     i = @index(Global) + i_0
 
-    X[i] = x_[i] + dt * ustar[i]
-
-    if i == ifin
-        X[i+1] = x_[i+1] + dt * ustar[i+1]
-    end
-
-    @synchronize
-
-    dm = rho[i] * (x_[i+1] - x_[i])
-    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
-    rho[i]  = dm / (x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i]))
-    umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
-    Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
-    emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
-
-    @synchronize
-
-    x_[i] = X[i]
-
-    if i == ifin
-        x_[i+1] = X[i+1]
-    end
-end
-
-
-@kernel function gpu_cell_update_euler_kernel!(i_0, ifin, dt, 
-        x_, X, @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat)
-    i = @index(Global) + i_0
-
-    X[i] = x_[i] + dt * ustar[i]
-
-    if i == ifin
-        X[i+1] = x_[i+1] + dt * ustar[i+1]
-    end
-
-    @synchronize
-
-    dm = rho[i] * (x_[i+1] - x_[i])
-    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
-    dx = x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i])
-    rho[i]  = dm / dx
+    dm = rho[i] * dx
+    rho[i]  = dm / (dx + dt * (ustar[i+1] - ustar[i]))
     umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
     Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
     emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
 end
 
 
-@kernel function gpu_first_order_euler_remap_kernel!(i_0, dt, 
-        X, @Const(ustar), rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+@kernel function gpu_cell_update_X_kernel!(i_0, ifin, dt, x, X, @Const(ustar), @Const(lagrange))
     i = @index(Global) + i_0
 
-    dx = X[i+1] - X[i]
-    L₁ = max(0, ustar[i]) * dt
+    X[i] = x[i] + dt * ustar[i]
+
+    if i == ifin
+        X[i+1] = x[i+1] + dt * ustar[i+1]
+        x[i+1] = X[i+1]
+    end
+
+    if lagrange
+        x[i] = X[i]
+        if i == ifin
+            x[i+1] = X[i+1]
+        end
+    end
+end
+
+
+@kernel function gpu_first_order_euler_remap_kernel!(i_0, dx, dt, 
+        @Const(ustar), rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+    i = @index(Global) + i_0
+
+    dX = dx + dt * (ustar[i+1] - ustar[i])
+    L₁ =  max(0, ustar[i]) * dt
     L₃ = -min(0, ustar[i+1]) * dt
-    L₂ = dx - L₁ - L₃
+    L₂ = dX - L₁ - L₃
     
     tmp_rho[i]  = (L₁ * rho[i-1] 
                  + L₂ * rho[i] 
-                 + L₃ * rho[i+1]) / dx
+                 + L₃ * rho[i+1]) / dX
     tmp_urho[i] = (L₁ * rho[i-1] * umat[i-1] 
                  + L₂ * rho[i]   * umat[i] 
-                 + L₃ * rho[i+1] * umat[i+1]) / dx
+                 + L₃ * rho[i+1] * umat[i+1]) / dX
     tmp_vrho[i] = (L₁ * rho[i-1] * vmat[i-1] 
                  + L₂ * rho[i]   * vmat[i] 
-                 + L₃ * rho[i+1] * vmat[i+1]) / dx
+                 + L₃ * rho[i+1] * vmat[i+1]) / dX
     tmp_Erho[i] = (L₁ * rho[i-1] * Emat[i-1] 
                  + L₂ * rho[i]   * Emat[i] 
-                 + L₃ * rho[i+1] * Emat[i+1]) / dx
+                 + L₃ * rho[i+1] * Emat[i+1]) / dX
 end
 
 
@@ -625,7 +604,7 @@ end
         @Const(rho), @Const(emat), pmat, cmat, gmat)
     i = @index(Global) + i_0
 
-    data_type = eltype(rho)
+    type = eltype(rho)
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
     # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state"
@@ -661,25 +640,48 @@ end
 end
 
 
-@kernel function gpu_boundary_conditions_kernel!(test_bizarrium, ideb, ifin, 
+@kernel function gpu_boundary_conditions_kernel!(index_start, row_length, nx, ny, u_factor_right,
         rho, umat, vmat, pmat, cmat, gmat)
-    rho[ideb-1]  = rho[ideb]
-    umat[ideb-1] = -umat[ideb]
-    vmat[ideb-1] = vmat[ideb]
-    pmat[ideb-1] = pmat[ideb]
-    cmat[ideb-1] = cmat[ideb]
-    gmat[ideb-1] = gmat[ideb]
+    thread_i = @index(Global)
 
-    rho[ifin+1]  = rho[ifin]
-    vmat[ifin-1] = vmat[ifin]
-    pmat[ifin+1] = pmat[ifin]
-    cmat[ifin+1] = cmat[ifin]
-    gmat[ifin+1] = gmat[ifin]
+    if thread_i <= ny
+        # Condition for the left border of the domain
+        idx = @i(0,thread_i)
+        rho[idx]  = rho[idx+1]
+        umat[idx] =-umat[idx+1]
+        vmat[idx] = vmat[idx+1]
+        pmat[idx] = pmat[idx+1]
+        cmat[idx] = cmat[idx+1]
+        gmat[idx] = gmat[idx+1]
 
-    if test_bizarrium
-        umat[ifin+1] = umat[ifin]
-    else
-        umat[ifin+1] = -umat[ifin]
+        # Condition for the right border of the domain
+        idx = @i(nx,thread_i)
+        rho[idx+1]  = rho[idx]
+        umat[idx+1] = umat[idx] * u_factor_right
+        vmat[idx+1] = vmat[idx]
+        pmat[idx+1] = pmat[idx]
+        cmat[idx+1] = cmat[idx]
+        gmat[idx+1] = gmat[idx]
+    end
+
+    if thread_i <= nx
+        # Condition for the bottom border of the domain
+        idx = @i(thread_i,0)
+        rho[idx]  = rho[idx+1]
+        umat[idx] = umat[idx+1]
+        vmat[idx] = vmat[idx+1]
+        pmat[idx] = pmat[idx+1]
+        cmat[idx] = cmat[idx+1]
+        gmat[idx] = gmat[idx+1]
+
+        # Condition for the top border of the domain
+        idx = @i(thread_i,ny)
+        rho[idx+1]  = rho[idx]
+        umat[idx+1] = umat[idx]
+        vmat[idx+1] = vmat[idx]
+        pmat[idx+1] = pmat[idx]
+        cmat[idx+1] = cmat[idx]
+        gmat[idx+1] = gmat[idx]
     end
 end
 
@@ -749,8 +751,8 @@ if use_native_CUDA
 
     gpu_acoustic!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_kernel!, args...; ndrange, block_size)
     gpu_acoustic_GAD_minmod!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_GAD_minmod_kernel!, args...; ndrange, block_size)
-    gpu_cell_update_lagrange!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_lagrange_kernel!, args...; ndrange, block_size)
-    gpu_cell_update_euler!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_euler_kernel!, args...; ndrange, block_size)
+    gpu_cell_update!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_kernel!, args...; ndrange, block_size)
+    gpu_cell_update_X_kernel!(args..., ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_X_kernel!, args...; ndrange, block_size)
     gpu_first_order_euler_remap_1!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_kernel!, args...; ndrange, block_size)
     gpu_first_order_euler_remap_2!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_2_kernel!, args...; ndrange, block_size)
     gpu_update_perfect_gas_EOS!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_update_perfect_gas_EOS_kernel!, args...; ndrange, block_size)
@@ -760,13 +762,13 @@ if use_native_CUDA
 else
     gpu_acoustic! = gpu_acoustic_kernel!(device, block_size)
     gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
-    gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
-    gpu_cell_update_euler! = gpu_cell_update_euler_kernel!(device, block_size)
+    gpu_cell_update! = gpu_cell_update_kernel!(device, block_size)
+    gpu_cell_update_X! = gpu_cell_update_X_kernel!(device, block_size)
     gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
     gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, block_size)
     gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
     gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
-    gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, 1, 1)
+    gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, block_size)
     gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
 end
 
@@ -798,22 +800,22 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
     q = -42080895/14941154; r = 727668333/149411540
 
     @simd_threaded_loop for i in ideb:ifin
-        x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # formula (4b)
+        x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # Formula (4b)
 
-        f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)   # Formula (15b)
-        f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)  # Formula (16a)
-        f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)          # Formula (16b)
-        f3 = (6*r+3*s*f2)/(1-s*x)                # Formula (16c)
+        f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)  # Formula (15b)
+        f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x) # Formula (16a)
+        f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)         # Formula (16b)
+        f3 = (6*r+3*s*f2)/(1-s*x)               # Formula (16c)
 
-        epsk0 = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                                # Formula (15a)
-        pk0 = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                              # Formula (17a)
-        pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)    # Formula (17b)
-        pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +           # Formula (17c)
+        epsk0 = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                             # Formula (15a)
+        pk0 = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                           # Formula (17a)
+        pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2) # Formula (17b)
+        pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +        # Formula (17c)
                                             6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
-        pmat[i] = pk0 + G0*rho0*(emat[i] - epsk0)                                     # Formula (5b)
-        cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]                 # Formula (8)
-        gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0))  # Formula (8) + (11)
+        pmat[i] = pk0 + G0*rho0*(emat[i] - epsk0)                                # Formula (5b)
+        cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]              # Formula (8)
+        gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0)) # Formula (8) + (11)
     end
 end
 
@@ -939,7 +941,7 @@ end
 # 
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; x, y, rho, pmat, umat, vmat, emat, Emat, cmat, gmat) = data
+    (; x, y, rho, umat, vmat, emat, Emat) = data
     (; test, nghost, nbcell, nx, ny, row_length) = params
 
     if test == :Sod
@@ -1019,16 +1021,17 @@ end
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
-    (; test, ideb, ifin, nx, ny) = params
+    (; test, nx, ny) = params
     @indexing_vars(params)
-
-    if params.use_gpu
-        gpu_boundary_conditions!(test == :Bizarrium, ideb, ifin, rho, umat, vmat, pmat, cmat, gmat)
-        return
-    end
 
     # Mirror the u component on the right of the x axis for the Sod test case, but not for Bizarrium
     u_factor_right = test == :Bizarrium ? 1 : -1
+
+    if params.use_gpu
+        gpu_boundary_conditions!(index_start, row_length, nx, ny, u_factor_right, rho, umat, vmat, 
+            pmat, cmat, gmat, ndrange=max(nx, ny))
+        return
+    end
 
     @threaded for j in 1:ny
         # Condition for the left border of the domain
@@ -1048,7 +1051,6 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
         gmat[@i(nx+1,j)] = gmat[@i(nx,j)]
     end
 
-    #=
     @threaded for i in 1:nx
         # Condition for the bottom border of the domain
         rho[@i(i,0)]  = rho[@i(i,1)]
@@ -1066,7 +1068,6 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
         cmat[@i(i,ny+1)] = cmat[@i(i,ny)]
         gmat[@i(i,ny+1)] = gmat[@i(i,ny)]
     end
-    =#
 end
 
 #
@@ -1075,12 +1076,11 @@ end
 
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
     (; x, cmat, umat) = data
-    (; cfl, Dt, ideb, ifin) = params
+    (; cfl, Dt, ideb, ifin, nx, ny) = params
     @indexing_vars(params)
 
     dt::T = Inf
-
-    # TODO : think about treating ghost cells differenlty: their values must not change the result (set them to Inf)
+    dx::T = 1. / nx
 
     if params.cst_dt
         # Constant time step
@@ -1107,29 +1107,28 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
         end
     elseif params.euler_projection
         if params.use_gpu
-            dt = reduce(min, @views (
-                (x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ max.(
-                    abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
-                    abs.(umat[ideb:ifin] .- cmat[ideb:ifin]))))
+            idx_iter = (1 ≤ i ≤ nx && 1 ≤ j ≤ ny for i in 1-nghost:nx+nghost for j in 1-nghost:ny+nghost)
+            op_cond = (in_domain, u, c) -> ifelse(in_domain, 
+                dx / max(abs(u + c), abs(u - c)), 
+                Inf)
+            dt = mapreduce(op_cond, min, idx_iter, umat, cmat)
         else
-            (; nx, ny) = params
-            @indexing_vars(params)
             @batch threadlocal=typemax(T) for i in ideb:ifin
                 ix, iy = @I(i)
                 if 1 ≤ ix ≤ nx && 1 ≤ iy ≤ ny
-                    dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), 
-                                                 abs(umat[i] - cmat[i]))
+                    dt_i = dx / max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
                     threadlocal = min(threadlocal, dt_i)
                 end
-                # dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), 
-                #                              abs(umat[i] - cmat[i]))
-                # threadlocal = min(threadlocal, dt_i)
             end
             dt = minimum(threadlocal)
         end
     else
         if params.use_gpu
-            dt = reduce(min, @views ((x[ideb+1:ifin+1] .- x[ideb:ifin]) ./ cmat[ideb:ifin]))
+            idx_iter = (1 ≤ i ≤ nx && 1 ≤ j ≤ ny for i in 1-nghost:nx+nghost for j in 1-nghost:ny+nghost)
+            op_cond = (in_domain, c) -> ifelse(in_domain, 
+                dx / c, 
+                Inf)
+            dt = mapreduce(op_cond, min, idx_iter, cmat)
         else
             @batch threadlocal=typemax(T) for i in ideb:ifin
                 threadlocal = min(threadlocal, (x[i+1] - x[i]) / cmat[i])
@@ -1171,11 +1170,13 @@ end
 # 
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
-    (; X, rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
+    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
     (; ideb, ifin, nx) = params
 
+    dx::T = 1. / nx
+
     if params.use_gpu
-        gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, vmat, Emat, 
+        gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, ustar, rho, umat, vmat, Emat, 
             tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
         gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
             tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
@@ -1184,24 +1185,23 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
     # Projection of the conservative variables
     @simd_threaded_loop for i in ideb:ifin
-        # dx = X[i+1] - X[i]
-        dx = 1. / nx + dt * (ustar[i+1] - ustar[i])
+        dX = dx + dt * (ustar[i+1] - ustar[i])
         L₁ =  max(0, ustar[i]) * dt
         L₃ = -min(0, ustar[i+1]) * dt
-        L₂ = dx - L₁ - L₃
+        L₂ = dX - L₁ - L₃
         
         tmp_rho[i]  = (L₁ * rho[i-1] 
-                        + L₂ * rho[i] 
-                        + L₃ * rho[i+1]) / dx
+                     + L₂ * rho[i] 
+                     + L₃ * rho[i+1]) / dX
         tmp_urho[i] = (L₁ * rho[i-1] * umat[i-1] 
-                        + L₂ * rho[i]   * umat[i] 
-                        + L₃ * rho[i+1] * umat[i+1]) / dx
+                     + L₂ * rho[i]   * umat[i] 
+                     + L₃ * rho[i+1] * umat[i+1]) / dX
         tmp_vrho[i] = (L₁ * rho[i-1] * vmat[i-1] 
-                        + L₂ * rho[i]   * vmat[i] 
-                        + L₃ * rho[i+1] * vmat[i+1]) / dx
+                     + L₂ * rho[i]   * vmat[i] 
+                     + L₃ * rho[i+1] * vmat[i+1]) / dX
         tmp_Erho[i] = (L₁ * rho[i-1] * Emat[i-1] 
-                        + L₂ * rho[i]   * Emat[i] 
-                        + L₃ * rho[i+1] * Emat[i+1]) / dx
+                     + L₂ * rho[i]   * Emat[i] 
+                     + L₃ * rho[i+1] * Emat[i+1]) / dX
     end
 
     # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
@@ -1218,14 +1218,13 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
     (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat) = data
     (; ideb, ifin, nx) = params
 
+    dx::T = 1. / nx
+
     if params.use_gpu
-        if params.euler_projection
-            gpu_cell_update_euler!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
-                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin))
-        else
-            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
-                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin))
-        end
+        gpu_cell_update!(ideb - 1, dx, dt, ustar, pstar, rho, umat, vmat, emat, Emat, 
+            ndrange=length(ideb:ifin))
+        gpu_cell_update_X!(ideb - 1, ifin, dt, x, X, ustar, !params.euler_projection, 
+            ndrange=length(ideb:ifin))
         return
     end
 
@@ -1234,7 +1233,6 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
     end
 
     @simd_threaded_loop for i in ideb:ifin
-        dx  = 1. / nx
         #dm  = rho[i] * (x[i+1] - x[i])
         dm  = rho[i] * dx
         #rho[i]  = dm / (X[i+1] - X[i])
