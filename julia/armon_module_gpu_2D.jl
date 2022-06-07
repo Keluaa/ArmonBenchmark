@@ -951,7 +951,9 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             params.cfl = 0.95
         end
 
-        gamma::T = 1.4
+        gamma::T   = 1.4
+        left_p::T  = 1.0
+        right_p::T = 0.1
     
         @simd_threaded_loop for i in 1:nbcell
             ix = (i-1) % row_length
@@ -962,20 +964,19 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     
             if x[i] < 0.5
                 rho[i] = 1.
-                pmat[i] = 1.
+                emat[i] = Emat[i] = left_p / ((gamma - 1.) * rho[i])
                 umat[i] = 0.
                 vmat[i] = 0.
             else
                 rho[i] = 0.125
-                pmat[i] = 0.1
+                emat[i] = Emat[i] = right_p / ((gamma - 1.) * rho[i])
                 umat[i] = 0.
                 vmat[i] = 0.
             end
-
-            emat[i] = Emat[i] = pmat[i] / ((gamma - 1.) * rho[i])
-            cmat[i] = sqrt(gamma * pmat[i] / rho[i])
-            gmat[i] = 0.5 * (1. + gamma)
         end
+
+        perfectGasEOS!(params, data, gamma)
+
     elseif test == :Bizarrium
         if params.maxtime == 0
             params.maxtime = 80e-6
