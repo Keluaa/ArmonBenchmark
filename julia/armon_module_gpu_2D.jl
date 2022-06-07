@@ -855,7 +855,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
     end
 
     # First order
-    @simd_threaded_loop for i in ideb:ifin
+    @simd_threaded_loop for i in ideb:ifin+1
         rc_l = rho[i-1] * cmat[i-1]
         rc_r = rho[i]   * cmat[i]
         ustar_1[i] = (rc_l * umat[i-1] + rc_r * umat[i] +
@@ -1171,7 +1171,7 @@ end
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
     (; X, rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
-    (; ideb, ifin) = params
+    (; ideb, ifin, nx) = params
 
     if params.use_gpu
         gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, vmat, Emat, 
@@ -1183,7 +1183,8 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
     # Projection of the conservative variables
     @simd_threaded_loop for i in ideb:ifin
-        dx = X[i+1] - X[i]
+        # dx = X[i+1] - X[i]
+        dx = 1. / nx + dt * (ustar[i+1] - ustar[i])
         L₁ =  max(0, ustar[i]) * dt
         L₃ = -min(0, ustar[i+1]) * dt
         L₂ = dx - L₁ - L₃
@@ -1404,50 +1405,8 @@ function armon(params::ArmonParameters{T}) where T
     # policy when working on CPU only
     data = ArmonData(T, params.nbcell)
 
-    x .= NaN
-    X .= NaN
-    y .= NaN
-    Y .= NaN
-    rho .= NaN
-    umat .= NaN
-    vmat .= NaN
-    emat .= NaN
-    Emat .= NaN
-    pmat .= NaN
-    cmat .= NaN
-    gmat .= NaN
-    ustar .= NaN
-    pstar .= NaN
-    ustar_1 .= NaN
-    pstar_1 .= NaN
-    tmp_rho .= NaN
-    tmp_urho .= NaN
-    tmp_vrho .= NaN
-    tmp_Erho .= NaN
-
     init_time = @elapsed init_test(params, data)
     silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
-
-    println("x:        ", x)
-    println("X:        ", X)
-    println("y:        ", y)
-    println("Y:        ", Y)
-    println("rho:      ", rho)
-    println("umat:     ", umat)
-    println("vmat:     ", vmat)
-    println("emat:     ", emat)
-    println("Emat:     ", Emat)
-    println("pmat:     ", pmat)
-    println("cmat:     ", cmat)
-    println("gmat:     ", gmat)
-    println("ustar:    ", ustar)
-    println("pstar:    ", pstar)
-    println("ustar_1:  ", ustar_1)
-    println("pstar_1:  ", pstar_1)
-    println("tmp_rho:  ", tmp_rho)
-    println("tmp_urho: ", tmp_urho)
-    println("tmp_vrho: ", tmp_vrho)
-    println("tmp_Erho: ", tmp_Erho)
 
     if params.use_gpu
         copy_time = @elapsed d_data = data_to_gpu(data)
