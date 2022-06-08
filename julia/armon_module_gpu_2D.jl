@@ -191,11 +191,13 @@ struct ArmonData{V}
     tmp_urho::V
     tmp_vrho::V
     tmp_Erho::V
+    domain_mask::V
 end
 
 
 function ArmonData(type::Type, size::Int64)
     return ArmonData{Vector{type}}(
+        Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
@@ -242,7 +244,8 @@ function data_to_gpu(data::ArmonData{V}) where {T, V <: AbstractArray{T}}
         device_type(data.tmp_rho),
         device_type(data.tmp_urho),
         device_type(data.tmp_vrho),
-        device_type(data.tmp_Erho)
+        device_type(data.tmp_Erho),
+        device_type(data.domain_mask)
     )
 end
 
@@ -524,13 +527,13 @@ end
 
 
 @kernel function gpu_cell_update_kernel!(i_0, dx, dt, 
-        @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat)
+        @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat, domain_mask)
     i = @index(Global) + i_0
 
     dm = rho[i] * dx
-    rho[i]  = dm / (dx + dt * (ustar[i+1] - ustar[i]))
-    umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
-    Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
+    rho[i]  = dm / (dx + dt * (ustar[i+1] - ustar[i]) * domain_mask[i])
+    umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1]) * domain_mask[i]
+    Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1]) * domain_mask[i]
     emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
 end
 
@@ -667,21 +670,23 @@ end
     if thread_i <= nx
         # Condition for the bottom border of the domain
         idx = @i(thread_i,0)
-        rho[idx]  = rho[idx+1]
-        umat[idx] = umat[idx+1]
-        vmat[idx] = vmat[idx+1]
-        pmat[idx] = pmat[idx+1]
-        cmat[idx] = cmat[idx+1]
-        gmat[idx] = gmat[idx+1]
+        idxp1 = @i(thread_i,1)
+        rho[idx]  = rho[idxp1]
+        umat[idx] = umat[idxp1]
+        vmat[idx] = vmat[idxp1]
+        pmat[idx] = pmat[idxp1]
+        cmat[idx] = cmat[idxp1]
+        gmat[idx] = gmat[idxp1]
 
         # Condition for the top border of the domain
         idx = @i(thread_i,ny)
-        rho[idx+1]  = rho[idx]
-        umat[idx+1] = umat[idx]
-        vmat[idx+1] = vmat[idx]
-        pmat[idx+1] = pmat[idx]
-        cmat[idx+1] = cmat[idx]
-        gmat[idx+1] = gmat[idx]
+        idxp1 = @i(thread_i,ny+1)
+        rho[idxp1]  = rho[idx]
+        umat[idxp1] = umat[idx]
+        vmat[idxp1] = vmat[idx]
+        pmat[idxp1] = pmat[idx]
+        cmat[idxp1] = cmat[idx]
+        gmat[idxp1] = gmat[idx]
     end
 end
 
@@ -752,7 +757,7 @@ if use_native_CUDA
     gpu_acoustic!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_kernel!, args...; ndrange, block_size)
     gpu_acoustic_GAD_minmod!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_GAD_minmod_kernel!, args...; ndrange, block_size)
     gpu_cell_update!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_kernel!, args...; ndrange, block_size)
-    gpu_cell_update_X_kernel!(args..., ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_X_kernel!, args...; ndrange, block_size)
+    gpu_cell_update_X_kernel!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_X_kernel!, args...; ndrange, block_size)
     gpu_first_order_euler_remap_1!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_kernel!, args...; ndrange, block_size)
     gpu_first_order_euler_remap_2!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_2_kernel!, args...; ndrange, block_size)
     gpu_update_perfect_gas_EOS!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_update_perfect_gas_EOS_kernel!, args...; ndrange, block_size)
@@ -941,7 +946,7 @@ end
 # 
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; x, y, rho, umat, vmat, emat, Emat) = data
+    (; x, y, rho, umat, vmat, emat, Emat, domain_mask) = data
     (; test, nghost, nbcell, nx, ny, row_length) = params
 
     if test == :Sod
@@ -975,6 +980,8 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 umat[i] = 0.
                 vmat[i] = 0.
             end
+
+            domain_mask[i] = (1 ≤ ix-1 ≤ nx && 1 ≤ iy-1 ≤ ny) ? 1. : 0.
         end
 
         perfectGasEOS!(params, data, gamma)
@@ -1007,6 +1014,8 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 emat[i] = 0.
                 Emat[i] = 0.5 * umat[i]^2
             end
+
+            domain_mask[i] = (1 ≤ ix-1 ≤ nx && 1 ≤ iy-1 ≤ ny) ? 1. : 0.
         end
     
         BizarriumEOS!(params, data)
@@ -1075,8 +1084,8 @@ end
 #
 
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
-    (; x, cmat, umat) = data
-    (; cfl, Dt, ideb, ifin, nx, ny) = params
+    (; x, cmat, umat, domain_mask) = data
+    (; cfl, Dt, ideb, ifin, nx) = params
     @indexing_vars(params)
 
     dt::T = Inf
@@ -1099,7 +1108,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
         copyto!(tmp_err_i, d_tmp_err_i)
         dt = result[1]
         println("ROCM reduction result: ", dt)
-        for (tid, (value, err)) in enumerate(zip(tmp_values, tmp_err_i))
+        for (tid, (value, err)) in enumerate(zip(tmp_values, tmp_err_i)ù)
             #@printf("TID %2d: %f\n", tid, value)
             #if err >= 0
                 @printf("TID %3d: err pos=%d, err=%g\n", tid, err, value)
@@ -1107,31 +1116,28 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
         end
     elseif params.euler_projection
         if params.use_gpu
-            idx_iter = (1 ≤ i ≤ nx && 1 ≤ j ≤ ny for i in 1-nghost:nx+nghost for j in 1-nghost:ny+nghost)
-            op_cond = (in_domain, u, c) -> ifelse(in_domain, 
-                dx / max(abs(u + c), abs(u - c)), 
-                Inf)
-            dt = mapreduce(op_cond, min, idx_iter, umat, cmat)
+            # We need the absolute value of the divisor since the result of the max can be negative, 
+            # because of some IEEE 754 non-compliance since fast math is enabled when compiling this 
+            # code for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
+            # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
+            dt = reduce(min, @views (dx ./ abs.(
+                max.(
+                    abs.(umat .+ cmat), 
+                    abs.(umat .- cmat)
+                ) .* domain_mask)))
         else
             @batch threadlocal=typemax(T) for i in ideb:ifin
-                ix, iy = @I(i)
-                if 1 ≤ ix ≤ nx && 1 ≤ iy ≤ ny
-                    dt_i = dx / max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
-                    threadlocal = min(threadlocal, dt_i)
-                end
+                dt_i = dx / (max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])) * domain_mask[i])
+                threadlocal = min(threadlocal, dt_i)
             end
             dt = minimum(threadlocal)
         end
     else
         if params.use_gpu
-            idx_iter = (1 ≤ i ≤ nx && 1 ≤ j ≤ ny for i in 1-nghost:nx+nghost for j in 1-nghost:ny+nghost)
-            op_cond = (in_domain, c) -> ifelse(in_domain, 
-                dx / c, 
-                Inf)
-            dt = mapreduce(op_cond, min, idx_iter, cmat)
+            dt = reduce(min, @views (dx ./ (cmat .* domain_mask)))
         else
             @batch threadlocal=typemax(T) for i in ideb:ifin
-                threadlocal = min(threadlocal, (x[i+1] - x[i]) / cmat[i])
+                threadlocal = min(threadlocal, dx / (cmat[i] * domain_mask[i]))
             end
             dt = minimum(threadlocal)
         end
@@ -1215,13 +1221,13 @@ end
 
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
-    (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat) = data
+    (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat, domain_mask) = data
     (; ideb, ifin, nx) = params
 
     dx::T = 1. / nx
 
     if params.use_gpu
-        gpu_cell_update!(ideb - 1, dx, dt, ustar, pstar, rho, umat, vmat, emat, Emat, 
+        gpu_cell_update!(ideb - 1, dx, dt, ustar, pstar, rho, umat, vmat, emat, Emat, domain_mask,
             ndrange=length(ideb:ifin))
         gpu_cell_update_X!(ideb - 1, ifin, dt, x, X, ustar, !params.euler_projection, 
             ndrange=length(ideb:ifin))
@@ -1233,14 +1239,13 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
     end
 
     @simd_threaded_loop for i in ideb:ifin
-        #dm  = rho[i] * (x[i+1] - x[i])
+        mask = domain_mask[i]
         dm  = rho[i] * dx
-        #rho[i]  = dm / (X[i+1] - X[i])
-        rho[i]  = dm / (dx + dt * (ustar[i+1] - ustar[i]))
+        rho[i]  = (dm / (dx + dt * (ustar[i+1] - ustar[i]) * mask))
 
-        umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
+        umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1]) * mask
         vmat[i] = vmat[i]
-        Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
+        Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1]) * mask
         emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
     end
  
@@ -1296,18 +1301,59 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     t1 = time_ns()
     t_warmup = t1
 
+    # enable_debug = false
+    # mask = .!convert.(Bool, data.domain_mask)
+    # disp(label, array) = begin
+    #     if enable_debug
+    #         print(label)
+    #         display(reverse(reshape(array, params.row_length, :)', dims=1))
+    #     end
+    # end
+    
+    # disp("mask: ", mask)
+
     while t < maxtime && cycle < maxcycle
+        # data.rho[mask] .= 999.
+        # data.umat[mask] .= 999.
+        # data.vmat[mask] .= 999.
+        # data.emat[mask] .= 999.
+        # data.Emat[mask] .= 999.
+        # data.pmat[mask] .= 999.
+        # data.cmat[mask] .= 999.
+        # data.gmat[mask] .= 999.
+        # data.ustar[mask] .= 999.
+        # data.pstar[mask] .= 999.
+
         @time_pos params "boundaryConditions" boundaryConditions!(params, data)
         @time_pos params "dtCFL"              dt = dtCFL(params, data, dta)
 
+        # enable_debug && println("\n\n === fluxes === \n")
         @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt)
+
+        # disp("rho:   ", data.rho)
+        # disp("umat:  ", data.umat)
+        # disp("cmat:  ", data.cmat)
+        # disp("ustar: ", data.ustar)
+        # disp("pstar: ", data.pstar)
+
+        # enable_debug && println("\n === cell update === \n")
         @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt)
 
+        # disp("rho:   ", data.rho)
+        # disp("umat:  ", data.umat)
+
         if params.euler_projection
+            # enable_debug && println("\n === euler proj === \n")
             @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt)
+
+            # disp("rho:   ", data.rho)
+            # disp("umat:  ", data.umat)
         end
 
+        # enable_debug && println("\n === EOS === \n")
         @time_pos params "update_EOS!"        update_EOS!(params, data)
+
+        # disp("cmat:  ", data.cmat)
 
         dta = dt
         cycle += 1
@@ -1335,7 +1381,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     end
     
     nb_cells = nx * ny
-    grind_time = (t2 - t_warmup) / ((cycle - 5)*nb_cells)
+    grind_time = (t2 - t_warmup) / ((cycle - 5) * nb_cells)
 
     if silent < 3
         println(" ")
