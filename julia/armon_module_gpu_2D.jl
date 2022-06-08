@@ -24,7 +24,6 @@ export ArmonParameters, armon
 
 
 # TODO : fix ROCM dtCFL (+ take into account the ghost cells)
-# TODO : boundaryConditions (y) ?
 # Transposition of rho and Emat (+ emat in update EOS)
 
 # GPU + perf measure
@@ -172,9 +171,7 @@ Vector, CuArray and ROCArray are all subtypes of AbstractArray.
 """
 struct ArmonData{V}
     x::V
-    X::V
     y::V
-    Y::V
     rho::V
     umat::V
     vmat::V
@@ -215,8 +212,6 @@ function ArmonData(type::Type, size::Int64)
         Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
-        Vector{type}(undef, size),
-        Vector{type}(undef, size),
         Vector{type}(undef, size)
     )
 end
@@ -226,9 +221,7 @@ function data_to_gpu(data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     device_type = use_ROCM ? ROCArray : CuArray
     return ArmonData{device_type{T}}(
         device_type(data.x),
-        device_type(data.X),
         device_type(data.y),
-        device_type(data.Y),
         device_type(data.rho),
         device_type(data.umat),
         device_type(data.vmat),
@@ -254,9 +247,7 @@ function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{W}) where
         {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     # We only need to copy the non-temporary arrays 
     copyto!(host_data.x, device_data.x)
-    copyto!(host_data.X, device_data.X)
     copyto!(host_data.y, device_data.y)
-    copyto!(host_data.Y, device_data.Y)
     copyto!(host_data.rho, device_data.rho)
     copyto!(host_data.umat, device_data.umat)
     copyto!(host_data.vmat, device_data.vmat)
@@ -538,21 +529,13 @@ end
 end
 
 
-@kernel function gpu_cell_update_X_kernel!(i_0, ifin, dt, x, X, @Const(ustar), @Const(lagrange))
+@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, x, @Const(ustar))
     i = @index(Global) + i_0
 
-    X[i] = x[i] + dt * ustar[i]
+    x[i] += dt * ustar[i]
 
     if i == ifin
-        X[i+1] = x[i+1] + dt * ustar[i+1]
-        x[i+1] = X[i+1]
-    end
-
-    if lagrange
-        x[i] = X[i]
-        if i == ifin
-            x[i+1] = X[i+1]
-        end
+        x[i+1] += dt * ustar[i+1]
     end
 end
 
@@ -757,7 +740,7 @@ if use_native_CUDA
     gpu_acoustic!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_kernel!, args...; ndrange, block_size)
     gpu_acoustic_GAD_minmod!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_acoustic_GAD_minmod_kernel!, args...; ndrange, block_size)
     gpu_cell_update!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_kernel!, args...; ndrange, block_size)
-    gpu_cell_update_X_kernel!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_X_kernel!, args...; ndrange, block_size)
+    gpu_cell_update_lagrange!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_cell_update_lagrange_kernel!, args...; ndrange, block_size)
     gpu_first_order_euler_remap_1!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_kernel!, args...; ndrange, block_size)
     gpu_first_order_euler_remap_2!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_first_order_euler_remap_2_kernel!, args...; ndrange, block_size)
     gpu_update_perfect_gas_EOS!(args...; ndrange) = convert_KA_to_CUDA_call(gpu_update_perfect_gas_EOS_kernel!, args...; ndrange, block_size)
@@ -768,7 +751,7 @@ else
     gpu_acoustic! = gpu_acoustic_kernel!(device, block_size)
     gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
     gpu_cell_update! = gpu_cell_update_kernel!(device, block_size)
-    gpu_cell_update_X! = gpu_cell_update_X_kernel!(device, block_size)
+    gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
     gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
     gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, block_size)
     gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
@@ -1221,7 +1204,7 @@ end
 
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
-    (; x, X, ustar, pstar, rho, umat, vmat, emat, Emat, domain_mask) = data
+    (; x, ustar, pstar, rho, umat, vmat, emat, Emat, domain_mask) = data
     (; ideb, ifin, nx) = params
 
     dx::T = 1. / nx
@@ -1229,13 +1212,10 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
     if params.use_gpu
         gpu_cell_update!(ideb - 1, dx, dt, ustar, pstar, rho, umat, vmat, emat, Emat, domain_mask,
             ndrange=length(ideb:ifin))
-        gpu_cell_update_X!(ideb - 1, ifin, dt, x, X, ustar, !params.euler_projection, 
-            ndrange=length(ideb:ifin))
+        if !params.euler_projection
+            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, ustar, ndrange=length(ideb:ifin))
+        end
         return
-    end
-
-    @simd_threaded_loop for i in ideb:ifin
-        X[i] = x[i] + dt * ustar[i]
     end
 
     @simd_threaded_loop for i in ideb:ifin
@@ -1251,7 +1231,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
  
     if !params.euler_projection
         @simd_threaded_loop for i in ideb:ifin
-            x[i] = X[i]
+            x[i] += dt * ustar[i]
         end
     end
 end
