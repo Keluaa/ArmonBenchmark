@@ -28,7 +28,6 @@ export ArmonParameters, armon
 
 # GPU + perf measure
 # for 2D, add vstar
-# try to remove X and Y
 
 #
 # Parameters
@@ -505,15 +504,15 @@ end
 
     dm_l = rho[i-1] * (x[i] - x[i-1])
     dm_r = rho[i]   * (x[i+1] - x[i])
-    Dm = (dm_l + dm_r) / 2
     rc_l = rho[i-1] * cmat[i-1]
     rc_r = rho[i]   * cmat[i]
+    Dm = (dm_l + dm_r) / 2
     θ = (rc_l + rc_r) / 2 * (dt / Dm)
     
-    ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * 
-        (r_u_p * (umat[i] - ustar_1[i]) - r_u_m * (ustar_1[i] - umat[i-1]))
-    pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * 
-        (r_p_p * (pmat[i] - pstar_1[i]) - r_p_m * (pstar_1[i] - pmat[i-1]))
+    ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) -
+                                             r_u_m * (ustar_1[i] - umat[i-1]))
+    pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) -
+                                             r_p_m * (pstar_1[i] - pmat[i-1]))
 end
 
 
@@ -838,9 +837,9 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
-        gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
+        gpu_acoustic!(ideb - 1, ustar_1, pstar_1, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1)) |> wait
         gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1,
-            dt, umat, ndrange=length(ideb:ifin+1))
+            dt, x, ndrange=length(ideb:ifin+1)) |> wait
         return
     end
 
@@ -1292,18 +1291,18 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     
     # disp("mask: ", mask)
 
-    while t < maxtime && cycle < maxcycle
-        # data.rho[mask] .= 999.
-        # data.umat[mask] .= 999.
-        # data.vmat[mask] .= 999.
-        # data.emat[mask] .= 999.
-        # data.Emat[mask] .= 999.
-        # data.pmat[mask] .= 999.
-        # data.cmat[mask] .= 999.
-        # data.gmat[mask] .= 999.
-        # data.ustar[mask] .= 999.
-        # data.pstar[mask] .= 999.
+    # data.rho[mask] .= 999.
+    # data.umat[mask] .= 999.
+    # data.vmat[mask] .= 999.
+    # data.emat[mask] .= 999.
+    # data.Emat[mask] .= 999.
+    # data.pmat[mask] .= 999.
+    # data.cmat[mask] .= 999.
+    # data.gmat[mask] .= 999.
+    # data.ustar[mask] .= 999.
+    # data.pstar[mask] .= 999.
 
+    while t < maxtime && cycle < maxcycle
         @time_pos params "boundaryConditions" boundaryConditions!(params, data)
         @time_pos params "dtCFL"              dt = dtCFL(params, data, dta)
 
