@@ -6,6 +6,7 @@ set ylabel "y"
 set zlabel "ρ"
 
 set zrange [0:1]
+set cbrange [0:1]
 
 # set view 90, 360
 

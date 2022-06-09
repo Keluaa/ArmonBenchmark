@@ -26,10 +26,8 @@ export ArmonParameters, armon
 
 
 # TODO : fix ROCM dtCFL (+ take into account the ghost cells)
-# Transposition of rho and Emat (+ emat in update EOS)
-
+# Transposition of rho and Emat
 # GPU + perf measure
-# remove emat
 
 #
 # Parameters
@@ -179,7 +177,6 @@ struct ArmonData{V}
     rho::V
     umat::V
     vmat::V
-    emat::V
     Emat::V
     pmat::V
     cmat::V
@@ -215,7 +212,6 @@ function ArmonData(type::Type, size::Int64)
         Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
-        Vector{type}(undef, size),
         Vector{type}(undef, size)
     )
 end
@@ -229,7 +225,6 @@ function data_to_gpu(data::ArmonData{V}) where {T, V <: AbstractArray{T}}
         device_type(data.rho),
         device_type(data.umat),
         device_type(data.vmat),
-        device_type(data.emat),
         device_type(data.Emat),
         device_type(data.pmat),
         device_type(data.cmat),
@@ -255,7 +250,6 @@ function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{W}) where
     copyto!(host_data.rho, device_data.rho)
     copyto!(host_data.umat, device_data.umat)
     copyto!(host_data.vmat, device_data.vmat)
-    copyto!(host_data.emat, device_data.emat)
     copyto!(host_data.Emat, device_data.Emat)
     copyto!(host_data.pmat, device_data.pmat)
     copyto!(host_data.cmat, device_data.cmat)
@@ -527,50 +521,50 @@ end
 end
 
 
-@kernel function gpu_cell_update_kernel!(i_0, dx, dt, 
-        @Const(ustar), @Const(pstar), rho, umat, vmat, emat, Emat, domain_mask)
+@kernel function gpu_cell_update_kernel!(i_0, dx, dt, s,
+        @Const(ustar), @Const(pstar), rho, u, Emat, domain_mask)
     i = @index(Global) + i_0
 
+    mask = domain_mask[i]
     dm = rho[i] * dx
-    rho[i]  = dm / (dx + dt * (ustar[i+1] - ustar[i]) * domain_mask[i])
-    umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1]) * domain_mask[i]
-    Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1]) * domain_mask[i]
-    emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
+    rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
+    u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
+    Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
 end
 
 
-@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, x, @Const(ustar))
+@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, s, x, @Const(ustar))
     i = @index(Global) + i_0
 
     x[i] += dt * ustar[i]
 
     if i == ifin
-        x[i+1] += dt * ustar[i+1]
+        x[i+s] += dt * ustar[i+s]
     end
 end
 
 
-@kernel function gpu_first_order_euler_remap_kernel!(i_0, dx, dt, 
+@kernel function gpu_first_order_euler_remap_kernel!(i_0, dx, dt, s,
         @Const(ustar), rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
     i = @index(Global) + i_0
 
-    dX = dx + dt * (ustar[i+1] - ustar[i])
+    dX = dx + dt * (ustar[i+s] - ustar[i])
     L₁ =  max(0, ustar[i]) * dt
-    L₃ = -min(0, ustar[i+1]) * dt
+    L₃ = -min(0, ustar[i+s]) * dt
     L₂ = dX - L₁ - L₃
     
-    tmp_rho[i]  = (L₁ * rho[i-1] 
+    tmp_rho[i]  = (L₁ * rho[i-s] 
                  + L₂ * rho[i] 
-                 + L₃ * rho[i+1]) / dX
-    tmp_urho[i] = (L₁ * rho[i-1] * umat[i-1] 
+                 + L₃ * rho[i+s]) / dX
+    tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] 
                  + L₂ * rho[i]   * umat[i] 
-                 + L₃ * rho[i+1] * umat[i+1]) / dX
-    tmp_vrho[i] = (L₁ * rho[i-1] * vmat[i-1] 
+                 + L₃ * rho[i+s] * umat[i+s]) / dX
+    tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] 
                  + L₂ * rho[i]   * vmat[i] 
-                 + L₃ * rho[i+1] * vmat[i+1]) / dX
-    tmp_Erho[i] = (L₁ * rho[i-1] * Emat[i-1] 
+                 + L₃ * rho[i+s] * vmat[i+s]) / dX
+    tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] 
                  + L₂ * rho[i]   * Emat[i] 
-                 + L₃ * rho[i+1] * Emat[i+1]) / dX
+                 + L₃ * rho[i+s] * Emat[i+s]) / dX
 end
 
 
@@ -587,17 +581,18 @@ end
 
 
 @kernel function gpu_update_perfect_gas_EOS_kernel!(i_0, gamma,
-        @Const(rho), @Const(emat), pmat, cmat, gmat)
+        @Const(rho), @Const(Emat), @Const(umat), @Const(vmat), pmat, cmat, gmat)
     i = @index(Global) + i_0
     
-    pmat[i] = (gamma - 1.) * rho[i] * emat[i]
+    e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
+    pmat[i] = (gamma - 1.) * rho[i] * e
     cmat[i] = sqrt(gamma * pmat[i] / rho[i])
     gmat[i] = (1. + gamma) / 2
 end
 
 
 @kernel function gpu_update_bizarrium_EOS_kernel!(i_0, 
-        @Const(rho), @Const(emat), pmat, cmat, gmat)
+        @Const(rho), @Const(Emat), @Const(umat), @Const(vmat), pmat, cmat, gmat)
     i = @index(Global) + i_0
 
     type = eltype(rho)
@@ -630,13 +625,15 @@ end
     pk0second::type = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 
                                                     6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
-    pmat[i] = pk0 + G0 * rho0 * (emat[i] - epsk0)
+    e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
+    pmat[i] = pk0 + G0 * rho0 * (e - epsk0)
     cmat[i] = sqrt(G0 * rho0 * (pmat[i] - pk0) - pk0prime) / rho[i]
     gmat[i] = 0.5 / (rho[i]^3 * cmat[i]^2) * (pk0second + (G0 * rho0)^2 * (pmat[i] - pk0))
 end
 
 
-@kernel function gpu_boundary_conditions_kernel!(index_start, row_length, nx, ny, u_factor_right,
+@kernel function gpu_boundary_conditions_kernel!(index_start, row_length, nx, ny,
+        u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
         rho, umat, vmat, pmat, cmat, gmat)
     thread_i = @index(Global)
 
@@ -644,7 +641,7 @@ end
         # Condition for the left border of the domain
         idx = @i(0,thread_i)
         rho[idx]  = rho[idx+1]
-        umat[idx] =-umat[idx+1]
+        umat[idx] = umat[idx+1] * u_factor_left
         vmat[idx] = vmat[idx+1]
         pmat[idx] = pmat[idx+1]
         cmat[idx] = cmat[idx+1]
@@ -666,7 +663,7 @@ end
         idxp1 = @i(thread_i,1)
         rho[idx]  = rho[idxp1]
         umat[idx] = umat[idxp1]
-        vmat[idx] = vmat[idxp1]
+        vmat[idx] = vmat[idxp1] * v_factor_bottom
         pmat[idx] = pmat[idxp1]
         cmat[idx] = cmat[idxp1]
         gmat[idx] = gmat[idxp1]
@@ -676,7 +673,7 @@ end
         idxp1 = @i(thread_i,ny+1)
         rho[idxp1]  = rho[idx]
         umat[idxp1] = umat[idx]
-        vmat[idxp1] = vmat[idx]
+        vmat[idxp1] = vmat[idx] * v_factor_top
         pmat[idxp1] = pmat[idx]
         cmat[idxp1] = cmat[idx]
         gmat[idxp1] = gmat[idx]
@@ -775,11 +772,11 @@ end
 #
 
 function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T) where {T, V <: AbstractArray{T}}
-    (; umat, vmat, pmat, cmat, gmat, rho, Emat, domain_mask) = data
+    (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
     (; ideb, ifin) = params
 
     @simd_threaded_loop for i in ideb:ifin
-        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2) * domain_mask[i]
+        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
         pmat[i] = (gamma - 1.) * rho[i] * e
         cmat[i] = sqrt(gamma * pmat[i] / rho[i])
         gmat[i] = (1. + gamma) / 2
@@ -788,7 +785,7 @@ end
 
 
 function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; pmat, cmat, gmat, rho, emat) = data
+    (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
     (; ideb, ifin) = params
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
@@ -797,8 +794,6 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
 
     rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
     q = -42080895/14941154; r = 727668333/149411540
-
-    error("emat update NYI")  # TODO
 
     @simd_threaded_loop for i in ideb:ifin
         x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # Formula (4b)
@@ -814,7 +809,8 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
         pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +        # Formula (17c)
                                             6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
-        pmat[i] = pk0 + G0*rho0*(emat[i] - epsk0)                                # Formula (5b)
+        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
+        pmat[i] = pk0 + G0*rho0*(e - epsk0)                                      # Formula (5b)
         cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]              # Formula (8)
         gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0)) # Formula (8) + (11)
     end
@@ -1073,8 +1069,9 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     end
 
     if params.use_gpu
-        gpu_boundary_conditions!(index_start, row_length, nx, ny, u_factor_right, rho, umat, vmat, 
-            pmat, cmat, gmat, ndrange=max(nx, ny))
+        gpu_boundary_conditions!(index_start, row_length, nx, ny, 
+            u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=max(nx, ny))
         return
     end
 
@@ -1229,8 +1226,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     (; ideb, ifin) = params
 
     if params.use_gpu
-        error("NYI")
-        gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, ustar, rho, umat, vmat, Emat, 
+        gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, s, ustar, rho, umat, vmat, Emat, 
             tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
         gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
             tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
@@ -1270,15 +1266,14 @@ end
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, dx::T,
         s::Int, u::V, x::V) where {T, V <: AbstractArray{T}}
-    (; ustar, pstar, rho, emat, Emat, domain_mask) = data
+    (; ustar, pstar, rho, Emat, domain_mask) = data
     (; ideb, ifin) = params
 
     if params.use_gpu
-        error("NYI")
-        gpu_cell_update!(ideb - 1, dx, dt, ustar, pstar, rho, u, emat, Emat, domain_mask,
+        gpu_cell_update!(ideb - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
             ndrange=length(ideb:ifin))
         if !params.euler_projection
-            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, ustar, ndrange=length(ideb:ifin))
+            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, s, x, ustar, ndrange=length(ideb:ifin))
         end
         return
     end
@@ -1286,9 +1281,9 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, dx::
     @simd_threaded_loop for i in ideb:ifin
         mask = domain_mask[i]
         dm = rho[i] * dx
-        rho[i]  = (dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask))
-        u[i]    = u[i]    + dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
-        Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
+        rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
+        u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
+        Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
     end
  
     if !params.euler_projection
@@ -1300,21 +1295,21 @@ end
 
 
 function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; rho, emat, pmat, cmat, gmat) = data
+    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
     (; ideb, ifin, test) = params
 
     if test == :Sod || test == :Sod_y || test == :Sod_circ
         gamma::T = 7/5
         if params.use_gpu
-            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, emat, 
-                pmat, cmat, gmat, ndrange=length(ideb:ifin))
+            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat, 
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
         else
             perfectGasEOS!(params, data, gamma)
         end
     elseif test == :Bizarrium
         if params.use_gpu
-            gpu_update_bizarrium_EOS!(ideb - 1, rho, emat, 
-                pmat, cmat, gmat, ndrange=length(ideb:ifin))
+            gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat, 
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
         else
             BizarriumEOS!(params, data)
         end
