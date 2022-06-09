@@ -1,6 +1,6 @@
 module Armon
 
-using PrettyTables  # TODO : debug only, to remove
+#using PrettyTables  # TODO : debug only, to remove
 
 using Printf
 using Polyester
@@ -26,8 +26,9 @@ export ArmonParameters, armon
 
 
 # TODO : fix ROCM dtCFL (+ take into account the ghost cells)
-# Transposition of rho and Emat
+# Transposition of rho, Emat, pmat, umat, vmat, etc... (as option)
 # GPU + perf measure
+# output files dir as option (+name of files)
 
 #
 # Parameters
@@ -64,6 +65,8 @@ mutable struct ArmonParameters{Flt_T}
     
     # Output
     silent::Int
+    output_dir::String
+    output_file::String
     write_output::Bool
     write_ghosts::Bool
     animation_step::Int
@@ -84,7 +87,8 @@ function ArmonParameters(; ieee_bits = 64,
                            nghost = 2, nx = 10, ny = 10, cfl = 0.6, Dt = 0., 
                            euler_projection = false, cst_dt = false, transpose_dims = false,
                            maxtime = 0, maxcycle = 500_000,
-                           silent = 0, write_output = true, write_ghosts = false, animation_step = 0, 
+                           silent = 0, output_dir = ".", output_file = "output",
+                           write_output = true, write_ghosts = false, animation_step = 0, 
                            measure_time = true,
                            use_ccall = false, use_threading = true, 
                            use_simd = true, interleaving = false,
@@ -125,7 +129,8 @@ function ArmonParameters(; ieee_bits = 64,
                                      ideb, ifin, index_start,
                                      cfl, Dt, euler_projection, cst_dt, transpose_dims,
                                      maxtime, maxcycle,
-                                     silent, write_output, write_ghosts, animation_step,
+                                     silent, output_dir, output_file,
+                                     write_output, write_ghosts, animation_step,
                                      measure_time,
                                      use_ccall, use_threading, use_simd, use_gpu)
 end
@@ -1438,7 +1443,8 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         end
 
         if animation_step != 0 && (cycle - 1) % animation_step == 0
-            write_result(params, data, "anim/output_" * @sprintf("%03d", (cycle - 1) ÷ animation_step))
+            write_result(params, data, joinpath("anim", params.output_file) * "_" *
+                @sprintf("%03d", (cycle - 1) ÷ animation_step))
         end
     end
 
@@ -1473,10 +1479,15 @@ end
 function write_result(params::ArmonParameters{T}, data::ArmonData{V}, 
         file_name::String) where {T, V <: AbstractArray{T}}
     (; x, y, rho) = data
-    (; silent, write_ghosts, nx, ny, nghost) = params
+    (; silent, write_ghosts, nx, ny, nghost, output_dir) = params
     @indexing_vars(params)
 
-    f = open(file_name, "w")
+    if !isdir(output_dir)
+        mkpath(output_dir)
+    end
+
+    output_file_path = joinpath(output_dir, file_name)
+    f = open(output_file_path, "w")
 
     if write_ghosts
         for j in 1-nghost:ny+nghost
@@ -1496,7 +1507,7 @@ function write_result(params::ArmonParameters{T}, data::ArmonData{V},
     close(f)
 
     if silent < 2
-        println("Output file closed")
+        println("Wrote to file " * output_file_path)
     end
 end
 
@@ -1553,7 +1564,7 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     if params.write_output
-        write_result(params, data, "output")
+        write_result(params, data, params.output_file)
     end
 
     if params.measure_time && silent < 3 && !isempty(time_contrib)
