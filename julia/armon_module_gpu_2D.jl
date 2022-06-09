@@ -1,5 +1,7 @@
 module Armon
 
+using PrettyTables  # TODO : debug only, to remove
+
 using Printf
 using Polyester
 using KernelAbstractions
@@ -28,6 +30,7 @@ export ArmonParameters, armon
 
 # GPU + perf measure
 # for 2D, add vstar
+# remove emat
 
 #
 # Parameters
@@ -66,6 +69,7 @@ mutable struct ArmonParameters{Flt_T}
     silent::Int
     write_output::Bool
     write_ghosts::Bool
+    animation_step::Int
     measure_time::Bool
 
     # Performance
@@ -83,7 +87,8 @@ function ArmonParameters(; ieee_bits = 64,
                            nghost = 2, nx = 10, ny = 10, cfl = 0.6, Dt = 0., 
                            euler_projection = false, cst_dt = false, transpose_dims = false,
                            maxtime = 0, maxcycle = 500_000,
-                           silent = 0, write_output = true, write_ghosts = false, measure_time = true,
+                           silent = 0, write_output = true, write_ghosts = false, animation_step = 0, 
+                           measure_time = true,
                            use_ccall = false, use_threading = true, 
                            use_simd = true, interleaving = false,
                            use_gpu = false)
@@ -123,7 +128,8 @@ function ArmonParameters(; ieee_bits = 64,
                                      ideb, ifin, index_start,
                                      cfl, Dt, euler_projection, cst_dt, transpose_dims,
                                      maxtime, maxcycle,
-                                     silent, write_output, write_ghosts, measure_time,
+                                     silent, write_output, write_ghosts, animation_step,
+                                     measure_time,
                                      use_ccall, use_threading, use_simd, use_gpu)
 end
 
@@ -258,6 +264,12 @@ function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{W}) where
     copyto!(host_data.ustar, device_data.ustar)
     copyto!(host_data.pstar, device_data.pstar)
 end
+
+#
+# Axis enum
+#
+
+@enum Axis X_axis Y_axis
 
 #
 # Threading and SIMD control macros
@@ -477,13 +489,13 @@ const reduction_block_size = 1024;
 const reduction_block_size_log2 = convert(Int, log2(reduction_block_size))
 
 
-@kernel function gpu_acoustic_kernel!(i_0, ustar, pstar, 
-        @Const(rho), @Const(umat), @Const(pmat), @Const(cmat))
+@kernel function gpu_acoustic_kernel!(i_0, s, ustar, pstar, 
+        @Const(rho), @Const(u), @Const(pmat), @Const(cmat))
     i = @index(Global) + i_0
-    rc_l = rho[i-1] * cmat[i-1]
+    rc_l = rho[i-s] * cmat[i-s]
     rc_r = rho[i]   * cmat[i]
-    ustar[i] = (rc_l*umat[i-1] + rc_r*umat[i] +           (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
-    pstar[i] = (rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i])) / (rc_l + rc_r)
+    ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
+    pstar[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
 end
 
 
@@ -764,11 +776,12 @@ end
 #
 
 function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T) where {T, V <: AbstractArray{T}}
-    (; pmat, cmat, gmat, rho, emat) = data
+    (; umat, vmat, pmat, cmat, gmat, rho, Emat, domain_mask) = data
     (; ideb, ifin) = params
 
     @simd_threaded_loop for i in ideb:ifin
-        pmat[i] = (gamma - 1.) * rho[i] * emat[i]
+        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2) * domain_mask[i]
+        pmat[i] = (gamma - 1.) * rho[i] * e
         cmat[i] = sqrt(gamma * pmat[i] / rho[i])
         gmat[i] = (1. + gamma) / 2
     end
@@ -785,6 +798,8 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
 
     rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
     q = -42080895/14941154; r = 727668333/149411540
+
+    error("emat update NYI")  # TODO
 
     @simd_threaded_loop for i in ideb:ifin
         x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # Formula (4b)
@@ -810,21 +825,21 @@ end
 # Acoustic Riemann problem solvers
 # 
 
-function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; ustar, pstar, rho, umat, pmat, cmat) = data
-    (; ideb, ifin) = params
+function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}, 
+        last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
+    (; ustar, pstar, rho, pmat, cmat) = data
+    (; ideb) = params
 
     if params.use_gpu
-        gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
-    else
-        @simd_threaded_loop for i in ideb:ifin+1
-            rc_l = rho[i-1] * cmat[i-1]
-            rc_r = rho[i]   * cmat[i]
-            ustar[i] = (rc_l * umat[i-1] + rc_r * umat[i] +
-                              (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
-            pstar[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] + 
-                rc_l * rc_r * (umat[i-1] - umat[i])) / (rc_l + rc_r)
-        end
+        gpu_acoustic!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, ndrange=length(ideb:last_i))
+        return
+    end
+
+    @simd_threaded_loop for i in ideb:last_i
+        rc_l = rho[i-s] * cmat[i-s]
+        rc_r = rho[i]   * cmat[i]
+        ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
+        pstar[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
     end
 end
 
@@ -837,9 +852,9 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
-        gpu_acoustic!(ideb - 1, ustar_1, pstar_1, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1)) |> wait
+        gpu_acoustic!(ideb - 1, ustar_1, pstar_1, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
         gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1,
-            dt, x, ndrange=length(ideb:ifin+1)) |> wait
+            dt, x, ndrange=length(ideb:ifin+1))
         return
     end
 
@@ -847,13 +862,11 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
     @simd_threaded_loop for i in ideb:ifin+1
         rc_l = rho[i-1] * cmat[i-1]
         rc_r = rho[i]   * cmat[i]
-        ustar_1[i] = (rc_l * umat[i-1] + rc_r * umat[i] +
-                          (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
-        pstar_1[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] +
-            rc_l * rc_r * (umat[i-1] - umat[i])) / (rc_l + rc_r)
+        ustar_1[i] = (rc_l*umat[i-1] + rc_r*umat[i] +           (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
+        pstar_1[i] = (rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i])) / (rc_l + rc_r)
     end
     
-    # Second order, for each flow limiter
+    # Second order, for each flux limiter
     if scheme == :GAD_minmod
         @simd_threaded_loop for i in ideb:ifin+1
             r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
@@ -928,7 +941,7 @@ end
 # 
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; x, y, rho, umat, vmat, emat, Emat, domain_mask) = data
+    (; x, y, rho, umat, vmat, pmat, cmat, Emat, ustar, pstar, ustar_1, pstar_1, domain_mask) = data
     (; test, nghost, nbcell, nx, ny, row_length) = params
 
     if test == :Sod
@@ -951,19 +964,29 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             x[i] = (ix-nghost) / nx
             y[i] = (iy-nghost) / ny
     
+            # if √(x[i]^2 + y[i]^2) < 0.5  # TODO : centered in the domain (borders: all walls)
             if x[i] < 0.5
+            # if y[i] < 0.5 # TODO
                 rho[i] = 1.
-                emat[i] = Emat[i] = left_p / ((gamma - 1.) * rho[i])
+                Emat[i] = left_p / ((gamma - 1.) * rho[i])
                 umat[i] = 0.
                 vmat[i] = 0.
             else
                 rho[i] = 0.125
-                emat[i] = Emat[i] = right_p / ((gamma - 1.) * rho[i])
+                Emat[i] = right_p / ((gamma - 1.) * rho[i])
                 umat[i] = 0.
                 vmat[i] = 0.
             end
 
             domain_mask[i] = (1 ≤ ix-1 ≤ nx && 1 ≤ iy-1 ≤ ny) ? 1. : 0.
+
+            # Set to zero to make sure no non-initialized values changes the result
+            pmat[i] = 0.
+            cmat[i] = 0.
+            ustar[i] = 0.
+            pstar[i] = 0.
+            ustar_1[i] = 0.
+            pstar_1[i] = 0.
         end
 
         perfectGasEOS!(params, data, gamma)
@@ -976,6 +999,9 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         if params.cfl == 0
             params.cfl = 0.6
         end
+
+        # TODO
+        error("NYI")
     
         @simd_threaded_loop for i in 1:nbcell
             ix = (i-1) % row_length
@@ -988,16 +1014,22 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 rho[i] = 1.42857142857e+4
                 umat[i] = 0.
                 vmat[i] = 0.
-                emat[i] = Emat[i] = 4.48657821135e+6
+                Emat[i] = 4.48657821135e+6
             else
                 rho[i] =  10000.
                 umat[i] = 250.
                 vmat[i] = 0.
-                emat[i] = 0.
                 Emat[i] = 0.5 * umat[i]^2
             end
 
             domain_mask[i] = (1 ≤ ix-1 ≤ nx && 1 ≤ iy-1 ≤ ny) ? 1. : 0.
+
+            pmat[i] = 0.
+            cmat[i] = 0.
+            ustar[i] = 0.
+            pstar[i] = 0.
+            ustar_1[i] = 0.
+            pstar_1[i] = 0.
         end
     
         BizarriumEOS!(params, data)
@@ -1141,11 +1173,13 @@ end
 # Numerical fluxes computation
 #
 
-function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
+function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, 
+        last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            acoustic!(params, data)
+            acoustic!(params, data, last_i, s, u)
         else
+            error("NYI")
             acoustic_GAD!(params, data, dt)
         end
     else
@@ -1157,13 +1191,13 @@ end
 # Cell update
 # 
 
-function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
-    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
-    (; ideb, ifin, nx) = params
-
-    dx::T = 1. / nx
+function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, dx::T, 
+        s::Int) where {T, V <: AbstractArray{T}}
+    (; rho, umat, vmat, Emat, ustar, domain_mask, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
+    (; ideb, ifin) = params
 
     if params.use_gpu
+        error("NYI")
         gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, ustar, rho, umat, vmat, Emat, 
             tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
         gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
@@ -1173,23 +1207,23 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
     # Projection of the conservative variables
     @simd_threaded_loop for i in ideb:ifin
-        dX = dx + dt * (ustar[i+1] - ustar[i])
+        dX = dx + dt * (ustar[i+s] - ustar[i])
         L₁ =  max(0, ustar[i]) * dt
-        L₃ = -min(0, ustar[i+1]) * dt
+        L₃ = -min(0, ustar[i+s]) * dt
         L₂ = dX - L₁ - L₃
         
-        tmp_rho[i]  = (L₁ * rho[i-1] 
+        tmp_rho[i]  = (L₁ * rho[i-s] 
                      + L₂ * rho[i] 
-                     + L₃ * rho[i+1]) / dX
-        tmp_urho[i] = (L₁ * rho[i-1] * umat[i-1] 
+                     + L₃ * rho[i+s]) / dX
+        tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] 
                      + L₂ * rho[i]   * umat[i] 
-                     + L₃ * rho[i+1] * umat[i+1]) / dX
-        tmp_vrho[i] = (L₁ * rho[i-1] * vmat[i-1] 
+                     + L₃ * rho[i+s] * umat[i+s]) / dX
+        tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] 
                      + L₂ * rho[i]   * vmat[i] 
-                     + L₃ * rho[i+1] * vmat[i+1]) / dX
-        tmp_Erho[i] = (L₁ * rho[i-1] * Emat[i-1] 
+                     + L₃ * rho[i+s] * vmat[i+s]) / dX
+        tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] 
                      + L₂ * rho[i]   * Emat[i] 
-                     + L₃ * rho[i+1] * Emat[i+1]) / dX
+                     + L₃ * rho[i+s] * Emat[i+s]) / dX
     end
 
     # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
@@ -1202,14 +1236,14 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 end
 
 
-function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
-    (; x, ustar, pstar, rho, umat, vmat, emat, Emat, domain_mask) = data
-    (; ideb, ifin, nx) = params
-
-    dx::T = 1. / nx
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, dx::T,
+        s::Int, u::V, x::V) where {T, V <: AbstractArray{T}}
+    (; ustar, pstar, rho, emat, Emat, domain_mask) = data
+    (; ideb, ifin) = params
 
     if params.use_gpu
-        gpu_cell_update!(ideb - 1, dx, dt, ustar, pstar, rho, umat, vmat, emat, Emat, domain_mask,
+        error("NYI")
+        gpu_cell_update!(ideb - 1, dx, dt, ustar, pstar, rho, u, emat, Emat, domain_mask,
             ndrange=length(ideb:ifin))
         if !params.euler_projection
             gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, ustar, ndrange=length(ideb:ifin))
@@ -1219,13 +1253,10 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
 
     @simd_threaded_loop for i in ideb:ifin
         mask = domain_mask[i]
-        dm  = rho[i] * dx
-        rho[i]  = (dm / (dx + dt * (ustar[i+1] - ustar[i]) * mask))
-
-        umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1]) * mask
-        vmat[i] = vmat[i]
-        Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1]) * mask
-        emat[i] = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
+        dm = rho[i] * dx
+        rho[i]  = (dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask))
+        u[i]    = u[i]    + dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
+        Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
     end
  
     if !params.euler_projection
@@ -1270,7 +1301,8 @@ end
 # 
 
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; maxtime, maxcycle, nx, ny, silent) = params
+    (; x, y, umat, vmat) = data
+    (; maxtime, maxcycle, ifin, nx, ny, row_length, silent, animation_step) = params
     
     cycle  = 0
     t::T   = 0.
@@ -1284,49 +1316,82 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     # mask = .!convert.(Bool, data.domain_mask)
     # disp(label, array) = begin
     #     if enable_debug
-    #         print(label)
-    #         display(reverse(reshape(array, params.row_length, :)', dims=1))
+    #         println(label)
+    #         pretty_table(reverse(reshape(array, params.row_length, :)', dims=1); 
+    #             noheader = true, 
+    #             highlighters = (Highlighter((d,i,j) -> (data.domain_mask[(j-1) * row_length + i] > 0.), 
+    #                                        foreground=:light_blue),
+    #                             Highlighter((d,i,j) -> (abs(d[i,j]) > 1. || !isfinite(d[i,j])), 
+    #                                        foreground=:red)))
+    #         # display(reverse(reshape(array, params.row_length, :)', dims=1))
     #     end
     # end
     
     # disp("mask: ", mask)
 
-    # data.rho[mask] .= 999.
-    # data.umat[mask] .= 999.
-    # data.vmat[mask] .= 999.
-    # data.emat[mask] .= 999.
-    # data.Emat[mask] .= 999.
-    # data.pmat[mask] .= 999.
-    # data.cmat[mask] .= 999.
-    # data.gmat[mask] .= 999.
-    # data.ustar[mask] .= 999.
-    # data.pstar[mask] .= 999.
+    # if enable_debug
+    #     data.rho[mask] .= 999.
+    #     data.umat[mask] .= 999.
+    #     data.vmat[mask] .= 999.
+    #     data.Emat[mask] .= 999.
+    #     data.pmat[mask] .= 999.
+    #     data.cmat[mask] .= 999.
+    #     data.gmat[mask] .= 999.
+    #     data.ustar[mask] .= 999.
+    #     data.pstar[mask] .= 999.
+    # end
 
     while t < maxtime && cycle < maxcycle
         @time_pos params "boundaryConditions" boundaryConditions!(params, data)
         @time_pos params "dtCFL"              dt = dtCFL(params, data, dta)
 
-        # enable_debug && println("\n\n === fluxes === \n")
-        @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt)
+        for axis in [X_axis, Y_axis]
+            if axis == X_axis
+                # enable_debug && println("\n\n === X axis === \n")
+                s = 1
+                last_i = ifin + 1
+                u = umat
+                dx = 1. / nx
+                x_ = x
+            elseif axis == Y_axis
+                # enable_debug && println("\n\n === Y axis === \n")
+                s = row_length
+                last_i = ifin + row_length + 1  # include one more row to compute the top fluxes
+                u = vmat
+                dx = 1. / ny
+                x_ = y
+            end
 
-        # disp("rho:   ", data.rho)
-        # disp("umat:  ", data.umat)
-        # disp("cmat:  ", data.cmat)
-        # disp("ustar: ", data.ustar)
-        # disp("pstar: ", data.pstar)
-
-        # enable_debug && println("\n === cell update === \n")
-        @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt)
-
-        # disp("rho:   ", data.rho)
-        # disp("umat:  ", data.umat)
-
-        if params.euler_projection
-            # enable_debug && println("\n === euler proj === \n")
-            @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt)
-
+            # enable_debug && println("dt = ", dt)
+            # disp("x:     ", x_)
             # disp("rho:   ", data.rho)
-            # disp("umat:  ", data.umat)
+            # disp("u:     ", u)
+            # disp("cmat:  ", data.cmat)
+            # disp("pmat:  ", data.pmat)
+            # disp("Emat:  ", data.Emat)
+
+            # enable_debug && println("\n\n === fluxes === \n")
+            @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt, last_i, s, u)
+
+            # disp("ustar: ", data.ustar)
+            # disp("pstar: ", data.pstar)
+    
+            # enable_debug && println("\n === cell update === \n")
+            @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt, dx, s, u, x_)
+    
+            # disp("rho:   ", data.rho)
+            # disp("u:     ", u)
+            # disp("Emat:  ", data.Emat)
+    
+            if params.euler_projection
+                # enable_debug && println("\n === euler proj === \n")
+                @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt, dx, s)
+    
+                # disp("rho:   ", data.rho)
+                # disp("umat:  ", data.umat)
+                # disp("vmat:  ", data.vmat)
+                # disp("Emat:  ", data.Emat)
+            end
         end
 
         # enable_debug && println("\n === EOS === \n")
@@ -1348,6 +1413,10 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
         if cycle == 5
             t_warmup = time_ns()
+        end
+
+        if animation_step != 0 && (cycle - 1) % animation_step == 0
+            write_result(params, data, "anim/output_" * @sprintf("%03d", (cycle - 1) ÷ animation_step))
         end
     end
 
@@ -1379,12 +1448,13 @@ end
 # Output 
 #
 
-function write_result(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function write_result(params::ArmonParameters{T}, data::ArmonData{V}, 
+        file_name::String) where {T, V <: AbstractArray{T}}
     (; x, y, rho) = data
     (; silent, write_ghosts, nx, ny, nghost) = params
     @indexing_vars(params)
 
-    f = open("output", "w")
+    f = open(file_name, "w")
 
     if write_ghosts
         for j in 1-nghost:ny+nghost
@@ -1424,6 +1494,14 @@ function armon(params::ArmonParameters{T}) where T
             println(" - gpu block size: ", block_size)
         end
     end
+
+    if params.animation_step != 0
+        if isdir("anim")
+            rm.("anim/" .* readdir("anim"))
+        else
+            mkdir("anim")
+        end
+    end
     
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
@@ -1452,7 +1530,7 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     if params.write_output
-        write_result(params, data)
+        write_result(params, data, "output")
     end
 
     if params.measure_time && silent < 3 && !isempty(time_contrib)
