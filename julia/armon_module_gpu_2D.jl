@@ -29,7 +29,6 @@ export ArmonParameters, armon
 # Transposition of rho and Emat (+ emat in update EOS)
 
 # GPU + perf measure
-# for 2D, add vstar
 # remove emat
 
 #
@@ -944,7 +943,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     (; x, y, rho, umat, vmat, pmat, cmat, Emat, ustar, pstar, ustar_1, pstar_1, domain_mask) = data
     (; test, nghost, nbcell, nx, ny, row_length) = params
 
-    if test == :Sod
+    if test == :Sod || test == :Sod_y || test == :Sod_circ
         if params.maxtime == 0
             params.maxtime = 0.20
         end
@@ -956,6 +955,14 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         gamma::T   = 1.4
         left_p::T  = 1.0
         right_p::T = 0.1
+
+        if test == :Sod
+            cond = (x_, y_) -> x_ < 0.5
+        elseif test == :Sod_y
+            cond = (x_, y_) -> y_ < 0.5
+        else
+            cond = (x_, y_) -> (x_ - 0.5)^2 + (y_ - 0.5)^2 < 0.125
+        end
     
         @simd_threaded_loop for i in 1:nbcell
             ix = (i-1) % row_length
@@ -964,9 +971,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             x[i] = (ix-nghost) / nx
             y[i] = (iy-nghost) / ny
     
-            # if √(x[i]^2 + y[i]^2) < 0.5  # TODO : centered in the domain (borders: all walls)
-            if x[i] < 0.5
-            # if y[i] < 0.5 # TODO
+            if cond(x[i], y[i])
                 rho[i] = 1.
                 Emat[i] = left_p / ((gamma - 1.) * rho[i])
                 umat[i] = 0.
@@ -1033,6 +1038,8 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         end
     
         BizarriumEOS!(params, data)
+    else
+        error("Unknown test case: " * string(test))
     end
     
     return
@@ -1047,8 +1054,23 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     (; test, nx, ny) = params
     @indexing_vars(params)
 
-    # Mirror the u component on the right of the x axis for the Sod test case, but not for Bizarrium
-    u_factor_right = test == :Bizarrium ? 1 : -1
+    u_factor_left::T   = 1.
+    u_factor_right::T  = 1.
+    v_factor_bottom::T = 1.
+    v_factor_top::T    = 1.
+
+    if test == :Sod
+        u_factor_left = -1.
+        u_factor_right = -1.
+    elseif test == :Sod_y
+        v_factor_top = -1.
+        v_factor_bottom = -1.
+    elseif test == :Sod_circ
+        u_factor_left   = -1.
+        u_factor_right  = -1.
+        v_factor_bottom = -1.
+        v_factor_top    = -1.
+    end
 
     if params.use_gpu
         gpu_boundary_conditions!(index_start, row_length, nx, ny, u_factor_right, rho, umat, vmat, 
@@ -1059,7 +1081,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     @threaded for j in 1:ny
         # Condition for the left border of the domain
         rho[@i(0,j)]  = rho[@i(1,j)]
-        umat[@i(0,j)] =-umat[@i(1,j)]
+        umat[@i(0,j)] = umat[@i(1,j)] * u_factor_left
         vmat[@i(0,j)] = vmat[@i(1,j)]
         pmat[@i(0,j)] = pmat[@i(1,j)]
         cmat[@i(0,j)] = cmat[@i(1,j)]
@@ -1078,7 +1100,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
         # Condition for the bottom border of the domain
         rho[@i(i,0)]  = rho[@i(i,1)]
         umat[@i(i,0)] = umat[@i(i,1)]
-        vmat[@i(i,0)] = vmat[@i(i,1)]
+        vmat[@i(i,0)] = vmat[@i(i,1)] * v_factor_bottom
         pmat[@i(i,0)] = pmat[@i(i,1)]
         cmat[@i(i,0)] = cmat[@i(i,1)]
         gmat[@i(i,0)] = gmat[@i(i,1)]
@@ -1086,7 +1108,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
         # Condition for the top border of the domain
         rho[@i(i,ny+1)]  = rho[@i(i,ny)]
         umat[@i(i,ny+1)] = umat[@i(i,ny)]
-        vmat[@i(i,ny+1)] = vmat[@i(i,ny)]
+        vmat[@i(i,ny+1)] = vmat[@i(i,ny)] * v_factor_top
         pmat[@i(i,ny+1)] = pmat[@i(i,ny)]
         cmat[@i(i,ny+1)] = cmat[@i(i,ny)]
         gmat[@i(i,ny+1)] = gmat[@i(i,ny)]
@@ -1098,17 +1120,19 @@ end
 #
 
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
-    (; x, cmat, umat, domain_mask) = data
-    (; cfl, Dt, ideb, ifin, nx) = params
+    (; x, cmat, umat, vmat, domain_mask) = data
+    (; cfl, Dt, ideb, ifin, nx, ny) = params
     @indexing_vars(params)
 
     dt::T = Inf
     dx::T = 1. / nx
+    dy::T = 1. / ny
 
     if params.cst_dt
         # Constant time step
         dt = Dt
     elseif params.use_gpu && use_ROCM
+        error("dtCFL for ROCM NYI")  # TODO : fix the reduction + min(dt_x, dt_y)
         # ROCM doesn't support Array Programming, so an explicit reduction kernel is needed
         result = zeros(T, 1)  # temporary array of a single value, holding the result of the reduction
         tmp_values = ones(T, 1024)
@@ -1134,27 +1158,35 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
             # because of some IEEE 754 non-compliance since fast math is enabled when compiling this 
             # code for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
             # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
-            dt = reduce(min, @views (dx ./ abs.(
+            dt_x = reduce(min, @views (dx ./ abs.(
                 max.(
                     abs.(umat .+ cmat), 
                     abs.(umat .- cmat)
                 ) .* domain_mask)))
+            dt_y = reduce(min, @views (dy ./ abs.(
+                max.(
+                    abs.(vmat .+ cmat), 
+                    abs.(vmat .- cmat)
+                ) .* domain_mask)))
+            dt = min(dt_x, dt_y)
         else
             @batch threadlocal=typemax(T) for i in ideb:ifin
-                dt_i = dx / (max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])) * domain_mask[i])
-                threadlocal = min(threadlocal, dt_i)
+                dt_x = dx / (max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])) * domain_mask[i])
+                dt_y = dy / (max(abs(vmat[i] + cmat[i]), abs(vmat[i] - cmat[i])) * domain_mask[i])
+                threadlocal = min(threadlocal, dt_x, dt_y)
             end
             dt = minimum(threadlocal)
         end
     else
         if params.use_gpu
-            dt = reduce(min, @views (dx ./ (cmat .* domain_mask)))
+            dt = reduce(min, @views (1. ./ (cmat .* domain_mask)))
         else
             @batch threadlocal=typemax(T) for i in ideb:ifin
-                threadlocal = min(threadlocal, dx / (cmat[i] * domain_mask[i]))
+                threadlocal = min(threadlocal, 1. / (cmat[i] * domain_mask[i]))
             end
             dt = minimum(threadlocal)
         end
+        dt *= min(dx, dy)
     end
 
     if dta == 0  # First cycle
@@ -1193,7 +1225,7 @@ end
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, dx::T, 
         s::Int) where {T, V <: AbstractArray{T}}
-    (; rho, umat, vmat, Emat, ustar, domain_mask, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
+    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
     (; ideb, ifin) = params
 
     if params.use_gpu
@@ -1271,15 +1303,8 @@ function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V
     (; rho, emat, pmat, cmat, gmat) = data
     (; ideb, ifin, test) = params
 
-    if test == :Sod || test == :Leblanc || test == :Woodward
-        gamma::T = 0.0
-
-        if test == :Sod || test == :Woodward
-            gamma = 1.4
-        elseif test == :Leblanc
-            gamma = 5/3
-        end
-
+    if test == :Sod || test == :Sod_y || test == :Sod_circ
+        gamma::T = 7/5
         if params.use_gpu
             gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, emat, 
                 pmat, cmat, gmat, ndrange=length(ideb:ifin))
@@ -1467,6 +1492,7 @@ function write_result(params::ArmonParameters{T}, data::ArmonData{V},
             for i in 1:nx
                 print(f, x[@i(i, j)], ", ", y[@i(i, j)], ", ", rho[@i(i, j)], "\n")
             end
+            print(f, "\n")
         end
     end
     

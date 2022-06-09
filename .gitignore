@@ -1,5 +1,9 @@
 cpp/armon.exe
+anim
 data
 plots
 plot_scripts
 .idea
+
+output*
+*.gif
