@@ -839,90 +839,93 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
 end
 
 
-function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) where {T, V <: AbstractArray{T}}
-    (; x, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1) = data
-    (; scheme, ideb, ifin) = params
+function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, 
+        dt::T, dx::T, last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
+    (; ustar, pstar, rho, pmat, cmat, ustar_1, pstar_1) = data
+    (; scheme, ideb) = params
 
     if params.use_gpu
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
-        gpu_acoustic!(ideb - 1, ustar_1, pstar_1, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
-        gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1,
-            dt, x, ndrange=length(ideb:ifin+1))
+
+        error("2ⁿᵈ order GPU NYI")
+        gpu_acoustic!(ideb - 1, s, ustar_1, pstar_1, rho, u, pmat, cmat, ndrange=length(ideb:last_i))
+        gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1,
+            dt, x, ndrange=length(ideb:last_i))
         return
     end
 
     # First order
-    @simd_threaded_loop for i in ideb:ifin+1
-        rc_l = rho[i-1] * cmat[i-1]
+    @simd_threaded_loop for i in ideb:last_i
+        rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
-        ustar_1[i] = (rc_l*umat[i-1] + rc_r*umat[i] +           (pmat[i-1] - pmat[i])) / (rc_l + rc_r)
-        pstar_1[i] = (rc_r*pmat[i-1] + rc_l*pmat[i] + rc_l*rc_r*(umat[i-1] - umat[i])) / (rc_l + rc_r)
+        ustar_1[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
+        pstar_1[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
     end
-    
+
     # Second order, for each flux limiter
     if scheme == :GAD_minmod
-        @simd_threaded_loop for i in ideb:ifin+1
-            r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
-            r_p_m = (pstar_1[i+1] - pmat[i]) / (pstar_1[i] - pmat[i-1] + 1e-6)
-            r_u_p = (umat[i-1] - ustar_1[i-1]) / (umat[i] - ustar_1[i] + 1e-6)
-            r_p_p = (pmat[i-1] - pstar_1[i-1]) / (pmat[i] - pstar_1[i] + 1e-6)
+        @simd_threaded_loop for i in ideb:last_i
+            r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
+            r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
+            r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
+            r_p_p = (pmat[i-s] - pstar_1[i-s]) / (pmat[i] -   pstar_1[i] + 1e-6)
 
             r_u_m = max(0., min(1., r_u_m))
             r_p_m = max(0., min(1., r_p_m))
             r_u_p = max(0., min(1., r_u_p))
             r_p_p = max(0., min(1., r_p_p))
 
-            dm_l = rho[i-1] * (x[i] - x[i-1])
-            dm_r = rho[i]   * (x[i+1] - x[i])
-            rc_l = rho[i-1] * cmat[i-1]
+            dm_l = rho[i-s] * -dx
+            dm_r = rho[i]   *  dx
+            rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm = (dm_l + dm_r) / 2
             θ  = (rc_l + rc_r) / 2 * (dt / Dm)
-            
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) -
-                                                     r_u_m * (ustar_1[i] - umat[i-1]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) - 
-                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
+
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) -
+                                                     r_u_m * (ustar_1[i] -     u[i-s]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (   pmat[i] - pstar_1[i]) - 
+                                                     r_p_m * (pstar_1[i] -  pmat[i-s]))
         end
     elseif scheme == :GAD_superbee
-        @simd_threaded_loop for i in ideb:ifin+1
-            r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
-            r_p_m = (pstar_1[i+1] - pmat[i]) / (pstar_1[i] - pmat[i-1] + 1e-6)
-            r_u_p = (umat[i-1] - ustar_1[i-1]) / (umat[i] - ustar_1[i] + 1e-6)
-            r_p_p = (pmat[i-1] - pstar_1[i-1]) / (pmat[i] - pstar_1[i] + 1e-6)
+        @simd_threaded_loop for i in ideb:last_i
+            r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
+            r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
+            r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
+            r_p_p = (pmat[i-s] - pstar_1[i-s]) / (pmat[i] -   pstar_1[i] + 1e-6)
 
             r_u_m = max(0., min(1., 2. * r_u_m), min(2., r_u_m))
             r_p_m = max(0., min(1., 2. * r_p_m), min(2., r_p_m))
             r_u_p = max(0., min(1., 2. * r_u_p), min(2., r_u_p))
             r_p_p = max(0., min(1., 2. * r_p_p), min(2., r_p_p))
-    
-            dm_l = rho[i-1] * (x[i] - x[i-1])
-            dm_r = rho[i]   * (x[i+1] - x[i])
-            rc_l = rho[i-1] * cmat[i-1]
+
+            dm_l = rho[i-s] * -dx
+            dm_r = rho[i]   *  dx
+            rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm = (dm_l + dm_r) / 2
             θ  = (rc_l + rc_r) / 2 * (dt / Dm)
             
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) - 
-                                                     r_u_m * (ustar_1[i] - umat[i-1]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) -
-                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) - 
+                                                     r_u_m * (ustar_1[i] -     u[i-s]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (   pmat[i] - pstar_1[i]) -
+                                                     r_p_m * (pstar_1[i] -  pmat[i-s]))
         end
     elseif scheme == :GAD_no_limiter
-        @simd_threaded_loop for i in ideb:ifin+1
-            dm_l = rho[i-1] * (x[i] - x[i-1])
-            dm_r = rho[i]   * (x[i+1] - x[i])
-            rc_l = rho[i-1] * cmat[i-1]
+        @simd_threaded_loop for i in ideb:last_i
+            dm_l = rho[i-s] * -dx
+            dm_r = rho[i]   *  dx
+            rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm = (dm_l + dm_r) / 2
             θ  = (rc_l + rc_r) / 2 * (dt / Dm)
 
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) - 
-                                                     r_u_m * (ustar_1[i] - umat[i-1]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) - 
-                                                     r_p_m * (pstar_1[i] - pmat[i-1]))
+            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) - 
+                                                     r_u_m * (ustar_1[i] -     u[i-s]))
+            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (   pmat[i] - pstar_1[i]) - 
+                                                     r_p_m * (pstar_1[i] -  pmat[i-s]))
         end
     else
         error("The choice of the scheme for the acoustic solver is not recognized: ", scheme)
@@ -1202,14 +1205,13 @@ end
 # Numerical fluxes computation
 #
 
-function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, 
-        last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
+function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
+        dt::T, dx::T, last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
             acoustic!(params, data, last_i, s, u)
         else
-            error("NYI")
-            acoustic_GAD!(params, data, dt)
+            acoustic_GAD!(params, data, dt, dx, last_i, s, u)
         end
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
@@ -1391,7 +1393,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             # disp("Emat:  ", data.Emat)
 
             # enable_debug && println("\n\n === fluxes === \n")
-            @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt, last_i, s, u)
+            @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt, dx, last_i, s, u)
 
             # disp("ustar: ", data.ustar)
             # disp("pstar: ", data.pstar)
