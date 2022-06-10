@@ -1,6 +1,6 @@
 module Armon
 
-#using PrettyTables  # TODO : debug only, to remove
+# using PrettyTables  # TODO : debug only, to remove
 
 using Printf
 using Polyester
@@ -25,10 +25,26 @@ end
 export ArmonParameters, armon
 
 
-# TODO : fix ROCM dtCFL (+ take into account the ghost cells)
+# include("NaN_detector.jl")
+
+
+# TODO LIST
+# fix ROCM dtCFL (+ take into account the ghost cells)
 # Transposition of rho, Emat, pmat, umat, vmat, etc... (as option)
 # GPU + perf measure
-# output files dir as option (+name of files)
+# Split measure time by axis
+# make sure that the first touch is preserved in 2D
+# Strang splitting (or Godunov splitting)
+# GPU dtCFL time
+# Transposition for rectangle domains
+# It is maybe needed to multiply the grind time by the number of passes in each cycle
+# Remove the 'iterations' parameter
+
+#
+# Axis enum
+#
+
+@enum Axis X_axis Y_axis
 
 #
 # Parameters
@@ -47,17 +63,25 @@ mutable struct ArmonParameters{Flt_T}
     nghost::Int
     nx::Int
     ny::Int
+    cfl::Flt_T
+    Dt::Flt_T
+    euler_projection::Bool
+    cst_dt::Bool
+    transpose_dims::Bool
+    dx::Flt_T
+
+    # Indexing
     row_length::Int
     col_length::Int
     nbcell::Int
     ideb::Int
     ifin::Int
     index_start::Int
-    cfl::Flt_T
-    Dt::Flt_T
-    euler_projection::Bool
-    cst_dt::Bool
-    transpose_dims::Bool
+    idebᵀ::Int
+    ifinᵀ::Int
+    index_startᵀ::Int
+    current_axis::Axis
+    s::Int  # Stride
 
     # Bounds
     maxtime::Flt_T
@@ -116,18 +140,30 @@ function ArmonParameters(; ieee_bits = 64,
         error("No support for interleaving in 2D")
     end
 
+    if transpose_dims && nx != ny
+        error("Transposition works only for square domains")
+    end
+
     row_length = nghost * 2 + nx
     col_length = nghost * 2 + ny
+    nbcell = row_length * col_length
+
     ideb = row_length * nghost + nghost + 1
     ifin = row_length * (ny - 1 + nghost) + nghost + nx
-    nbcell = row_length * col_length
     index_start = ideb - row_length - 1
+
+    idebᵀ = col_length * nghost + nghost + 1
+    ifinᵀ = col_length * (nx - 1 + nghost) + nghost + ny
+    index_startᵀ = idebᵀ - col_length - 1
     
     return ArmonParameters{flt_type}(test, riemann, scheme, 
                                      iterations, 
-                                     nghost, nx, ny, row_length, col_length, nbcell,
-                                     ideb, ifin, index_start,
-                                     cfl, Dt, euler_projection, cst_dt, transpose_dims,
+                                     nghost, nx, ny, 
+                                     cfl, Dt, euler_projection, cst_dt, transpose_dims, 0.,
+                                     row_length, col_length, nbcell,
+                                     ideb, ifin, index_start, 
+                                     idebᵀ, ifinᵀ, index_startᵀ,
+                                     X_axis, 1,
                                      maxtime, maxcycle,
                                      silent, output_dir, output_file,
                                      write_output, write_ghosts, animation_step,
@@ -158,7 +194,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - scheme:     ", p.scheme)
     println(" - iterations: ", p.iterations)
     println(" - domain:     ", p.nx, "x", p.ny, " (", p.nghost, " ghosts)")
-    println(" - nbcell:     ", length(p.ideb:p.ifin), " (", p.nbcell, " total)")
+    println(" - nbcell:     ", p.nx * p.ny, " (", p.nbcell, " total)")
     println(" - cfl:        ", p.cfl)
     println(" - Dt:         ", p.Dt)
     println(" - euler proj: ", p.euler_projection)
@@ -173,8 +209,8 @@ end
 
 """
 Generic array holder for all variables and temporary variables used throughout the solver.
-'V' can be a Vector of floats (Float32 or Float64) on CPU, CuArray or ROCArray on GPU.
-Vector, CuArray and ROCArray are all subtypes of AbstractArray.
+`V` can be a `Vector` of floats (`Float32` or `Float64`) on CPU, `CuArray` or `ROCArray` on GPU.
+`Vector`, `CuArray` and `ROCArray` are all subtypes of `AbstractArray`.
 """
 struct ArmonData{V}
     x::V
@@ -264,12 +300,6 @@ function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{W}) where
 end
 
 #
-# Axis enum
-#
-
-@enum Axis X_axis Y_axis
-
-#
 # Threading and SIMD control macros
 #
 
@@ -297,9 +327,11 @@ end
 
 Allows to enable/disable multithreading of the loop depending on the parameters.
 
+```julia
     @threaded for i = 1:n
         y[i] = log10(x[i]) + x[i]
     end
+```
 """
 macro threaded(expr)
     return esc(quote
@@ -410,18 +442,70 @@ end
 # Indexing macros
 #
 
+"""
+    @indexing_vars(params)
+
+Brings the parameters needed for `@i`, `@j`, `@I` into the current scope.
+"""
 macro indexing_vars(params)
     return esc(quote
-        (; index_start, row_length, nghost) = $(params)
+        (; index_start, row_length, col_length, nghost, current_axis, transpose_dims) = $(params)
     end)
 end
 
+"""
+    @i(i, j)
+
+Converts the two-dimensional indexes `i` and `j` to a mono-dimensional index.
+The macro takes the current axis into account, which changes the structure of the arrays.
+
+```julia
+    idx = @i(i, j)
+```
+"""
 macro i(i, j)
     return esc(quote
-        index_start + $(j) * row_length + $(i)
+        if transpose_dims
+            if current_axis == X_axis
+                index_start + $(j) * row_length + $(i)
+            else
+                index_start + $(i) * row_length + $(j)
+            end
+        else
+            index_start + $(j) * row_length + $(i)
+        end
     end)
 end
 
+"""
+    @j(i, j)
+
+Same as `@i(i, j)`, but instead transposes the result.
+"""
+macro j(i, j)
+    return esc(quote
+        if transpose_dims
+            if current_axis == X_axis
+                index_start + $(i) * row_length + $(j)
+            else
+                index_start + $(j) * row_length + $(i)
+            end
+        else
+            index_start + $(i) * row_length + $(j)
+        end
+    end)
+end
+
+"""
+    @I(idx)
+
+The reverse operation of `@i(i, j)`: from a mono-dimensional index `idx`, returns the two-dimensional
+indexes `i` and `j`
+
+```julia
+    i, j = @I(idx)
+```
+"""
 macro I(i)
     return esc(quote
         (($(i)-1) % row_length) + 1 - nghost, (($(i)-1) ÷ row_length) + 1 - nghost
@@ -945,7 +1029,7 @@ end
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, y, rho, umat, vmat, pmat, cmat, Emat, ustar, pstar, ustar_1, pstar_1, domain_mask) = data
-    (; test, nghost, nbcell, nx, ny, row_length) = params
+    (; test, nghost, nbcell, nx, ny, row_length, col_length, transpose_dims) = params
 
     if test == :Sod || test == :Sod_y || test == :Sod_circ
         if params.maxtime == 0
@@ -956,7 +1040,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             params.cfl = 0.95
         end
 
-        gamma::T   = 1.4
+        gamma::T   = 7/5
         left_p::T  = 1.0
         right_p::T = 0.1
 
@@ -972,10 +1056,16 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             ix = (i-1) % row_length
             iy = (i-1) ÷ row_length
 
-            x[i] = (ix-nghost) / nx
-            y[i] = (iy-nghost) / ny
+            if transpose_dims
+                iᵀ = ((row_length * (i - 1)) % (row_length * col_length - 1)) + 1
+            else
+                iᵀ = i
+            end
+
+            x[i]  = (ix-nghost) / nx
+            y[iᵀ] = (iy-nghost) / ny
     
-            if cond(x[i], y[i])
+            if cond(x[i], y[iᵀ])
                 rho[i] = 1.
                 Emat[i] = left_p / ((gamma - 1.) * rho[i])
                 umat[i] = 0.
@@ -991,7 +1081,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
             # Set to zero to make sure no non-initialized values changes the result
             pmat[i] = 0.
-            cmat[i] = 0.
+            cmat[i] = 1.  # Set to 1 as a max speed of 0 will create NaNs
             ustar[i] = 0.
             pstar[i] = 0.
             ustar_1[i] = 0.
@@ -1016,8 +1106,14 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             ix = (i-1) % row_length
             iy = (i-1) ÷ row_length
 
-            x[i] = (ix-nghost) / nx
-            y[i] = (iy-nghost) / ny
+            if transpose_dims
+                iᵀ = ((row_length * (i - 1)) % (row_length * col_length - 1)) + 1
+            else
+                iᵀ = i
+            end
+
+            x[i]  = (ix-nghost) / nx
+            y[iᵀ] = (iy-nghost) / ny
     
             if x[i] < 0.5
                 rho[i] = 1.42857142857e+4
@@ -1034,7 +1130,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             domain_mask[i] = (1 ≤ ix-1 ≤ nx && 1 ≤ iy-1 ≤ ny) ? 1. : 0.
 
             pmat[i] = 0.
-            cmat[i] = 0.
+            cmat[i] = 1.
             ustar[i] = 0.
             pstar[i] = 0.
             ustar_1[i] = 0.
@@ -1064,10 +1160,10 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     v_factor_top::T    = 1.
 
     if test == :Sod
-        u_factor_left = -1.
-        u_factor_right = -1.
+        u_factor_left   = -1.
+        u_factor_right  = -1.
     elseif test == :Sod_y
-        v_factor_top = -1.
+        v_factor_top    = -1.
         v_factor_bottom = -1.
     elseif test == :Sod_circ
         u_factor_left   = -1.
@@ -1077,6 +1173,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     end
 
     if params.use_gpu
+        error("TODO : add current_axis as parameter")
         gpu_boundary_conditions!(index_start, row_length, nx, ny, 
             u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
             rho, umat, vmat, pmat, cmat, gmat, ndrange=max(nx, ny))
@@ -1085,38 +1182,46 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
 
     @threaded for j in 1:ny
         # Condition for the left border of the domain
-        rho[@i(0,j)]  = rho[@i(1,j)]
-        umat[@i(0,j)] = umat[@i(1,j)] * u_factor_left
-        vmat[@i(0,j)] = vmat[@i(1,j)]
-        pmat[@i(0,j)] = pmat[@i(1,j)]
-        cmat[@i(0,j)] = cmat[@i(1,j)]
-        gmat[@i(0,j)] = gmat[@i(1,j)]
+        idx = @i(1,j)
+        idxm1 = @i(0,j)
+        rho[idxm1]  = rho[idx]
+        umat[idxm1] = umat[idx] * u_factor_left
+        vmat[idxm1] = vmat[idx]
+        pmat[idxm1] = pmat[idx]
+        cmat[idxm1] = cmat[idx]
+        gmat[idxm1] = gmat[idx]
 
         # Condition for the right border of the domain
-        rho[@i(nx+1, j)] = rho[@i(nx,j)]
-        umat[@i(nx+1,j)] = umat[@i(nx,j)] * u_factor_right
-        vmat[@i(nx+1,j)] = vmat[@i(nx,j)]
-        pmat[@i(nx+1,j)] = pmat[@i(nx,j)]
-        cmat[@i(nx+1,j)] = cmat[@i(nx,j)]
-        gmat[@i(nx+1,j)] = gmat[@i(nx,j)]
+        idx = @i(nx,j)
+        idxp1 = @i(nx+1,j)
+        rho[idxp1] = rho[idx]
+        umat[idxp1] = umat[idx] * u_factor_right
+        vmat[idxp1] = vmat[idx]
+        pmat[idxp1] = pmat[idx]
+        cmat[idxp1] = cmat[idx]
+        gmat[idxp1] = gmat[idx]
     end
 
     @threaded for i in 1:nx
         # Condition for the bottom border of the domain
-        rho[@i(i,0)]  = rho[@i(i,1)]
-        umat[@i(i,0)] = umat[@i(i,1)]
-        vmat[@i(i,0)] = vmat[@i(i,1)] * v_factor_bottom
-        pmat[@i(i,0)] = pmat[@i(i,1)]
-        cmat[@i(i,0)] = cmat[@i(i,1)]
-        gmat[@i(i,0)] = gmat[@i(i,1)]
+        idx = @i(i,1)
+        idxm1 = @i(i,0)
+        rho[idxm1]  = rho[idx]
+        umat[idxm1] = umat[idx]
+        vmat[idxm1] = vmat[idx] * v_factor_bottom
+        pmat[idxm1] = pmat[idx]
+        cmat[idxm1] = cmat[idx]
+        gmat[idxm1] = gmat[idx]
 
         # Condition for the top border of the domain
-        rho[@i(i,ny+1)]  = rho[@i(i,ny)]
-        umat[@i(i,ny+1)] = umat[@i(i,ny)]
-        vmat[@i(i,ny+1)] = vmat[@i(i,ny)] * v_factor_top
-        pmat[@i(i,ny+1)] = pmat[@i(i,ny)]
-        cmat[@i(i,ny+1)] = cmat[@i(i,ny)]
-        gmat[@i(i,ny+1)] = gmat[@i(i,ny)]
+        idx = @i(i,ny)
+        idxp1 = @i(i,ny+1)
+        rho[idxp1]  = rho[idx]
+        umat[idxp1] = umat[idx]
+        vmat[idxp1] = vmat[idx] * v_factor_top
+        pmat[idxp1] = pmat[idx]
+        cmat[idxp1] = cmat[idx]
+        gmat[idxp1] = gmat[idx]
     end
 end
 
@@ -1227,10 +1332,10 @@ end
 # Cell update
 # 
 
-function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, dx::T, 
-        s::Int) where {T, V <: AbstractArray{T}}
-    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
-    (; ideb, ifin) = params
+function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, 
+        dt::T, dx::T, s::Int) where {T, V <: AbstractArray{T}}
+    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask) = data
+    (; ideb, ifin, row_length, col_length, transpose_dims) = params
 
     if params.use_gpu
         gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, s, ustar, rho, umat, vmat, Emat, 
@@ -1241,7 +1346,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 
     # Projection of the conservative variables
-    @simd_threaded_loop for i in ideb:ifin
+    @simd_threaded_loop for i in ideb-row_length:ifin+row_length
         dX = dx + dt * (ustar[i+s] - ustar[i])
         L₁ =  max(0, ustar[i]) * dt
         L₃ = -min(0, ustar[i+s]) * dt
@@ -1261,12 +1366,26 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                      + L₃ * rho[i+s] * Emat[i+s]) / dX
     end
 
-    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
-    @simd_threaded_loop for i in ideb:ifin
-        rho[i]  = tmp_rho[i]
-        umat[i] = tmp_urho[i] / tmp_rho[i]
-        vmat[i] = tmp_vrho[i] / tmp_rho[i]
-        Emat[i] = tmp_Erho[i] / tmp_rho[i]
+    if transpose_dims
+        # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E) + transposition (including the ghost cells)
+        @simd_threaded_loop for i in ideb-row_length:ifin+row_length
+            iᵀ = ((row_length * (i - 1)) % (row_length * col_length - 1)) + 1
+
+            rho[iᵀ]  = tmp_rho[i]
+            umat[iᵀ] = tmp_urho[i] / tmp_rho[i]
+            vmat[iᵀ] = tmp_vrho[i] / tmp_rho[i]
+            Emat[iᵀ] = tmp_Erho[i] / tmp_rho[i]
+
+            domain_mask[iᵀ], domain_mask[i] = domain_mask[i], domain_mask[iᵀ]
+        end
+    else
+        # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+        @simd_threaded_loop for i in ideb:ifin
+            rho[i]  = tmp_rho[i]
+            umat[i] = tmp_urho[i] / tmp_rho[i]
+            vmat[i] = tmp_vrho[i] / tmp_rho[i]
+            Emat[i] = tmp_Erho[i] / tmp_rho[i]
+        end
     end
 end
 
@@ -1323,13 +1442,60 @@ function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V
     end
 end
 
+# 
+# Transposition parameters
+#
+
+function update_indexing_parameters(params::ArmonParameters{T}, data::ArmonData{V}, 
+        axis::Axis) where {T, V <: AbstractArray{T}}
+    (; nx, ny, row_length, transpose_dims) = params
+
+    if transpose_dims
+        params.current_axis = axis
+
+        # Swap the rows with the columns
+        params.row_length, params.col_length = params.col_length, params.row_length
+        
+        # Swap the pre-calculated indexes
+        params.ideb, params.idebᵀ = params.idebᵀ, params.ideb
+        params.ifin, params.ifinᵀ = params.ifinᵀ, params.ifin
+        params.index_start, params.index_startᵀ = params.index_startᵀ, params.index_start
+    end
+
+    last_i::Int = params.ifin + 1
+    
+    if axis == X_axis
+        params.s = 1
+        params.dx = 1. / nx
+        axis_positions::V = data.x
+        axis_velocities::V = data.umat
+    else  # axis == Y_axis
+        params.s = 1
+        params.dx = 1. / ny
+        
+        axis_positions = data.y
+        axis_velocities = data.vmat
+
+        last_i += row_length  # include one more row to compute the fluxes at the top
+
+        if transpose_dims
+            params.s = 1
+        else
+            params.s = row_length
+        end 
+    end
+
+    return last_i, axis_positions, axis_velocities
+end
+
 # 
 # Main time loop
 # 
 
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, y, umat, vmat) = data
-    (; maxtime, maxcycle, ifin, nx, ny, row_length, silent, animation_step) = params
+    (; maxtime, maxcycle, ifin, nx, ny, row_length, col_length, silent, animation_step, transpose_dims) = params
+    @indexing_vars(params)
     
     cycle  = 0
     t::T   = 0.
@@ -1339,92 +1505,109 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     t1 = time_ns()
     t_warmup = t1
 
-    # enable_debug = false
-    # mask = .!convert.(Bool, data.domain_mask)
-    # disp(label, array) = begin
-    #     if enable_debug
-    #         println(label)
-    #         pretty_table(reverse(reshape(array, params.row_length, :)', dims=1); 
-    #             noheader = true, 
-    #             highlighters = (Highlighter((d,i,j) -> (data.domain_mask[(j-1) * row_length + i] > 0.), 
-    #                                        foreground=:light_blue),
-    #                             Highlighter((d,i,j) -> (abs(d[i,j]) > 1. || !isfinite(d[i,j])), 
-    #                                        foreground=:red)))
-    #         # display(reverse(reshape(array, params.row_length, :)', dims=1))
-    #     end
-    # end
+    enable_debug = false
+    transposed_axis = false
+    disp(label, array) = begin
+        if enable_debug
+            println(label * (transposed_axis ? "(T)" : ""))
+            # pretty_table(reverse(transposed_axis ? (reshape(array, params.row_length, :)) : (reshape(array, params.row_length, :)'), dims=1); 
+            #     noheader = true, 
+            #     highlighters = (Highlighter((d,i,j) -> (data.domain_mask[(j-1) * row_length + i] > 0.), 
+            #                                foreground=:light_blue),
+            #                     Highlighter((d,i,j) -> (abs(d[i,j]) > 1. || !isfinite(d[i,j])), 
+            #                                foreground=:red)))
+            # display(reverse(reshape(array, params.row_length, :)', dims=1))
+        end
+    end
     
-    # disp("mask: ", mask)
-
-    # if enable_debug
-    #     data.rho[mask] .= 999.
-    #     data.umat[mask] .= 999.
-    #     data.vmat[mask] .= 999.
-    #     data.Emat[mask] .= 999.
-    #     data.pmat[mask] .= 999.
-    #     data.cmat[mask] .= 999.
-    #     data.gmat[mask] .= 999.
-    #     data.ustar[mask] .= 999.
-    #     data.pstar[mask] .= 999.
-    # end
-
     while t < maxtime && cycle < maxcycle
-        @time_pos params "boundaryConditions" boundaryConditions!(params, data)
-        @time_pos params "dtCFL"              dt = dtCFL(params, data, dta)
-
         for axis in [X_axis, Y_axis]
-            if axis == X_axis
-                # enable_debug && println("\n\n === X axis === \n")
-                s = 1
-                last_i = ifin + 1
-                u = umat
-                dx = 1. / nx
-                x_ = x
-            elseif axis == Y_axis
-                # enable_debug && println("\n\n === Y axis === \n")
-                s = row_length
-                last_i = ifin + row_length + 1  # include one more row to compute the top fluxes
-                u = vmat
-                dx = 1. / ny
-                x_ = y
+
+            # last_i::Int, x_::V, u::V = update_indexing_parameters(params, data, axis)
+
+            if transpose_dims
+                params.current_axis = axis
             end
 
-            # enable_debug && println("dt = ", dt)
-            # disp("x:     ", x_)
-            # disp("rho:   ", data.rho)
-            # disp("u:     ", u)
-            # disp("cmat:  ", data.cmat)
-            # disp("pmat:  ", data.pmat)
-            # disp("Emat:  ", data.Emat)
+            if axis == X_axis
+                enable_debug && println("\n\n === X axis === \n")
+                s::Int = 1
+                last_i::Int = ifin + 1
+                dx::T = 1. / nx
+                u = umat
+                x_ = x
+                params.row_length = row_length
+                params.col_length = col_length
+                if transpose_dims
+                    params.ideb, params.idebᵀ = params.idebᵀ, params.ideb
+                    params.ifin, params.ifinᵀ = params.ifinᵀ, params.ifin
+                    params.index_start, params.index_startᵀ = params.index_startᵀ, params.index_start
+                end
+            elseif axis == Y_axis
+                enable_debug && println("\n\n === Y axis === \n")
+                last_i = ifin + row_length + 1  # include one more row to compute the fluxes at the top
+                dx = 1. / ny
+                u = vmat
+                x_ = y
+                if transpose_dims
+                    s = 1
+                    params.row_length = col_length
+                    params.col_length = row_length
+                    params.ideb, params.idebᵀ = params.idebᵀ, params.ideb
+                    params.ifin, params.ifinᵀ = params.ifinᵀ, params.ifin
+                    params.index_start, params.index_startᵀ = params.index_startᵀ, params.index_start
+                else
+                    s = row_length
+                    params.row_length = row_length
+                    params.col_length = col_length
+                end
+            end
 
-            # enable_debug && println("\n\n === fluxes === \n")
+            @time_pos params "boundaryConditions" boundaryConditions!(params, data)
+            @time_pos params "dtCFL"              dt = dtCFL(params, data, dta)
+
+            if !isfinite(dt) || dt <= 0.
+                error("Invalid dt at cycle $(cycle): $(dt)")
+            end
+
+            enable_debug && println("dt = ", dt)
+            disp("domain:", data.domain_mask)
+            disp("x:     ", x_)
+            disp("rho:   ", data.rho)
+            disp("u:     ", u)
+            disp("cmat:  ", data.cmat)
+            disp("pmat:  ", data.pmat)
+            disp("Emat:  ", data.Emat)
+
+            enable_debug && println("\n\n === fluxes === \n")
             @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt, dx, last_i, s, u)
 
-            # disp("ustar: ", data.ustar)
-            # disp("pstar: ", data.pstar)
+            disp("ustar: ", data.ustar)
+            disp("pstar: ", data.pstar)
     
-            # enable_debug && println("\n === cell update === \n")
+            enable_debug && println("\n === cell update === \n")
             @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt, dx, s, u, x_)
     
-            # disp("rho:   ", data.rho)
-            # disp("u:     ", u)
-            # disp("Emat:  ", data.Emat)
+            disp("rho:   ", data.rho)
+            disp("u:     ", u)
+            disp("Emat:  ", data.Emat)
     
             if params.euler_projection
-                # enable_debug && println("\n === euler proj === \n")
+                enable_debug && println("\n === euler proj === \n")
                 @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt, dx, s)
+                if transpose_dims
+                    transposed_axis = !transposed_axis
+                end
     
-                # disp("rho:   ", data.rho)
-                # disp("umat:  ", data.umat)
-                # disp("vmat:  ", data.vmat)
-                # disp("Emat:  ", data.Emat)
+                disp("rho:   ", data.rho)
+                disp("umat:  ", data.umat)
+                disp("vmat:  ", data.vmat)
+                disp("Emat:  ", data.Emat)
             end
+
+            enable_debug && println("\n === EOS === \n")
+            @time_pos params "update_EOS!"        update_EOS!(params, data)
         end
-
-        # enable_debug && println("\n === EOS === \n")
-        @time_pos params "update_EOS!"        update_EOS!(params, data)
-
-        # disp("cmat:  ", data.cmat)
 
         dta = dt
         cycle += 1
@@ -1432,10 +1615,6 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
         if silent <= 1
             println("Cycle = ", cycle, ", dt = ", dt, ", t = ", t)
-        end
-
-        if !isfinite(dt) || dt <= 0.
-            error("Invalid dt at cycle $(cycle): $(dt)")
         end
 
         if cycle == 5
@@ -1479,7 +1658,7 @@ end
 function write_result(params::ArmonParameters{T}, data::ArmonData{V}, 
         file_name::String) where {T, V <: AbstractArray{T}}
     (; x, y, rho) = data
-    (; silent, write_ghosts, nx, ny, nghost, output_dir) = params
+    (; silent, write_ghosts, nx, ny, nghost, output_dir, transpose_dims) = params
     @indexing_vars(params)
 
     if !isdir(output_dir)
@@ -1492,13 +1671,13 @@ function write_result(params::ArmonParameters{T}, data::ArmonData{V},
     if write_ghosts
         for j in 1-nghost:ny+nghost
             for i in 1-nghost:nx+nghost
-                print(f, x[@i(i, j)], ", ", y[@i(i, j)], ", ", rho[@i(i, j)], "\n")
+                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @j(i, j) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
             end
         end
     else
         for j in 1:ny
             for i in 1:nx
-                print(f, x[@i(i, j)], ", ", y[@i(i, j)], ", ", rho[@i(i, j)], "\n")
+                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @j(i, j) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
             end
             print(f, "\n")
         end
