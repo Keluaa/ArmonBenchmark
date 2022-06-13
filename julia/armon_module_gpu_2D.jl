@@ -7,7 +7,8 @@ using Polyester
 using KernelAbstractions
 using KernelAbstractions.Extras: @unroll
 
-use_ROCM = haskey(ENV, "USE_ROCM_GPU") && ENV["USE_ROCM_GPU"] == "true"
+const use_ROCM = haskey(ENV, "USE_ROCM_GPU") && ENV["USE_ROCM_GPU"] == "true"
+const block_size = haskey(ENV, "GPU_BLOCK_SIZE") ? parse(Int, ENV["GPU_BLOCK_SIZE"]) : 32
 
 if use_ROCM
     using AMDGPU
@@ -176,6 +177,9 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - use_simd:   ", p.use_simd)
     println(" - use_ccall:  ", p.use_ccall)
     println(" - use_gpu:    ", p.use_gpu)
+    if p.use_gpu
+        println(" - block size: ", block_size)
+    end
     println(" - ieee_bits:  ", sizeof(T) * 8)
     println("")
     println(" - test:       ", p.test)
@@ -553,7 +557,6 @@ end
 #
 
 const device = use_ROCM ? ROCDevice() : CUDADevice()
-const block_size = haskey(ENV, "GPU_BLOCK_SIZE") ? parse(Int, ENV["GPU_BLOCK_SIZE"]) : 32
 const reduction_block_size = 1024;
 const reduction_block_size_log2 = convert(Int, log2(reduction_block_size))
 
