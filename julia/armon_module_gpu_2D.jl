@@ -31,7 +31,6 @@ export ArmonParameters, armon
 
 # TODO LIST
 # fix ROCM dtCFL (+ take into account the ghost cells)
-# GPU + perf measure
 # make sure that the first touch is preserved in 2D
 # Strang splitting (or Godunov splitting)
 # GPU dtCFL time
@@ -436,6 +435,7 @@ macro time_pos(params, label, expr)
 end
 
 
+# Equivalent to `@time` but with a better output
 macro time_expr(params, label, expr)
     return esc(quote
         if params.silent <= 3
@@ -711,7 +711,8 @@ end
 end
 
 
-@kernel function gpu_boundary_conditions_kernel!(index_start, row_length, nx, ny,
+@kernel function gpu_boundary_conditions_kernel!(index_start, row_length, current_axis, transpose_dims,
+        nx, ny,
         u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
         rho, umat, vmat, pmat, cmat, gmat)
     thread_i = @index(Global)
@@ -1133,8 +1134,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     end
 
     if params.use_gpu
-        error("TODO : add current_axis as parameter")
-        gpu_boundary_conditions!(index_start, row_length, nx, ny, 
+        gpu_boundary_conditions!(index_start, row_length, current_axis, transpose_dims, nx, ny, 
             u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
             rho, umat, vmat, pmat, cmat, gmat, ndrange=max(nx, ny))
         return
@@ -1622,9 +1622,6 @@ function armon(params::ArmonParameters{T}) where T
 
     if silent < 3
         print_parameters(params)
-        if params.use_gpu
-            println(" - gpu block size: ", block_size)
-        end
     end
 
     if params.animation_step != 0
@@ -1645,7 +1642,7 @@ function armon(params::ArmonParameters{T}) where T
         copy_time = @elapsed d_data = data_to_gpu(data)
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
-        @time_expr params "time_loop" cells_per_sec = time_loop(params, data)
+        @time_expr params "time_loop" cells_per_sec = time_loop(params, d_data)
 
         data_from_gpu(data, d_data)
     else
