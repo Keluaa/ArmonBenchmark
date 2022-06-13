@@ -36,7 +36,6 @@ export ArmonParameters, armon
 # Strang splitting (or Godunov splitting)
 # GPU dtCFL time
 # Transposition for rectangle domains
-# Remove the 'iterations' parameter
 # cleanup
 
 #
@@ -54,9 +53,6 @@ mutable struct ArmonParameters{Flt_T}
     test::Symbol
     riemann::Symbol
     scheme::Symbol
-    
-    # Solver parameters
-    iterations::Int
     
     # Domain parameters
     nghost::Int
@@ -106,7 +102,6 @@ end
 # Constructor for ArmonParameters
 function ArmonParameters(; ieee_bits = 64,
                            test = :Sod, riemann = :acoustic, scheme = :GAD_minmod,
-                           iterations = 4, 
                            nghost = 2, nx = 10, ny = 10, cfl = 0.6, Dt = 0., 
                            euler_projection = false, cst_dt = false, transpose_dims = false,
                            maxtime = 0, maxcycle = 500_000,
@@ -124,9 +119,6 @@ function ArmonParameters(; ieee_bits = 64,
     Dt = flt_type(Dt)
     maxtime = flt_type(maxtime)
     
-    if riemann == :one_iteration_acoustic iterations = 1 end
-    if riemann == :two_iteration_acoustic iterations = 2 end
-
     if cst_dt && Dt == zero(flt_type)
         error("Dt == 0 with constant step enabled")
     end
@@ -155,8 +147,7 @@ function ArmonParameters(; ieee_bits = 64,
     ifinᵀ = col_length * (nx - 1 + nghost) + nghost + ny
     index_startᵀ = idebᵀ - col_length - 1
     
-    return ArmonParameters{flt_type}(test, riemann, scheme, 
-                                     iterations, 
+    return ArmonParameters{flt_type}(test, riemann, scheme,
                                      nghost, nx, ny, 
                                      cfl, Dt, euler_projection, cst_dt, transpose_dims, 0.,
                                      row_length, col_length, nbcell,
@@ -191,7 +182,6 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - test:       ", p.test)
     println(" - riemann:    ", p.riemann)
     println(" - scheme:     ", p.scheme)
-    println(" - iterations: ", p.iterations)
     println(" - domain:     ", p.nx, "x", p.ny, " (", p.nghost, " ghosts)")
     println(" - nbcell:     ", p.nx * p.ny, " (", p.nbcell, " total)")
     println(" - cfl:        ", p.cfl)
