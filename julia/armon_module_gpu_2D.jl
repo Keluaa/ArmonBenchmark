@@ -30,15 +30,14 @@ export ArmonParameters, armon
 
 # TODO LIST
 # fix ROCM dtCFL (+ take into account the ghost cells)
-# Transposition of rho, Emat, pmat, umat, vmat, etc... (as option)
 # GPU + perf measure
 # Split measure time by axis
 # make sure that the first touch is preserved in 2D
 # Strang splitting (or Godunov splitting)
 # GPU dtCFL time
 # Transposition for rectangle domains
-# It is maybe needed to multiply the grind time by the number of passes in each cycle
 # Remove the 'iterations' parameter
+# cleanup
 
 #
 # Axis enum
@@ -910,9 +909,9 @@ end
 # 
 
 function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
+        last_i::Int, u::V) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat) = data
-    (; ideb) = params
+    (; ideb, s) = params
 
     if params.use_gpu
         gpu_acoustic!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, ndrange=length(ideb:last_i))
@@ -929,9 +928,9 @@ end
 
 
 function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, dx::T, last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
+        dt::T, last_i::Int, u::V) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat, ustar_1, pstar_1) = data
-    (; scheme, ideb) = params
+    (; scheme, dx, ideb, s) = params
 
     if params.use_gpu
         if params.scheme != :GAD_minmod
@@ -1316,12 +1315,12 @@ end
 #
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, dx::T, last_i::Int, s::Int, u::V) where {T, V <: AbstractArray{T}}
+        dt::T, last_i::Int, u::V) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            acoustic!(params, data, last_i, s, u)
+            acoustic!(params, data, last_i, u)
         else
-            acoustic_GAD!(params, data, dt, dx, last_i, s, u)
+            acoustic_GAD!(params, data, dt, last_i, u)
         end
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
@@ -1333,9 +1332,9 @@ end
 # 
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, dx::T, s::Int) where {T, V <: AbstractArray{T}}
+        dt::T) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask) = data
-    (; ideb, ifin, row_length, col_length, transpose_dims) = params
+    (; dx, ideb, ifin, row_length, col_length, transpose_dims, s) = params
 
     if params.use_gpu
         gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, s, ustar, rho, umat, vmat, Emat, 
@@ -1390,10 +1389,10 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 end
 
 
-function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, dx::T,
-        s::Int, u::V, x::V) where {T, V <: AbstractArray{T}}
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
+        u::V, x::V) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, Emat, domain_mask) = data
-    (; ideb, ifin) = params
+    (; dx, ideb, ifin, s) = params
 
     if params.use_gpu
         gpu_cell_update!(ideb - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
@@ -1493,8 +1492,7 @@ end
 # 
 
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; x, y, umat, vmat) = data
-    (; maxtime, maxcycle, ifin, nx, ny, row_length, col_length, silent, animation_step, transpose_dims) = params
+    (; maxtime, maxcycle, nx, ny, silent, animation_step, transpose_dims) = params
     @indexing_vars(params)
     
     cycle  = 0
@@ -1522,46 +1520,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     
     while t < maxtime && cycle < maxcycle
         for axis in [X_axis, Y_axis]
-
-            # last_i::Int, x_::V, u::V = update_indexing_parameters(params, data, axis)
-
-            if transpose_dims
-                params.current_axis = axis
-            end
-
-            if axis == X_axis
-                enable_debug && println("\n\n === X axis === \n")
-                s::Int = 1
-                last_i::Int = ifin + 1
-                dx::T = 1. / nx
-                u = umat
-                x_ = x
-                params.row_length = row_length
-                params.col_length = col_length
-                if transpose_dims
-                    params.ideb, params.idebᵀ = params.idebᵀ, params.ideb
-                    params.ifin, params.ifinᵀ = params.ifinᵀ, params.ifin
-                    params.index_start, params.index_startᵀ = params.index_startᵀ, params.index_start
-                end
-            elseif axis == Y_axis
-                enable_debug && println("\n\n === Y axis === \n")
-                last_i = ifin + row_length + 1  # include one more row to compute the fluxes at the top
-                dx = 1. / ny
-                u = vmat
-                x_ = y
-                if transpose_dims
-                    s = 1
-                    params.row_length = col_length
-                    params.col_length = row_length
-                    params.ideb, params.idebᵀ = params.idebᵀ, params.ideb
-                    params.ifin, params.ifinᵀ = params.ifinᵀ, params.ifin
-                    params.index_start, params.index_startᵀ = params.index_startᵀ, params.index_start
-                else
-                    s = row_length
-                    params.row_length = row_length
-                    params.col_length = col_length
-                end
-            end
+            last_i::Int, x_::V, u::V = update_indexing_parameters(params, data, axis)
 
             @time_pos params "boundaryConditions" boundaryConditions!(params, data)
             @time_pos params "dtCFL"              dt = dtCFL(params, data, dta)
@@ -1580,13 +1539,13 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             disp("Emat:  ", data.Emat)
 
             enable_debug && println("\n\n === fluxes === \n")
-            @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt, dx, last_i, s, u)
+            @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt, last_i, u)
 
             disp("ustar: ", data.ustar)
             disp("pstar: ", data.pstar)
     
             enable_debug && println("\n === cell update === \n")
-            @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt, dx, s, u, x_)
+            @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt, u, x_)
     
             disp("rho:   ", data.rho)
             disp("u:     ", u)
@@ -1594,7 +1553,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     
             if params.euler_projection
                 enable_debug && println("\n === euler proj === \n")
-                @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt, dx, s)
+                @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt)
                 if transpose_dims
                     transposed_axis = !transposed_axis
                 end
