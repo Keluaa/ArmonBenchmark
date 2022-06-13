@@ -31,7 +31,6 @@ export ArmonParameters, armon
 # TODO LIST
 # fix ROCM dtCFL (+ take into account the ghost cells)
 # GPU + perf measure
-# Split measure time by axis
 # make sure that the first touch is preserved in 2D
 # Strang splitting (or Godunov splitting)
 # GPU dtCFL time
@@ -409,18 +408,66 @@ end
 # Execution Time Measurement
 #
 
-time_contrib = Dict{String, Float64}()
+time_contrib = Dict{Axis, Dict{String, Float64}}()
 macro time_pos(params, label, expr) 
     return esc(quote
         if params.measure_time
             _t_start = time_ns()
             $(expr)
             _t_end = time_ns()
-            if haskey(time_contrib, $(label))
-                global time_contrib[$(label)] += _t_end - _t_start
-            else
-                global time_contrib[$(label)] = _t_end - _t_start
+
+            if !haskey(time_contrib, params.current_axis)
+                global time_contrib[params.current_axis] = Dict{String, Float64}()
             end
+
+            if !haskey(time_contrib, $(label))
+                global time_contrib[params.current_axis][$(label)] = 0.
+            end
+
+            global time_contrib[params.current_axis][$(label)] += _t_end - _t_start
+        else
+            $(expr)
+        end
+    end)
+end
+
+
+macro time_expr(params, label, expr)
+    return esc(quote
+        if params.silent <= 3
+            # Same structure as `@time` (see `@macroexpand @time`), using some undocumented functions.
+            gc_info_before = Base.gc_num()
+            time_before = Base.time_ns()
+            compile_time_before = Base.cumulative_compile_time_ns_before()
+
+            $(expr)
+
+            compile_time_after = Base.cumulative_compile_time_ns_after()
+            time_after = Base.time_ns()
+            gc_info_after = Base.gc_num()
+            
+            elapsed_time = time_after - time_before
+            compile_time = compile_time_after - compile_time_before
+            gc_diff = Base.GC_Diff(gc_info_after, gc_info_before)
+
+            allocations_size = gc_diff.allocd / 1e3
+            allocations_count = Base.gc_alloc_count(gc_diff)
+            gc_time = gc_diff.total_time
+    
+            println("\nTime info for $($(label)):")
+            if allocations_count > 0
+                @printf(" - %d allocations for %g kB\n", 
+                    allocations_count, convert(Float64, allocations_size))
+            end
+            if gc_time > 0
+                @printf(" - GC:      %10.5f ms (%5.2f%%)\n", 
+                    gc_time / 1e6, gc_time / elapsed_time * 100)
+            end
+            if compile_time > 0
+                @printf(" - Compile: %10.5f ms (%5.2f%%)\n", 
+                    compile_time / 1e6, compile_time / elapsed_time * 100)
+            end
+            @printf(" - Total:   %10.5f ms\n", elapsed_time / 1e6)
         else
             $(expr)
         end
@@ -1563,7 +1610,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         t += dt
 
         if silent <= 1
-            println("Cycle = ", cycle, ", dt = ", dt, ", t = ", t)
+            @printf("Cycle %4d: dt = %.18f, t = %.18f\n", cycle, dt, t)
         end
 
         if cycle == 5
@@ -1593,8 +1640,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         println("Warmup:     ", round((t_warmup - t1) / 1e9, digits=5), " sec")
         println("Grind time: ", round(grind_time / 1e3, digits=5),      " µs/cell/cycle")
         println("Cells/sec:  ", round(1 / grind_time * 1e3, digits=5),  " Mega cells/sec")
-        println("Cycles: ", cycle)
-        println(" ")
+        println("Cycles:     ", cycle)
     end
 
     return convert(T, 1 / grind_time)
@@ -1635,7 +1681,7 @@ function write_result(params::ArmonParameters{T}, data::ArmonData{V},
     close(f)
 
     if silent < 2
-        println("Wrote to file " * output_file_path)
+        println("\nWrote to file " * output_file_path)
     end
 end
 
@@ -1669,26 +1715,17 @@ function armon(params::ArmonParameters{T}) where T
     # policy when working on CPU only
     data = ArmonData(T, params.nbcell)
 
-    init_time = @elapsed init_test(params, data)
-    silent <= 2 && @printf("Init time: %.3g sec\n", init_time)
+    @time_expr params "initialisation" init_test(params, data)
 
     if params.use_gpu
         copy_time = @elapsed d_data = data_to_gpu(data)
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
-        if silent <= 3
-            @time cells_per_sec = time_loop(params, d_data)
-        else
-            cells_per_sec = time_loop(params, d_data)
-        end
+        @time_expr params "time_loop" cells_per_sec = time_loop(params, data)
 
         data_from_gpu(data, d_data)
     else
-        if silent <= 3
-            @time cells_per_sec = time_loop(params, data)
-        else
-            cells_per_sec = time_loop(params, data)
-        end
+        @time_expr params "time_loop" cells_per_sec = time_loop(params, data)
     end
 
     if params.write_output
@@ -1696,14 +1733,36 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     if params.measure_time && silent < 3 && !isempty(time_contrib)
-        total_time = mapreduce(x->x[2], +, collect(time_contrib))
-        println("\nTotal time of each step:")
-        for (label, time_) in sort(collect(time_contrib))
-            @printf(" - %-25s %10.5f ms (%5.2f%%)\n", label, time_ / 1e6, time_ / total_time * 100)
+        axis_time = Dict{Axis, Float64}()
+
+        # Print the time of each step for each axis
+        for (axis, time_contrib_axis) in sort(collect(time_contrib); lt=(a, b)->(a[1] < b[1]))
+            isempty(time_contrib_axis) && continue
+            
+            total_time = mapreduce(x->x[2], +, collect(time_contrib_axis))
+            axis_time[axis] = total_time
+
+            println("\nTime for each step of the $(axis): ")
+            for (step_label, step_time) in sort(collect(time_contrib_axis))
+                @printf(" - %-25s %10.5f ms (%5.2f%%)\n", 
+                    step_label, step_time / 1e6, step_time / total_time * 100)
+            end
+            @printf(" => %-24s %10.5f ms\n", "Total time:", total_time / 1e6)
+        end
+
+        # Print the distribution of time between axis
+        if length(axis_time) > 1
+            total_time = mapreduce(x->x[2], +, collect(axis_time))
+
+            println("\nAxis time repartition: ")
+            for (axis, time_) in sort(collect(axis_time))
+                @printf(" - %-5s %10.5f ms (%5.2f%%)\n", 
+                    SubString(string(axis), 1:1), time_ / 1e6, time_ / total_time * 100)
+            end
         end
     end
 
-    return cells_per_sec, sort(collect(time_contrib))
+    return cells_per_sec, sort(collect(time_contrib); lt=(a, b)->(a[1] < b[1]))
 end
 
 end
