@@ -26,7 +26,6 @@ export ArmonParameters, armon
 # TODO LIST
 # fix ROCM dtCFL (+ take into account the ghost cells)
 # make sure that the first touch is preserved in 2D
-# Strang splitting (or Godunov splitting)
 # GPU dtCFL time
 # perf scripts
 # better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
@@ -53,12 +52,13 @@ mutable struct ArmonParameters{Flt_T}
     nghost::Int
     nx::Int
     ny::Int
+    dx::Flt_T
     cfl::Flt_T
     Dt::Flt_T
-    euler_projection::Bool
     cst_dt::Bool
+    euler_projection::Bool
     transpose_dims::Bool
-    dx::Flt_T
+    axis_splitting::Symbol
 
     # Indexing
     row_length::Int
@@ -97,17 +97,20 @@ end
 
 
 # Constructor for ArmonParameters
-function ArmonParameters(; ieee_bits = 64,
-                           test = :Sod, riemann = :acoustic, scheme = :GAD_minmod,
-                           nghost = 2, nx = 10, ny = 10, cfl = 0.6, Dt = 0., 
-                           euler_projection = false, cst_dt = false, transpose_dims = false,
-                           maxtime = 0, maxcycle = 500_000,
-                           silent = 0, output_dir = ".", output_file = "output",
-                           write_output = true, write_ghosts = false, animation_step = 0, 
-                           measure_time = true,
-                           use_ccall = false, use_threading = true, 
-                           use_simd = true, interleaving = false,
-                           use_gpu = false)
+function ArmonParameters(;
+        ieee_bits = 64,
+        test = :Sod, riemann = :acoustic, scheme = :GAD_minmod,
+        nghost = 2, nx = 10, ny = 10, 
+        cfl = 0.6, Dt = 0., cst_dt = false,
+        euler_projection = false, transpose_dims = false, axis_splitting = :Sequential,
+        maxtime = 0, maxcycle = 500_000,
+        silent = 0, output_dir = ".", output_file = "output",
+        write_output = true, write_ghosts = false, animation_step = 0, 
+        measure_time = true,
+        use_ccall = false, use_threading = true, 
+        use_simd = true, interleaving = false,
+        use_gpu = false
+    )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
 
@@ -149,19 +152,22 @@ function ArmonParameters(; ieee_bits = 64,
     idx_row = row_length
     idx_col = 1
     
-    return ArmonParameters{flt_type}(test, riemann, scheme,
-                                     nghost, nx, ny, 
-                                     cfl, Dt, euler_projection, cst_dt, transpose_dims, dx,
-                                     row_length, col_length, nbcell,
-                                     ideb, ifin, index_start, 
-                                     idebᵀ, ifinᵀ, index_startᵀ,
-                                     idx_row, idx_col,
-                                     X_axis, 1,
-                                     maxtime, maxcycle,
-                                     silent, output_dir, output_file,
-                                     write_output, write_ghosts, animation_step,
-                                     measure_time,
-                                     use_ccall, use_threading, use_simd, use_gpu)
+    return ArmonParameters{flt_type}(
+        test, riemann, scheme,
+        nghost, nx, ny, dx,
+        cfl, Dt, cst_dt,
+        euler_projection, transpose_dims, axis_splitting,
+        row_length, col_length, nbcell,
+        ideb, ifin, index_start, 
+        idebᵀ, ifinᵀ, index_startᵀ,
+        idx_row, idx_col,
+        X_axis, 1,
+        maxtime, maxcycle,
+        silent, output_dir, output_file,
+        write_output, write_ghosts, animation_step,
+        measure_time,
+        use_ccall, use_threading, use_simd, use_gpu
+    )
 end
 
 
@@ -188,6 +194,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - test:       ", p.test)
     println(" - riemann:    ", p.riemann)
     println(" - scheme:     ", p.scheme)
+    println(" - splitting:  ", p.axis_splitting)
     println(" - domain:     ", p.nx, "x", p.ny, " (", p.nghost, " ghosts)")
     println(" - nbcell:     ", p.nx * p.ny, " (", p.nbcell, " total)")
     println(" - cfl:        ", p.cfl)
@@ -1498,6 +1505,37 @@ function transpose_parameters(params::ArmonParameters{T}) where T
 end
 
 #
+# Axis splitting
+#
+
+function split_axes(params::ArmonParameters{T}, cycle::Int) where T
+    axis_1, axis_2 = X_axis, Y_axis
+    if iseven(cycle)
+        axis_1, axis_2 = axis_2, axis_1
+    end
+
+    if params.axis_splitting == :Sequential
+        return [
+            (X_axis, T(1.0)),
+            (Y_axis, T(1.0)),
+        ]
+    elseif params.axis_splitting == :SequentialSym
+        return [
+            (axis_1, T(1.0)),
+            (axis_2, T(1.0)),
+        ]
+    elseif params.axis_splitting == :Strang
+        return [
+            (axis_1, T(0.5)),
+            (axis_2, T(1.0)),
+            (axis_1, T(0.5)),
+        ]
+    else
+        error("Unknown axes splitting method: $(params.axis_splitting)")
+    end
+end
+
+#
 # Output 
 #
 
@@ -1551,22 +1589,24 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     t1 = time_ns()
     t_warmup = t1
 
+    last_i::Int, x_::V, u::V, mask::V = update_axis_parameters(params, data, params.current_axis)
+
     while t < maxtime && cycle < maxcycle
-        for axis in [X_axis, Y_axis]
-            last_i::Int, x_::V, u::V, mask::V = update_axis_parameters(params, data, axis)
+        @time_pos boundaryConditions!(params, data)
+        @time_pos dt = dtCFL(params, data, dta, mask)
 
-            @time_pos boundaryConditions!(params, data)
-            @time_pos dt = dtCFL(params, data, dta, mask)
+        if !isfinite(dt) || dt <= 0.
+            error("Invalid dt at cycle $(cycle): $(dt)")
+        end
 
-            if !isfinite(dt) || dt <= 0.
-                error("Invalid dt at cycle $(cycle): $(dt)")
-            end
+        for (axis, dt_factor) in split_axes(params, cycle)
+            last_i, x_, u, mask = update_axis_parameters(params, data, axis)    
 
-            @time_pos numericalFluxes!(params, data, dt, last_i, u)
-            @time_pos cellUpdate!(params, data, dt, u, x_, mask)
+            @time_pos numericalFluxes!(params, data, dt * dt_factor, last_i, u)
+            @time_pos cellUpdate!(params, data, dt * dt_factor, u, x_, mask)
     
             if params.euler_projection
-                @time_pos first_order_euler_remap!(params, data, dt, mask)
+                @time_pos first_order_euler_remap!(params, data, dt * dt_factor, mask)
                 transpose_dims && transpose_parameters(params)
             end
 
