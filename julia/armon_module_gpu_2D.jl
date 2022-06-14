@@ -38,6 +38,8 @@ export ArmonParameters, armon
 # cleanup (+reorder functions)
 # perf scripts
 # better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions)
+# use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
+# center the positions of the cells in the output file
 
 #
 # Axis enum
@@ -563,7 +565,7 @@ with the first element (`idx = 1`).
 """
 macro iᵀ(i)
     return esc(quote
-        ((col_length * (i - 1)) % (row_length * col_length - 1)) + 1 
+        ((col_length * ($(i) - 1)) % (row_length * col_length - 1)) + 1 
     end)
 end
 
@@ -586,32 +588,32 @@ const reduction_block_size_log2 = convert(Int, log2(reduction_block_size))
 end
 
 
-@kernel function gpu_acoustic_GAD_minmod_kernel!(i_0, ustar, pstar, 
-        @Const(rho), @Const(umat), @Const(pmat), @Const(cmat), @Const(ustar_1), @Const(pstar_1), 
-        dt, @Const(x))
+@kernel function gpu_acoustic_GAD_minmod_kernel!(i_0, s, ustar, pstar, 
+        @Const(rho), @Const(u), @Const(pmat), @Const(cmat), @Const(ustar_1), @Const(pstar_1), 
+        dt, dx)
     i = @index(Global) + i_0
 
-    r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + 1e-6)
-    r_p_m = (pstar_1[i+1] - pmat[i]) / (pstar_1[i] - pmat[i-1] + 1e-6)
-    r_u_p = (umat[i-1] - ustar_1[i-1]) / (umat[i] - ustar_1[i] + 1e-6)
-    r_p_p = (pmat[i-1] - pstar_1[i-1]) / (pmat[i] - pstar_1[i] + 1e-6)
+    r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
+    r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
+    r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
+    r_p_p = (pmat[i-s] - pstar_1[i-s]) / (pmat[i] -   pstar_1[i] + 1e-6)
 
     r_u_m = max(0., min(1., r_u_m))
     r_p_m = max(0., min(1., r_p_m))
     r_u_p = max(0., min(1., r_u_p))
     r_p_p = max(0., min(1., r_p_p))
 
-    dm_l = rho[i-1] * (x[i] - x[i-1])
-    dm_r = rho[i]   * (x[i+1] - x[i])
-    rc_l = rho[i-1] * cmat[i-1]
+    dm_l = rho[i-s] * -dx
+    dm_r = rho[i]   *  dx
+    rc_l = rho[i-s] * cmat[i-s]
     rc_r = rho[i]   * cmat[i]
-    Dm = (dm_l + dm_r) / 2
-    θ = (rc_l + rc_r) / 2 * (dt / Dm)
+    Dm   = (dm_l + dm_r) / 2
+    θ    = (rc_l + rc_r) / 2 * (dt / Dm)
     
-    ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (umat[i] - ustar_1[i]) -
-                                             r_u_m * (ustar_1[i] - umat[i-1]))
-    pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (pmat[i] - pstar_1[i]) -
-                                             r_p_m * (pstar_1[i] - pmat[i-1]))
+    ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) -
+                                             r_u_m * (ustar_1[i] -     u[i-s]))
+    pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (   pmat[i] - pstar_1[i]) -
+                                             r_p_m * (pstar_1[i] -  pmat[i-s]))
 end
 
 
@@ -639,12 +641,14 @@ end
 
 
 @kernel function gpu_first_order_euler_remap_kernel!(i_0, dx, dt, s,
-        @Const(ustar), rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+        @Const(ustar), rho, umat, vmat, Emat, 
+        tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, @Const(domain_mask))
     i = @index(Global) + i_0
 
+    mask = domain_mask[i]
     dX = dx + dt * (ustar[i+s] - ustar[i])
-    L₁ =  max(0, ustar[i]) * dt
-    L₃ = -min(0, ustar[i+s]) * dt
+    L₁ =  max(0, ustar[i])   * dt * mask
+    L₃ = -min(0, ustar[i+s]) * dt * mask
     L₂ = dX - L₁ - L₃
     
     tmp_rho[i]  = (L₁ * rho[i-s] 
@@ -671,6 +675,21 @@ end
     umat[i] = tmp_urho[i] / tmp_rho[i]
     vmat[i] = tmp_vrho[i] / tmp_rho[i]
     Emat[i] = tmp_Erho[i] / tmp_rho[i]
+end
+
+
+@kernel function gpu_first_order_euler_remap_2_transpose_kernel!(i_0, row_length, col_length, 
+        rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+    i = @index(Global) + i_0
+
+    # Naive matrix transposition
+    iᵀ = @iᵀ(i)
+
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+    rho[iᵀ] = tmp_rho[i]
+    umat[iᵀ] = tmp_urho[i] / tmp_rho[i]
+    vmat[iᵀ] = tmp_vrho[i] / tmp_rho[i]
+    Emat[iᵀ] = tmp_Erho[i] / tmp_rho[i]
 end
 
 
@@ -733,34 +752,36 @@ end
 
     if thread_i <= ny
         # Condition for the left border of the domain
-        idx = @i(0,thread_i)
-        rho[idx]  = rho[idx+1]
-        umat[idx] = umat[idx+1] * u_factor_left
-        vmat[idx] = vmat[idx+1]
-        pmat[idx] = pmat[idx+1]
-        cmat[idx] = cmat[idx+1]
-        gmat[idx] = gmat[idx+1]
+        idx = @i(1,thread_i)
+        idxm1 = @i(0,thread_i)
+        rho[idxm1]  = rho[idx]
+        umat[idxm1] = umat[idx] * u_factor_left
+        vmat[idxm1] = vmat[idx]
+        pmat[idxm1] = pmat[idx]
+        cmat[idxm1] = cmat[idx]
+        gmat[idxm1] = gmat[idx]
 
         # Condition for the right border of the domain
         idx = @i(nx,thread_i)
-        rho[idx+1]  = rho[idx]
-        umat[idx+1] = umat[idx] * u_factor_right
-        vmat[idx+1] = vmat[idx]
-        pmat[idx+1] = pmat[idx]
-        cmat[idx+1] = cmat[idx]
-        gmat[idx+1] = gmat[idx]
+        idxp1 = @i(nx+1,thread_i)
+        rho[idxp1] = rho[idx]
+        umat[idxp1] = umat[idx] * u_factor_right
+        vmat[idxp1] = vmat[idx]
+        pmat[idxp1] = pmat[idx]
+        cmat[idxp1] = cmat[idx]
+        gmat[idxp1] = gmat[idx]
     end
 
     if thread_i <= nx
         # Condition for the bottom border of the domain
-        idx = @i(thread_i,0)
-        idxp1 = @i(thread_i,1)
-        rho[idx]  = rho[idxp1]
-        umat[idx] = umat[idxp1]
-        vmat[idx] = vmat[idxp1] * v_factor_bottom
-        pmat[idx] = pmat[idxp1]
-        cmat[idx] = cmat[idxp1]
-        gmat[idx] = gmat[idxp1]
+        idx = @i(thread_i,1)
+        idxm1 = @i(thread_i,0)
+        rho[idxm1]  = rho[idx]
+        umat[idxm1] = umat[idx]
+        vmat[idxm1] = vmat[idx] * v_factor_bottom
+        pmat[idxm1] = pmat[idx]
+        cmat[idxm1] = cmat[idx]
+        gmat[idxm1] = gmat[idx]
 
         # Condition for the top border of the domain
         idx = @i(thread_i,ny)
@@ -826,6 +847,7 @@ gpu_cell_update! = gpu_cell_update_kernel!(device, block_size)
 gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
 gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
 gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, block_size)
+gpu_first_order_euler_remap_2ᵀ! = gpu_first_order_euler_remap_2_transpose_kernel!(device, block_size)
 gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
 gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
 gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, block_size)
@@ -913,10 +935,9 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        error("2ⁿᵈ order GPU NYI")
         gpu_acoustic!(ideb - 1, s, ustar_1, pstar_1, rho, u, pmat, cmat, ndrange=length(ideb:last_i))
-        gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1,
-            dt, x, ndrange=length(ideb:last_i))
+        gpu_acoustic_GAD_minmod!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1,
+            dt, dx, ndrange=length(ideb:last_i))
         return
     end
 
@@ -945,8 +966,8 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             dm_r = rho[i]   *  dx
             rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
-            Dm = (dm_l + dm_r) / 2
-            θ  = (rc_l + rc_r) / 2 * (dt / Dm)
+            Dm   = (dm_l + dm_r) / 2
+            θ    = (rc_l + rc_r) / 2 * (dt / Dm)
 
             ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) -
                                                      r_u_m * (ustar_1[i] -     u[i-s]))
@@ -1021,11 +1042,11 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         right_p::T = 0.1
 
         if test == :Sod
-            cond = (x_, y_) -> x_ < 0.5
+            cond = (x_, y_) -> x_ ≤ 0.5
         elseif test == :Sod_y
-            cond = (x_, y_) -> y_ < 0.5
+            cond = (x_, y_) -> y_ ≤ 0.5
         else
-            cond = (x_, y_) -> (x_ - 0.5)^2 + (y_ - 0.5)^2 < 0.125
+            cond = (x_, y_) -> (x_ - 0.5)^2 + (y_ - 0.5)^2 ≤ 0.125
         end
     
         @simd_threaded_loop for i in 1:nbcell
@@ -1041,7 +1062,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             x[i]  = ix / nx
             y[iᵀ] = iy / ny
     
-            if cond(x[i], y[iᵀ])
+            if cond(x[i] + 1. / (2*nx), y[iᵀ] + 1. / (2*ny))
                 rho[i] = 1.
                 Emat[i] = left_p / ((gamma - 1.) * rho[i])
                 umat[i] = 0.
@@ -1331,11 +1352,19 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     @indexing_vars(params)
 
     if params.use_gpu
-        transpose_dims && error("GPU transposition NYI")
         gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, s, ustar, rho, umat, vmat, Emat, 
-            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
-        gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
-            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
+            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask, 
+            ndrange=length(ideb-row_length:ifin+row_length))
+
+        if transpose_dims
+            gpu_first_order_euler_remap_2ᵀ!(ideb - 1, row_length, col_length,
+                    rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, 
+                    ndrange=length(ideb-row_length:ifin+row_length))
+        else
+            gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
+                tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
+        end
+        
         return
     end
 
@@ -1360,14 +1389,12 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                      + L₃ * rho[i+s] * Emat[i+s]) / dX
     end
 
-    if transpose_dims
-        # TODO : USE CuBLAS!! (geam parfait dans le cas op + copie dans une array à transposer, https://stackoverflow.com/q/15458552)
+    if transpose_dims        
         # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E) + transposition (including the ghost cells)
         @simd_threaded_loop for i in ideb-row_length:ifin+row_length
             # Thanks to the temporary arrays, we can do out-of-place transposition, which is much 
             # easier and faster than in-place transposition
-            iᵀ = @iᵀ(i) # TODO : check if this is correct
-            # iᵀ = ((row_length * (i - 1)) % (row_length * col_length - 1)) + 1 
+            iᵀ = @iᵀ(i)
             rho[iᵀ]  = tmp_rho[i]
             umat[iᵀ] = tmp_urho[i] / tmp_rho[i]
             vmat[iᵀ] = tmp_vrho[i] / tmp_rho[i]
