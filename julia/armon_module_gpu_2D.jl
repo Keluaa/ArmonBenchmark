@@ -1,7 +1,5 @@
 module Armon
 
-using PrettyTables  # TODO : debug only, to remove
-
 using Printf
 using Polyester
 using KernelAbstractions
@@ -14,7 +12,6 @@ if use_ROCM
     using AMDGPU
     using ROCKernels
     println("Using ROCM GPU")
-    macro cuda(args...) end
 else
     using CUDA
     using CUDAKernels
@@ -26,18 +23,13 @@ end
 export ArmonParameters, armon
 
 
-# include("NaN_detector.jl")
-
-
 # TODO LIST
 # fix ROCM dtCFL (+ take into account the ghost cells)
 # make sure that the first touch is preserved in 2D
 # Strang splitting (or Godunov splitting)
 # GPU dtCFL time
-# Transposition for rectangle domains
-# cleanup (+reorder functions)
 # perf scripts
-# better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions)
+# better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
 
@@ -146,14 +138,14 @@ function ArmonParameters(; ieee_bits = 64,
     # First and last index of the real domain of an array
     ideb = row_length * nghost + nghost + 1
     ifin = row_length * (ny - 1 + nghost) + nghost + nx
-    index_start = ideb - row_length - 1  # Used only by the `@i` and `@j` macros
+    index_start = ideb - row_length - 1  # Used only by the `@i` macro
 
     # Same as the 3 values above, but for a transposed array
     idebᵀ = col_length * nghost + nghost + 1
     ifinᵀ = col_length * (nx - 1 + nghost) + nghost + ny
     index_startᵀ = idebᵀ - col_length - 1
 
-    # Used only for indexing with the `@i` and `@j` macros
+    # Used only for indexing with the `@i` macro
     idx_row = row_length
     idx_col = 1
     
@@ -427,7 +419,16 @@ end
 #
 
 time_contrib = Dict{Axis, Dict{String, Float64}}()
-macro time_pos(params, label, expr) 
+macro time_pos(expr)
+    if expr.head == :call
+        function_name = expr.args[1]
+    elseif isa(expr.args[2], Expr) && expr.args[2].head == :call
+        function_name = expr.args[2].args[1]
+    else
+        error("Could not find the function name of the provided expression")
+    end
+    function_name = string(function_name)
+
     return esc(quote
         if params.measure_time
             _t_start = time_ns()
@@ -438,11 +439,11 @@ macro time_pos(params, label, expr)
                 global time_contrib[params.current_axis] = Dict{String, Float64}()
             end
 
-            if !haskey(time_contrib, $(label))
-                global time_contrib[params.current_axis][$(label)] = 0.
+            if !haskey(time_contrib, $(function_name))
+                global time_contrib[params.current_axis][$(function_name)] = 0.
             end
 
-            global time_contrib[params.current_axis][$(label)] += _t_end - _t_start
+            global time_contrib[params.current_axis][$(function_name)] += _t_end - _t_start
         else
             $(expr)
         end
@@ -451,7 +452,16 @@ end
 
 
 # Equivalent to `@time` but with a better output
-macro time_expr(params, label, expr)
+macro time_expr(expr)
+    if expr.head == :call
+        function_name = expr.args[1]
+    elseif isa(expr.args[2], Expr) && expr.args[2].head == :call
+        function_name = expr.args[2].args[1]
+    else
+        error("Could not find the function name of the provided expression")
+    end
+    function_name = string(function_name)
+
     return esc(quote
         if params.silent <= 3
             # Same structure as `@time` (see `@macroexpand @time`), using some undocumented functions.
@@ -473,7 +483,7 @@ macro time_expr(params, label, expr)
             allocations_count = Base.gc_alloc_count(gc_diff)
             gc_time = gc_diff.total_time
     
-            println("\nTime info for $($(label)):")
+            println("\nTime info for $($(function_name)):")
             if allocations_count > 0
                 @printf(" - %d allocations for %g kB\n", 
                     allocations_count, convert(Float64, allocations_size))
@@ -500,11 +510,11 @@ end
 """
     @indexing_vars(params)
 
-Brings the parameters needed for `@i`, `@j`, `@I` into the current scope.
+Brings the parameters needed for the `@i` and `@iᵀ` macros into the current scope.
 """
 macro indexing_vars(params)
     return esc(quote
-        (; index_start, row_length, col_length, nghost, idx_row, idx_col) = $(params)
+        (; index_start, row_length, col_length, idx_row, idx_col) = $(params)
     end)
 end
 
@@ -522,35 +532,6 @@ handles the transposition of the arrays.
 macro i(i, j)
     return esc(quote
         index_start + $(j) * idx_row + $(i) * idx_col
-    end)
-end
-
-"""
-    @j(i, j)
-
-Same as `@i(i, j)`, but for a transposed array.
-"""
-macro j(i, j)
-    return esc(quote
-        index_start + $(j) * idx_col + $(i) * idx_row
-    end)
-end
-
-# TODO: remove if unused
-"""
-    @I(idx)
-
-The reverse operation of `@i(i, j)`: from a mono-dimensional index `idx`, returns the two-dimensional
-indexes `i` and `j`.
-
-```julia
-    i, j = @I(idx)
-```
-"""
-macro I(i)
-    # Equivalent to `($(i)-1) % row_length + 1 - nghost, ($(i)-1) ÷ row_length + 1 - nghost`
-    return esc(quote
-        ((__j, __i) = divrem($(i)-1, row_length); (__i + 1 - nghost, __j + 1 - nghost))
     end)
 end
 
@@ -617,86 +598,10 @@ end
 end
 
 
-@kernel function gpu_cell_update_kernel!(i_0, dx, dt, s,
-        @Const(ustar), @Const(pstar), rho, u, Emat, domain_mask)
-    i = @index(Global) + i_0
-
-    mask = domain_mask[i]
-    dm = rho[i] * dx
-    rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
-    u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
-    Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
-end
-
-
-@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, s, x, @Const(ustar))
-    i = @index(Global) + i_0
-
-    x[i] += dt * ustar[i]
-
-    if i == ifin
-        x[i+s] += dt * ustar[i+s]
-    end
-end
-
-
-@kernel function gpu_first_order_euler_remap_kernel!(i_0, dx, dt, s,
-        @Const(ustar), rho, umat, vmat, Emat, 
-        tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, @Const(domain_mask))
-    i = @index(Global) + i_0
-
-    mask = domain_mask[i]
-    dX = dx + dt * (ustar[i+s] - ustar[i])
-    L₁ =  max(0, ustar[i])   * dt * mask
-    L₃ = -min(0, ustar[i+s]) * dt * mask
-    L₂ = dX - L₁ - L₃
-    
-    tmp_rho[i]  = (L₁ * rho[i-s] 
-                 + L₂ * rho[i] 
-                 + L₃ * rho[i+s]) / dX
-    tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] 
-                 + L₂ * rho[i]   * umat[i] 
-                 + L₃ * rho[i+s] * umat[i+s]) / dX
-    tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] 
-                 + L₂ * rho[i]   * vmat[i] 
-                 + L₃ * rho[i+s] * vmat[i+s]) / dX
-    tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] 
-                 + L₂ * rho[i]   * Emat[i] 
-                 + L₃ * rho[i+s] * Emat[i+s]) / dX
-end
-
-
-@kernel function gpu_first_order_euler_remap_2_kernel!(i_0, 
-        rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
-    i = @index(Global) + i_0
-
-    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
-    rho[i] = tmp_rho[i]
-    umat[i] = tmp_urho[i] / tmp_rho[i]
-    vmat[i] = tmp_vrho[i] / tmp_rho[i]
-    Emat[i] = tmp_Erho[i] / tmp_rho[i]
-end
-
-
-@kernel function gpu_first_order_euler_remap_2_transpose_kernel!(i_0, row_length, col_length, 
-        rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
-    i = @index(Global) + i_0
-
-    # Naive matrix transposition
-    iᵀ = @iᵀ(i)
-
-    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
-    rho[iᵀ] = tmp_rho[i]
-    umat[iᵀ] = tmp_urho[i] / tmp_rho[i]
-    vmat[iᵀ] = tmp_vrho[i] / tmp_rho[i]
-    Emat[iᵀ] = tmp_Erho[i] / tmp_rho[i]
-end
-
-
 @kernel function gpu_update_perfect_gas_EOS_kernel!(i_0, gamma,
         @Const(rho), @Const(Emat), @Const(umat), @Const(vmat), pmat, cmat, gmat)
     i = @index(Global) + i_0
-    
+
     e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
     pmat[i] = (gamma - 1.) * rho[i] * e
     cmat[i] = sqrt(gamma * pmat[i] / rho[i])
@@ -713,7 +618,7 @@ end
     # O. Heuzé, S. Jaouen, H. Jourdren, 
     # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state"
     # JCP 2009
-    
+
     rho0::type = 10000.
     K0::type   = 1e+11
     Cv0::type  = 1000.
@@ -840,67 +745,94 @@ end
 end
 
 
+@kernel function gpu_cell_update_kernel!(i_0, dx, dt, s,
+        @Const(ustar), @Const(pstar), rho, u, Emat, domain_mask)
+    i = @index(Global) + i_0
+
+    mask = domain_mask[i]
+    dm = rho[i] * dx
+    rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
+    u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
+    Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
+end
+
+
+@kernel function gpu_cell_update_lagrange_kernel!(i_0, ifin, dt, s, x, @Const(ustar))
+    i = @index(Global) + i_0
+
+    x[i] += dt * ustar[i]
+
+    if i == ifin
+        x[i+s] += dt * ustar[i+s]
+    end
+end
+
+
+@kernel function gpu_first_order_euler_remap_kernel!(i_0, dx, dt, s,
+        @Const(ustar), rho, umat, vmat, Emat, 
+        tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, @Const(domain_mask))
+    i = @index(Global) + i_0
+
+    mask = domain_mask[i]
+    dX = dx + dt * (ustar[i+s] - ustar[i])
+    L₁ =  max(0, ustar[i])   * dt * mask
+    L₃ = -min(0, ustar[i+s]) * dt * mask
+    L₂ = dX - L₁ - L₃
+    
+    tmp_rho[i]  = (L₁ * rho[i-s] 
+                 + L₂ * rho[i] 
+                 + L₃ * rho[i+s]) / dX
+    tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] 
+                 + L₂ * rho[i]   * umat[i] 
+                 + L₃ * rho[i+s] * umat[i+s]) / dX
+    tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] 
+                 + L₂ * rho[i]   * vmat[i] 
+                 + L₃ * rho[i+s] * vmat[i+s]) / dX
+    tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] 
+                 + L₂ * rho[i]   * Emat[i] 
+                 + L₃ * rho[i+s] * Emat[i+s]) / dX
+end
+
+
+@kernel function gpu_first_order_euler_remap_2_kernel!(i_0, 
+        rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+    i = @index(Global) + i_0
+
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+    rho[i] = tmp_rho[i]
+    umat[i] = tmp_urho[i] / tmp_rho[i]
+    vmat[i] = tmp_vrho[i] / tmp_rho[i]
+    Emat[i] = tmp_Erho[i] / tmp_rho[i]
+end
+
+
+@kernel function gpu_first_order_euler_remap_2_transpose_kernel!(i_0, row_length, col_length, 
+        rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho)
+    i = @index(Global) + i_0
+
+    # Naive matrix transposition
+    iᵀ = @iᵀ(i)
+
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+    rho[iᵀ] = tmp_rho[i]
+    umat[iᵀ] = tmp_urho[i] / tmp_rho[i]
+    vmat[iᵀ] = tmp_vrho[i] / tmp_rho[i]
+    Emat[iᵀ] = tmp_Erho[i] / tmp_rho[i]
+end
+
+
 # Construction of the kernels for a common device and block size
 gpu_acoustic! = gpu_acoustic_kernel!(device, block_size)
 gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
+gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
+gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
+gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, block_size)
+gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
 gpu_cell_update! = gpu_cell_update_kernel!(device, block_size)
 gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
 gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
 gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, block_size)
 gpu_first_order_euler_remap_2ᵀ! = gpu_first_order_euler_remap_2_transpose_kernel!(device, block_size)
-gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
-gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
-gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, block_size)
-gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
-
-#
-# Equations of State
-#
-
-function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T) where {T, V <: AbstractArray{T}}
-    (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
-    (; ideb, ifin) = params
-
-    @simd_threaded_loop for i in ideb:ifin
-        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
-        pmat[i] = (gamma - 1.) * rho[i] * e
-        cmat[i] = sqrt(gamma * pmat[i] / rho[i])
-        gmat[i] = (1. + gamma) / 2
-    end
-end
-
-
-function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
-    (; ideb, ifin) = params
-
-    # O. Heuzé, S. Jaouen, H. Jourdren, 
-    # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state",
-    # JCP 2009
-
-    rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
-    q = -42080895/14941154; r = 727668333/149411540
-
-    @simd_threaded_loop for i in ideb:ifin
-        x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # Formula (4b)
-
-        f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)  # Formula (15b)
-        f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x) # Formula (16a)
-        f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)         # Formula (16b)
-        f3 = (6*r+3*s*f2)/(1-s*x)               # Formula (16c)
-
-        epsk0 = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                             # Formula (15a)
-        pk0 = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                           # Formula (17a)
-        pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2) # Formula (17b)
-        pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +        # Formula (17c)
-                                            6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
-
-        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
-        pmat[i] = pk0 + G0*rho0*(e - epsk0)                                      # Formula (5b)
-        cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]              # Formula (8)
-        gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0)) # Formula (8) + (11)
-    end
-end
 
 #
 # Acoustic Riemann problem solvers
@@ -1017,6 +949,92 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     return
+end
+
+
+function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
+    dt::T, last_i::Int, u::V) where {T, V <: AbstractArray{T}}
+    if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
+        if params.scheme == :Godunov
+            acoustic!(params, data, last_i, u)
+        else
+            acoustic_GAD!(params, data, dt, last_i, u)
+        end
+    else
+        error("The choice of Riemann solver is not recognized: ", params.riemann)
+    end
+end
+
+#
+# Equations of State
+#
+
+function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T) where {T, V <: AbstractArray{T}}
+    (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
+    (; ideb, ifin) = params
+
+    @simd_threaded_loop for i in ideb:ifin
+        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
+        pmat[i] = (gamma - 1.) * rho[i] * e
+        cmat[i] = sqrt(gamma * pmat[i] / rho[i])
+        gmat[i] = (1. + gamma) / 2
+    end
+end
+
+
+function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+    (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
+    (; ideb, ifin) = params
+
+    # O. Heuzé, S. Jaouen, H. Jourdren, 
+    # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state",
+    # JCP 2009
+
+    rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
+    q = -42080895/14941154; r = 727668333/149411540
+
+    @simd_threaded_loop for i in ideb:ifin
+        x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # Formula (4b)
+
+        f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)  # Formula (15b)
+        f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x) # Formula (16a)
+        f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)         # Formula (16b)
+        f3 = (6*r+3*s*f2)/(1-s*x)               # Formula (16c)
+
+        epsk0 = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0                             # Formula (15a)
+        pk0 = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)                           # Formula (17a)
+        pk0prime = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2) # Formula (17b)
+        pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 +        # Formula (17c)
+                                            6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
+
+        e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
+        pmat[i] = pk0 + G0*rho0*(e - epsk0)                                      # Formula (5b)
+        cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]              # Formula (8)
+        gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0)) # Formula (8) + (11)
+    end
+end
+
+
+function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
+    (; ideb, ifin, test) = params
+
+    if test == :Sod || test == :Sod_y || test == :Sod_circ
+        gamma::T = 7/5
+        if params.use_gpu
+            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat, 
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+        else
+            perfectGasEOS!(params, data, gamma)
+        end
+    elseif test == :Bizarrium
+        if params.use_gpu
+            gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat, 
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+        else
+            BizarriumEOS!(params, data)
+        end
+    end
 end
 
 #
@@ -1281,12 +1299,12 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V},
             # because of some IEEE 754 non-compliance since fast math is enabled when compiling this 
             # code for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
             # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
-            dt_x = reduce(min, @views (dx ./ abs.(
+            dt_x = @inbounds reduce(min, @views (dx ./ abs.(
                 max.(
                     abs.(umat .+ cmat), 
                     abs.(umat .- cmat)
                 ) .* domain_mask)))
-            dt_y = reduce(min, @views (dy ./ abs.(
+            dt_y = @inbounds reduce(min, @views (dy ./ abs.(
                 max.(
                     abs.(vmat .+ cmat), 
                     abs.(vmat .- cmat)
@@ -1324,26 +1342,39 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V},
     end
 end
 
-#
-# Numerical fluxes computation
-#
+# 
+# Cell update and euler projection
+# 
 
-function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, last_i::Int, u::V) where {T, V <: AbstractArray{T}}
-    if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
-        if params.scheme == :Godunov
-            acoustic!(params, data, last_i, u)
-        else
-            acoustic_GAD!(params, data, dt, last_i, u)
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
+        u::V, x::V, domain_mask::V) where {T, V <: AbstractArray{T}}
+    (; ustar, pstar, rho, Emat) = data
+    (; dx, ideb, ifin, s) = params
+
+    if params.use_gpu
+        gpu_cell_update!(ideb - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
+            ndrange=length(ideb:ifin))
+        if !params.euler_projection
+            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, s, x, ustar, ndrange=length(ideb:ifin))
         end
-    else
-        error("The choice of Riemann solver is not recognized: ", params.riemann)
+        return
+    end
+
+    @simd_threaded_loop for i in ideb:ifin
+        mask = domain_mask[i]
+        dm = rho[i] * dx
+        rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
+        u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
+        Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
+    end
+ 
+    if !params.euler_projection
+        @simd_threaded_loop for i in ideb:ifin
+            x[i] += dt * ustar[i]
+        end
     end
 end
 
-# 
-# Cell update
-# 
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, 
         dt::T, domain_mask::V) where {T, V <: AbstractArray{T}}
@@ -1411,59 +1442,6 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 end
 
-
-function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
-        u::V, x::V, domain_mask::V) where {T, V <: AbstractArray{T}}
-    (; ustar, pstar, rho, Emat) = data
-    (; dx, ideb, ifin, s) = params
-
-    if params.use_gpu
-        gpu_cell_update!(ideb - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
-            ndrange=length(ideb:ifin))
-        if !params.euler_projection
-            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, s, x, ustar, ndrange=length(ideb:ifin))
-        end
-        return
-    end
-
-    @simd_threaded_loop for i in ideb:ifin
-        mask = domain_mask[i]
-        dm = rho[i] * dx
-        rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
-        u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
-        Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
-    end
- 
-    if !params.euler_projection
-        @simd_threaded_loop for i in ideb:ifin
-            x[i] += dt * ustar[i]
-        end
-    end
-end
-
-
-function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
-    (; ideb, ifin, test) = params
-
-    if test == :Sod || test == :Sod_y || test == :Sod_circ
-        gamma::T = 7/5
-        if params.use_gpu
-            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
-        else
-            perfectGasEOS!(params, data, gamma)
-        end
-    elseif test == :Bizarrium
-        if params.use_gpu
-            gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
-        else
-            BizarriumEOS!(params, data)
-        end
-    end
-end
-
 # 
 # Transposition parameters
 #
@@ -1519,6 +1497,45 @@ function transpose_parameters(params::ArmonParameters{T}) where T
     params.index_start, params.index_startᵀ = params.index_startᵀ, params.index_start
 end
 
+#
+# Output 
+#
+
+function write_result(params::ArmonParameters{T}, data::ArmonData{V}, 
+        file_name::String) where {T, V <: AbstractArray{T}}
+    (; x, y, rho) = data
+    (; silent, write_ghosts, nx, ny, nghost, output_dir, transpose_dims) = params
+    @indexing_vars(params)
+
+    if !isdir(output_dir)
+        mkpath(output_dir)
+    end
+
+    output_file_path = joinpath(output_dir, file_name)
+    f = open(output_file_path, "w")
+
+    if write_ghosts
+        for j in 1-nghost:ny+nghost
+            for i in 1-nghost:nx+nghost
+                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @i(j, i) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
+            end
+        end
+    else
+        for j in 1:ny
+            for i in 1:nx
+                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @i(j, i) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
+            end
+            print(f, "\n")
+        end
+    end
+
+    close(f)
+
+    if silent < 2
+        println("\nWrote to file " * output_file_path)
+    end
+end
+
 # 
 # Main time loop
 # 
@@ -1534,86 +1551,26 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     t1 = time_ns()
     t_warmup = t1
 
-    enable_debug = false
-    transposed_axis = false
-    disp(label, array) = begin
-        if enable_debug
-            if transpose_dims
-                if transposed_axis
-                    array_2d = reshape(array, params.row_length, params.col_length)'
-                    domain_2d = reshape(data.domain_maskᵀ, params.row_length, params.col_length)'
-                else
-                    array_2d = reshape(array, params.row_length, params.col_length)'
-                    domain_2d = reshape(data.domain_mask, params.row_length, params.col_length)'
-                end
-            else
-                array_2d = reshape(array, params.row_length, params.col_length)'
-                domain_2d = reshape(data.domain_mask, params.row_length, params.col_length)'
-            end
-            array_2d = reverse(array_2d, dims=1)  # Put the origin on the bottom-left corner
-            domain_2d = reverse(domain_2d, dims=1)
-
-            println(label * (transposed_axis ? "(T)" : ""))
-            pretty_table(array_2d; 
-                noheader = true, 
-                highlighters = (Highlighter((d,i,j) -> (domain_2d[i,j] > 0.), 
-                                           foreground=:light_blue),
-                                Highlighter((d,i,j) -> (abs(d[i,j]) > 1. || !isfinite(d[i,j])), 
-                                           foreground=:red)))
-            # display(array_2d)
-        end
-    end
-    
     while t < maxtime && cycle < maxcycle
         for axis in [X_axis, Y_axis]
             last_i::Int, x_::V, u::V, mask::V = update_axis_parameters(params, data, axis)
 
-            enable_debug && println("\n\n === $axis === \n")
-            
-            @time_pos params "boundaryConditions" boundaryConditions!(params, data)
-            @time_pos params "dtCFL"              dt = dtCFL(params, data, dta, mask)
+            @time_pos boundaryConditions!(params, data)
+            @time_pos dt = dtCFL(params, data, dta, mask)
 
             if !isfinite(dt) || dt <= 0.
                 error("Invalid dt at cycle $(cycle): $(dt)")
             end
 
-            enable_debug && println("dt = ", dt)
-            disp("domain:", transposed_axis ? data.domain_maskᵀ : data.domain_mask)
-            disp(transposed_axis ? "y:     " : "x:     ", x_)
-            disp("rho:   ", data.rho)
-            disp(transposed_axis ? "v:     " : "u:     ", u)
-            disp("cmat:  ", data.cmat)
-            disp("pmat:  ", data.pmat)
-            disp("Emat:  ", data.Emat)
-
-            enable_debug && println("\n\n === fluxes === \n")
-            @time_pos params "numericalFluxes!"   numericalFluxes!(params, data, dt, last_i, u)
-
-            disp("ustar: ", data.ustar)
-            disp("pstar: ", data.pstar)
-    
-            enable_debug && println("\n === cell update === \n")
-            @time_pos params "cellUpdate!"        cellUpdate!(params, data, dt, u, x_, mask)
-    
-            disp("rho:   ", data.rho)
-            disp(transposed_axis ? "v:     " : "u:     ", u)
-            disp("Emat:  ", data.Emat)
+            @time_pos numericalFluxes!(params, data, dt, last_i, u)
+            @time_pos cellUpdate!(params, data, dt, u, x_, mask)
     
             if params.euler_projection
-                enable_debug && println("\n === euler proj === \n")
-                @time_pos params "first_order_euler_remap!" first_order_euler_remap!(params, data, dt, mask)
-                if transpose_dims
-                    transpose_parameters(params)
-                    transposed_axis = !transposed_axis
-                end
-    
-                disp("rho:   ", data.rho)
-                disp("umat:  ", data.umat)
-                disp("vmat:  ", data.vmat)
-                disp("Emat:  ", data.Emat)
+                @time_pos first_order_euler_remap!(params, data, dt, mask)
+                transpose_dims && transpose_parameters(params)
             end
 
-            @time_pos params "update_EOS!"        update_EOS!(params, data)
+            @time_pos update_EOS!(params, data)
         end
 
         dta = dt
@@ -1657,45 +1614,6 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     return convert(T, 1 / grind_time)
 end
 
-#
-# Output 
-#
-
-function write_result(params::ArmonParameters{T}, data::ArmonData{V}, 
-        file_name::String) where {T, V <: AbstractArray{T}}
-    (; x, y, rho) = data
-    (; silent, write_ghosts, nx, ny, nghost, output_dir, transpose_dims) = params
-    @indexing_vars(params)
-
-    if !isdir(output_dir)
-        mkpath(output_dir)
-    end
-
-    output_file_path = joinpath(output_dir, file_name)
-    f = open(output_file_path, "w")
-
-    if write_ghosts
-        for j in 1-nghost:ny+nghost
-            for i in 1-nghost:nx+nghost
-                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @j(i, j) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
-            end
-        end
-    else
-        for j in 1:ny
-            for i in 1:nx
-                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @j(i, j) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
-            end
-            print(f, "\n")
-        end
-    end
-    
-    close(f)
-
-    if silent < 2
-        println("\nWrote to file " * output_file_path)
-    end
-end
-
 # 
 # Main function
 # 
@@ -1723,17 +1641,17 @@ function armon(params::ArmonParameters{T}) where T
     # policy when working on CPU only
     data = ArmonData(T, params.nbcell)
 
-    @time_expr params "initialisation" init_test(params, data)
+    @time_expr init_test(params, data)
 
     if params.use_gpu
         copy_time = @elapsed d_data = data_to_gpu(data)
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
-        @time_expr params "time_loop" cells_per_sec = time_loop(params, d_data)
+        @time_expr cells_per_sec = time_loop(params, d_data)
 
         data_from_gpu(data, d_data)
     else
-        @time_expr params "time_loop" cells_per_sec = time_loop(params, data)
+        @time_expr cells_per_sec = time_loop(params, data)
     end
 
     if params.write_output
