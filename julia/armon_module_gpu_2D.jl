@@ -208,6 +208,12 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - maxcycle:   ", p.maxcycle)
 end
 
+
+# Default copy method
+function Base.copy(p::ArmonParameters{T}) where T
+    return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
+end
+
 #
 # Data
 #
@@ -1675,7 +1681,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         println("Cycles:     ", cycle)
     end
 
-    return convert(T, 1 / grind_time)
+    return dt, convert(T, 1 / grind_time)
 end
 
 # 
@@ -1711,11 +1717,11 @@ function armon(params::ArmonParameters{T}) where T
         copy_time = @elapsed d_data = data_to_gpu(data)
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
-        @time_expr cells_per_sec = time_loop(params, d_data)
+        @time_expr dt, cells_per_sec = time_loop(params, d_data)
 
         data_from_gpu(data, d_data)
     else
-        @time_expr cells_per_sec = time_loop(params, data)
+        @time_expr dt, cells_per_sec = time_loop(params, data)
     end
 
     if params.write_output
@@ -1752,7 +1758,7 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    return cells_per_sec, sort(collect(time_contrib); lt=(a, b)->(a[1] < b[1]))
+    return dt, cells_per_sec, sort(collect(time_contrib); lt=(a, b)->(a[1] < b[1]))
 end
 
 end
