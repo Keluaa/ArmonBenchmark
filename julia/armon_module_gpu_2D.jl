@@ -5,8 +5,9 @@ using Polyester
 using KernelAbstractions
 using KernelAbstractions.Extras: @unroll
 
-const use_ROCM = haskey(ENV, "USE_ROCM_GPU") && ENV["USE_ROCM_GPU"] == "true"
-const block_size = haskey(ENV, "GPU_BLOCK_SIZE") ? parse(Int, ENV["GPU_BLOCK_SIZE"]) : 32
+const use_ROCM = parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
+const block_size = parse(Int, get(ENV, "GPU_BLOCK_SIZE", "32"))
+const use_std_lib_threads = parse(Bool, get(ENV, "USE_STD_LIB_THREADS", "false"))
 
 if use_ROCM
     using AMDGPU
@@ -177,6 +178,8 @@ function print_parameters(p::ArmonParameters{T}) where T
     if p.use_threading
         if p.use_ccall
             println(" (OMP threads: ", ENV["OMP_NUM_THREADS"], ")")
+        elseif use_std_lib_threads
+            println(" (Julia standard threads: ", Threads.nthreads(), ")")
         else
             println(" (Julia threads: ", Threads.nthreads(), ")")
         end
@@ -308,14 +311,11 @@ end
 # Threading and SIMD control macros
 #
 
-const USE_STD_LIB_THREADS = haskey(ENV, "USE_STD_LIB_THREADS") && ENV["USE_STD_LIB_THREADS"] == "true"
-
-
 """
 Controls which multi-threading librairy to use.
 """
 macro threads(expr)
-    if USE_STD_LIB_THREADS
+    if use_std_lib_threads
         return esc(quote
             Threads.@threads $(expr)
         end)
@@ -383,11 +383,11 @@ macro simd_threaded_loop(expr)
     if range_expr.head == :block
         # Compound range expression: "j in 1:3, i in 4:6"
         # Use the first range as the threaded loop range
-        loop_range = copy(range_expr.args[1].args[2])
+        loop_range = range_expr.args[1].args[2]
         range_expr.args[1].args[2] = :(__ideb:__ifin)
     elseif range_expr.head == Symbol("=")
         # Single range expression: "j in 1:3"
-        loop_range = copy(range_expr.args[2])
+        loop_range = range_expr.args[2]
         range_expr.args[2] = :(__ideb:__ifin)
     else
         error("Expected range expression")
@@ -550,6 +550,8 @@ transposed array.
 
 Note that the method used incorrectly transposes the last element of the array (`idx = rows*cols`) 
 with the first element (`idx = 1`).
+
+For square domains, `@iᵀ(@iᵀ(idx)) == idx`, this is not true for rectangular domains.
 """
 macro iᵀ(i)
     return esc(quote
@@ -591,8 +593,8 @@ end
     r_u_p = max(0., min(1., r_u_p))
     r_p_p = max(0., min(1., r_p_p))
 
-    dm_l = rho[i-s] * -dx
-    dm_r = rho[i]   *  dx
+    dm_l = rho[i-s] * dx
+    dm_r = rho[i]   * dx
     rc_l = rho[i-s] * cmat[i-s]
     rc_r = rho[i]   * cmat[i]
     Dm   = (dm_l + dm_r) / 2
@@ -662,7 +664,7 @@ end
         rho, umat, vmat, pmat, cmat, gmat)
     thread_i = @index(Global)
 
-    if thread_i <= ny
+    if thread_i ≤ ny
         # Condition for the left border of the domain
         idx = @i(1,thread_i)
         idxm1 = @i(0,thread_i)
@@ -676,7 +678,7 @@ end
         # Condition for the right border of the domain
         idx = @i(nx,thread_i)
         idxp1 = @i(nx+1,thread_i)
-        rho[idxp1] = rho[idx]
+        rho[idxp1]  = rho[idx]
         umat[idxp1] = umat[idx] * u_factor_right
         vmat[idxp1] = vmat[idx]
         pmat[idxp1] = pmat[idx]
@@ -684,7 +686,7 @@ end
         gmat[idxp1] = gmat[idx]
     end
 
-    if thread_i <= nx
+    if thread_i ≤ nx
         # Condition for the bottom border of the domain
         idx = @i(thread_i,1)
         idxm1 = @i(thread_i,0)
@@ -851,7 +853,8 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     (; ideb, s) = params
 
     if params.use_gpu
-        gpu_acoustic!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, ndrange=length(ideb:last_i))
+        gpu_acoustic!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, 
+            ndrange=length(ideb:last_i)) |> wait
         return
     end
 
@@ -874,9 +877,10 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        gpu_acoustic!(ideb - 1, s, ustar_1, pstar_1, rho, u, pmat, cmat, ndrange=length(ideb:last_i))
-        gpu_acoustic_GAD_minmod!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1,
-            dt, dx, ndrange=length(ideb:last_i))
+        gpu_acoustic!(ideb - 1, s, ustar_1, pstar_1, 
+            rho, u, pmat, cmat, ndrange=length(ideb:last_i)) |> wait
+        gpu_acoustic_GAD_minmod!(ideb - 1, s, ustar, pstar, 
+            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx, ndrange=length(ideb:last_i)) |> wait
         return
     end
 
@@ -901,8 +905,8 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             r_u_p = max(0., min(1., r_u_p))
             r_p_p = max(0., min(1., r_p_p))
 
-            dm_l = rho[i-s] * -dx
-            dm_r = rho[i]   *  dx
+            dm_l = rho[i-s] * dx
+            dm_r = rho[i]   * dx
             rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm   = (dm_l + dm_r) / 2
@@ -925,8 +929,8 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             r_u_p = max(0., min(1., 2. * r_u_p), min(2., r_u_p))
             r_p_p = max(0., min(1., 2. * r_p_p), min(2., r_p_p))
 
-            dm_l = rho[i-s] * -dx
-            dm_r = rho[i]   *  dx
+            dm_l = rho[i-s] * dx
+            dm_r = rho[i]   * dx
             rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm = (dm_l + dm_r) / 2
@@ -939,8 +943,8 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
         end
     elseif scheme == :GAD_no_limiter
         @simd_threaded_loop for i in ideb:last_i
-            dm_l = rho[i-s] * -dx
-            dm_r = rho[i]   *  dx
+            dm_l = rho[i-s] * dx
+            dm_r = rho[i]   * dx
             rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm = (dm_l + dm_r) / 2
@@ -1030,14 +1034,14 @@ function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V
         gamma::T = 7/5
         if params.use_gpu
             gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait
         else
             perfectGasEOS!(params, data, gamma)
         end
     elseif test == :Bizarrium
         if params.use_gpu
             gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin))
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait
         else
             BizarriumEOS!(params, data)
         end
@@ -1213,7 +1217,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     if params.use_gpu
         gpu_boundary_conditions!(index_start, idx_row, idx_col, nx, ny, 
             u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=max(nx, ny))
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=max(nx, ny)) |> wait
         return
     end
 
@@ -1337,7 +1341,9 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V},
         dt *= min(dx, dy)
     end
 
-    if dta == 0  # First cycle
+    if !isfinite(dt) || dt ≤ 0
+        return dt  # Let it crash
+    elseif dta == 0  # First cycle
         if Dt != 0
             return Dt
         else
@@ -1360,9 +1366,10 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
 
     if params.use_gpu
         gpu_cell_update!(ideb - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
-            ndrange=length(ideb:ifin))
+            ndrange=length(ideb:ifin)) |> wait
         if !params.euler_projection
-            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, s, x, ustar, ndrange=length(ideb:ifin))
+            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, s, x, ustar, 
+                ndrange=length(ideb:ifin)) |> wait
         end
         return
     end
@@ -1386,28 +1393,41 @@ end
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, 
         dt::T, domain_mask::V) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
-    (; dx, ideb, ifin, row_length, transpose_dims, s) = params
+    (; dx, ideb, ifin, nbcell, row_length, transpose_dims, s) = params
     @indexing_vars(params)
 
+    if transpose_dims
+        # When transposing the temporary arrays `tmp_rho` (and others) some uninitialized values 
+        # might leak into the computing domain of other functions. Therefore this range is made very
+        # large to ensure all values are set before transposing.
+        projection_range = 2:nbcell-1
+    else
+        # We can't use the same range in both cases since the stride is not the same and we might go
+        # out of bounds.
+        projection_range = ideb:ifin
+    end
+
     if params.use_gpu
-        gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, s, ustar, rho, umat, vmat, Emat, 
+        gpu_first_order_euler_remap_1!(first(projection_range) - 1, dx, dt, s, 
+            ustar, rho, umat, vmat, Emat, 
             tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask, 
-            ndrange=length(ideb-row_length:ifin+row_length))
+            ndrange=length(projection_range)) |> wait
 
         if transpose_dims
-            gpu_first_order_euler_remap_2ᵀ!(ideb - 1, row_length, col_length,
-                    rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, 
-                    ndrange=length(ideb-row_length:ifin+row_length))
+            gpu_first_order_euler_remap_2ᵀ!(first(projection_range) - 1, row_length, col_length,
+                rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, 
+                ndrange=length(projection_range)) |> wait
         else
-            gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
-                tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
+            gpu_first_order_euler_remap_2!(first(projection_range) - 1, rho, umat, vmat, Emat, 
+                tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, 
+                ndrange=length(projection_range)) |> wait
         end
         
         return
     end
 
     # Projection of the conservative variables
-    @simd_threaded_loop for i in ideb-row_length:ifin+row_length
+    @simd_threaded_loop for i in projection_range
         dX = dx + dt * (ustar[i+s] - ustar[i])
         L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
         L₃ = -min(0, ustar[i+s]) * dt * domain_mask[i]
@@ -1429,7 +1449,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
     if transpose_dims        
         # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E) + transposition (including the ghost cells)
-        @simd_threaded_loop for i in ideb-row_length:ifin+row_length
+        @simd_threaded_loop for i in projection_range
             # Thanks to the temporary arrays, we can do out-of-place transposition, which is much 
             # easier and faster than in-place transposition
             iᵀ = @iᵀ(i)
@@ -1440,7 +1460,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         end
     else
         # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
-        @simd_threaded_loop for i in ideb:ifin
+        @simd_threaded_loop for i in projection_range
             rho[i]  = tmp_rho[i]
             umat[i] = tmp_urho[i] / tmp_rho[i]
             vmat[i] = tmp_vrho[i] / tmp_rho[i]
@@ -1555,13 +1575,17 @@ function write_result(params::ArmonParameters{T}, data::ArmonData{V},
     if write_ghosts
         for j in 1-nghost:ny+nghost
             for i in 1-nghost:nx+nghost
-                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @i(j, i) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
+                print(f, x[@i(i, j)], ", ", 
+                         y[transpose_dims ? @i(j, i) : @i(i, j)], ", ", 
+                         rho[@i(i, j)], "\n")
             end
         end
     else
         for j in 1:ny
             for i in 1:nx
-                print(f, x[@i(i, j)], ", ", y[transpose_dims ? @i(j, i) : @i(i, j)], ", ", rho[@i(i, j)], "\n")
+                print(f, x[@i(i, j)], ", ", 
+                         y[transpose_dims ? @i(j, i) : @i(i, j)], ", ", 
+                         rho[@i(i, j)], "\n")
             end
             print(f, "\n")
         end
@@ -1592,7 +1616,6 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     last_i::Int, x_::V, u::V, mask::V = update_axis_parameters(params, data, params.current_axis)
 
     while t < maxtime && cycle < maxcycle
-        @time_pos boundaryConditions!(params, data)
         @time_pos dt = dtCFL(params, data, dta, mask)
 
         if !isfinite(dt) || dt <= 0.
@@ -1600,8 +1623,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         end
 
         for (axis, dt_factor) in split_axes(params, cycle)
-            last_i, x_, u, mask = update_axis_parameters(params, data, axis)    
+            last_i, x_, u, mask = update_axis_parameters(params, data, axis)
 
+            @time_pos boundaryConditions!(params, data)
             @time_pos numericalFluxes!(params, data, dt * dt_factor, last_i, u)
             @time_pos cellUpdate!(params, data, dt * dt_factor, u, x_, mask)
     
