@@ -28,10 +28,13 @@ mutable struct MeasureParams
     exclusive::Vector{Bool}
     jl_proc_bind::Vector{String}
     jl_places::Vector{String}
+    dimension::Vector{Int}
 
     # Armon params
-    cells_list::Vector{Int}
+    cells_list::Vector{Vector{Int}}
     tests_list::Vector{String}
+    transpose_dims::Vector{Bool}
+    axis_splitting::Vector{String}
     common_armon_params::Vector{String}
 
     # Measurement params
@@ -42,6 +45,7 @@ mutable struct MeasureParams
     plot_title::String
     verbose::Bool
     time_histogram::Bool
+    flatten_time_dims::Bool
     gnuplot_hist_script::String
     hist_plot_file::String
 end
@@ -119,8 +123,11 @@ function parse_measure_params(file_line_parser)
     jl_exclusive = [false]
     jl_places = ["cores"]
     jl_proc_bind = ["close"]
-    cells_list = [12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6]
+    dimension = [1]
+    cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     tests_list = ["Sod"]
+    transpose_dims = [false]
+    axis_splitting = ["Sequential"]
     common_armon_params = [
         "--write-output", "0",
         "--verbose", "2",
@@ -133,6 +140,7 @@ function parse_measure_params(file_line_parser)
     plot_title = nothing
     verbose = false
     time_histogram = false
+    flatten_time_dims = false
 
     last_i = 0
     for (i, line) in file_line_parser
@@ -214,10 +222,16 @@ function parse_measure_params(file_line_parser)
             jl_places = split(value, ',')
         elseif option == "jl_proc_bind"
             jl_proc_bind = split(value, ',')
+        elseif option == "dim"
+            dimension = parse.(Int, split(value, ','))
         elseif option == "cells"
-            cells_list = parse.(Float64, split(value, ','))
+            cells_list = value
         elseif option == "tests"
             tests_list = split(value, ',')
+        elseif option == "transpose"
+            transpose_dims = parse.(Bool, split(value, ','))
+        elseif option == "splitting"
+            axis_splitting = split(value, ',')
         elseif option == "armon"
             common_armon_params = split(value, ' ')
         elseif option == "name"
@@ -234,13 +248,23 @@ function parse_measure_params(file_line_parser)
             verbose = parse(Bool, value)
         elseif option == "time_hist"
             time_histogram = parse(Bool, value)
+        elseif option == "flat_hist_dims"
+            flatten_time_dims = parse(Bool, value)
         else
             error("Unknown option: $(option), at line $(i)")
         end
     end
 
     # Post processing
-    cells_list = convert.(Int, cells_list)
+    if dimension == 1
+        cells_list = parse.(Float64, split(value, ','))
+        cells_list = convert.(Int, cells_list)
+        cells_list = [[cells] for cells in cells_list]
+    else
+        cells_list = split(cells_list, ';')
+        cells_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
+                      for cells_domain in cells_list]
+    end
 
     if isnothing(name)
         error("Expected a name for the measurement at line ", last_i)
@@ -271,9 +295,9 @@ function parse_measure_params(file_line_parser)
         backends, threads, block_sizes, ieee_bits, use_simd, compilers,
         omp_schedule, omp_proc_bind, omp_places, 
         use_std_lib_threads, jl_exclusive, jl_proc_bind, jl_places, 
-        cells_list, tests_list, common_armon_params,
+        dimension, cells_list, tests_list, transpose_dims, axis_splitting, common_armon_params,
         name, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
-        time_histogram, gnuplot_hist_script, hist_plot_file)
+        time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file)
 end
 
 
@@ -342,7 +366,8 @@ function parse_combinaisons(measure::MeasureParams, backend::Backend)
             measure.use_simd,
             measure.ieee_bits,
             measure.std_lib_threads,
-            measure.exclusive
+            measure.exclusive,
+            measure.dimension
         )
     elseif backend == CPP
         return Iterators.product(
@@ -352,7 +377,8 @@ function parse_combinaisons(measure::MeasureParams, backend::Backend)
             measure.omp_places,
             measure.use_simd,
             measure.ieee_bits,
-            measure.compilers
+            measure.compilers,
+            measure.dimension
         )
     elseif backend == Kokkos
         return Iterators.product(
@@ -363,9 +389,52 @@ function parse_combinaisons(measure::MeasureParams, backend::Backend)
             measure.block_sizes,
             measure.use_simd,
             measure.ieee_bits,
-            measure.compilers
+            measure.compilers,
+            measure.dimension
         )
     end
+end
+
+
+function armon_combinaisons(measure::MeasureParams, dimension::Int)
+    if dimension == 1
+        return Iterators.product(
+            measure.tests_list,
+            [false],
+            ["Sequential"]
+        )
+    else
+        return Iterators.product(
+            measure.tests_list,
+            measure.transpose_dims,
+            measure.axis_splitting
+        )
+    end
+end
+
+
+function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
+        base_file_name::String, legend_base::String,
+        test::String, transpose_dims::Bool, axis_splitting::String)
+    file_name = base_file_name * test
+    if dimension == 1
+        legend = "$test, $legend_base"
+    else
+        legend = test
+
+        if length(measure.transpose_dims) > 1
+            file_name *= transpose_dims ? "_transposed" : ""
+            legend *= "ᵀ"
+        end
+
+        if length(measure.axis_splitting) > 1
+            file_name *= "_" * string(axis_splitting)
+            legend *= ", " * string(axis_splitting)
+        end
+
+        legend *= ", " * legend_base
+    end
+    return file_name, legend
 end
 
 
@@ -479,7 +548,9 @@ end
 function run_julia(measure::MeasureParams, 
         jl_places::String, jl_proc_bind::String,
         threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
-        std_lib_threads::String, exclusive::Bool, base_file_name::String)
+        std_lib_threads::String, exclusive::Bool, 
+        dimension::Int,
+        base_file_name::String)
     armon_options = []
 
     if exclusive
@@ -495,19 +566,26 @@ function run_julia(measure::MeasureParams,
     end
 
     if threads == 1
-        cells_list = filter(x -> x < max_cells_for_one_thread, measure.cells_list)
+        cells_list = filter(x -> prod(x) < max_cells_for_one_thread, measure.cells_list)
     else
         cells_list = measure.cells_list
+    end
+
+    if dimension == 1
+        cells_list_str = join([string(cells[1]) for cells in cells_list], ',')
+    else
+        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
     end
 
     append!(armon_options, armon_base_options)
     append!(armon_options, measure.common_armon_params)
     append!(armon_options, [
+        "--dim", dimension,
         "--block-size", block_size,
         "--use-simd", use_simd,
         "--ieee", ieee_bits,
         "--tests", join(measure.tests_list, ','),
-        "--cells-list", join(string.(cells_list), ','),
+        "--cells-list", cells_list_str,
         "--use-std-threads", std_lib_threads,
         "--threads-places", jl_places,
         "--threads-proc-bind", jl_proc_bind,
@@ -518,7 +596,17 @@ function run_julia(measure::MeasureParams,
         "--time-histogram", measure.time_histogram
     ])
 
-    println("Running Julia with: $(threads) threads (exclusive: $(exclusive), places: $(jl_places), bind: $(jl_proc_bind)), $(block_size) block size, $(ieee_bits) bits, $(use_simd == 1 ? "with" : "without") SIMD")
+    if dimension > 1
+        append!(armon_options, [
+            "--transpose", join(measure.transpose_dims, ','),
+            "--splitting", join(measure.axis_splitting, ','),
+            "--flat-dims", measure.flatten_time_dims
+        ])
+    end
+
+    println("Running Julia with: $(threads) threads (exclusive: $(exclusive), places: $(jl_places), " *
+            "bind: $(jl_proc_bind)), $(block_size) block size, $(ieee_bits) bits, " *
+            "$(use_simd == 1 ? "with" : "without") SIMD, $(dimension)D")
 
     run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
 end
@@ -570,19 +658,29 @@ end
 
 function run_armon(measure::MeasureParams, backend::Backend, 
         threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, 
+        dimension::Int,
         exe_path::String, base_file_name::String)
-    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places)")
+    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, " * 
+            "schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places), " * 
+            "$(dimension)D")
 
     if threads == 1
-        cells_list = filter(x -> x < max_cells_for_one_thread, measure.cells_list)
+        cells_list = filter(x -> prod(x) < max_cells_for_one_thread, measure.cells_list)
     else
         cells_list = measure.cells_list
     end
 
-    for test in measure.tests_list
-        data_file_name = base_file_name * test * ".csv"
+    if dimension != 1
+        error("Only 1D is supported for the C++ implementation")
+    end
+
+    for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
+        data_file_name, _ = build_armon_data_file_name(measure, dimension, base_file_name, "", test, transpose_dims, axis_splitting)
+        data_file_name *= ".csv"
 
         for cells in cells_list
+            cells = cells[1]
+
             armon_options = [
                 "-t", test,
                 "--cells", cells
@@ -706,9 +804,12 @@ function build_data_file_base_name(measure::MeasureParams,
         processes::Int, distribution::String, 
         threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
         block_size::Int, use_simd::Int, ieee_bits::Int, 
-        compiler::Compiler, backend::Backend)
+        compiler::Compiler,
+        dimension::Int, 
+        backend::Backend)
     # Overload used by the Kokkos and C++ backends
-    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, compiler, backend)
+    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, 
+                                             use_simd, ieee_bits, compiler, backend)
     
     if length(measure.omp_schedule) > 1
         name *= "_$(omp_schedule)"
@@ -725,6 +826,11 @@ function build_data_file_base_name(measure::MeasureParams,
         legend *= ", places: $(omp_places)"
     end
 
+    if length(measure.dimension) > 1
+        name *= "_$(dimension)D"
+        legend *= ", $(dimension)D"
+    end
+
     return name * "_", legend
 end
 
@@ -733,9 +839,13 @@ function build_data_file_base_name(measure::MeasureParams,
         processes::Int, distribution::String, 
         threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
         use_simd::Int, ieee_bits::Int, 
-        compiler::Compiler, backend::Backend)
+        compiler::Compiler, 
+        dimension::Int,
+        backend::Backend)
     # Overload used by the C++'s backend
-    name, legend = build_data_file_base_name(measure, processes, distribution, threads, omp_schedule, omp_proc_bind, omp_places, 0, use_simd, ieee_bits, compiler, backend)
+    name, legend = build_data_file_base_name(measure, processes, distribution, threads, omp_schedule,
+                                             omp_proc_bind, omp_places, 0, use_simd, ieee_bits, 
+                                             compiler, dimension, backend)
     return name * "_", legend
 end
 
@@ -745,9 +855,11 @@ function build_data_file_base_name(measure::MeasureParams,
         jl_places::String, jl_proc_bind::String,
         threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
         std_lib_threads::String, exclusive::Bool,
+        dimension::Int,
         backend::Backend)
     # Overload used by the Julia backend
-    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, use_simd, ieee_bits, GCC, backend)
+    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, 
+                                             use_simd, ieee_bits, GCC, backend)
 
     if length(measure.jl_proc_bind) > 1
         name *= "_$(jl_proc_bind)"
@@ -767,6 +879,11 @@ function build_data_file_base_name(measure::MeasureParams,
     if length(measure.exclusive) > 1
         name *= "_excl=$(exclusive)"
         legend *= ", exclusive: $(exclusive)"
+    end
+
+    if length(measure.dimension) > 1
+        name *= "_$(dimension)D"
+        legend *= ", $(dimension)D"
     end
 
     return name * "_", legend
@@ -791,17 +908,17 @@ function create_all_data_files_and_plot(measure::MeasureParams)
 
             for parameters in parse_combinaisons(measure, backend)
                 base_file_name, legend_base = build_data_file_base_name(measure, processes, distribution, parameters..., backend)
-                for test in measure.tests_list
-                    data_file_name = base_file_name * test * ".csv"
+                dimension = parameters[end]
+                for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
+                    data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting)
+                    data_file_name = data_file_name_base * ".csv"
                     open(data_file_name, "w") do _ end  # Create/Clear the file
-                    legend = "$(test), $(legend_base)"
                     plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
                     push!(plot_commands, plot_cmd)
 
                     if measure.time_histogram
-                        hist_file_name = base_file_name * test * "_hist.csv"
+                        hist_file_name = data_file_name_base * "_hist.csv"
                         open(data_file_name, "w") do _ end  # Create/Clear the file
-                        legend = "$(test), $(legend_base)"
                         plot_cmd = gnuplot_hist_plot_command(hist_file_name, legend, point_type)
                         push!(hist_commands, plot_cmd)
                     end

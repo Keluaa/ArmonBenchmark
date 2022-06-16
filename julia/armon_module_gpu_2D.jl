@@ -28,7 +28,6 @@ export ArmonParameters, armon
 # fix ROCM dtCFL (+ take into account the ghost cells)
 # make sure that the first touch is preserved in 2D
 # GPU dtCFL time
-# perf scripts
 # better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
@@ -1139,9 +1138,6 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         if params.cfl == 0
             params.cfl = 0.6
         end
-
-        # TODO
-        error("NYI")
     
         @simd_threaded_loop for i in 1:nbcell
             ix = ((i-1) % row_length) - nghost
@@ -1758,7 +1754,12 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    return dt, cells_per_sec, sort(collect(time_contrib); lt=(a, b)->(a[1] < b[1]))
+    sorted_time_contrib = []
+    for (_, axis_time_contrib) in time_contrib
+        push!(sorted_time_contrib, sort(collect(axis_time_contrib)))
+    end
+
+    return dt, cells_per_sec, sorted_time_contrib
 end
 
 end
