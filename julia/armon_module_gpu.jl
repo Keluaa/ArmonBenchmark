@@ -639,7 +639,7 @@ end
 
     c = cmat[i]
     u = umat[i]
-    out[i] = (x[i+1] - x[i]) / abs(max(abs(u + c), abs(u - c)))
+    out[i] = (x[i+1] - x[i]) / max(abs(u + c), abs(u - c))
 end
 
 
@@ -893,6 +893,7 @@ end
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat) = data
+    (; X, ustar, pstar, ustar_1, pstar_1, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
     (; test, nghost, nbcell) = params
 
     if test == :Sod
@@ -924,6 +925,16 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             emat[i] = Emat[i] = pmat[i] / ((gamma - 1.) * rho[i])
             cmat[i] = sqrt(gamma * pmat[i] / rho[i])
             gmat[i] = 0.5 * (1. + gamma)
+
+            X[i] = 0.
+            ustar[i] = 0.
+            pstar[i] = 0.
+            ustar_1[i] = 0.
+            pstar_1[i] = 0.
+            tmp_rho[i] = 0.
+            tmp_urho[i] = 0.
+            tmp_vrho[i] = 0.
+            tmp_Erho[i] = 0.
         end
     elseif test == :Bizarrium
         if params.maxtime == 0
@@ -949,6 +960,16 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 emat[i] = 0.
                 Emat[i] = 0.5 * umat[i]^2
             end
+
+            X[i] = 0.
+            ustar[i] = 0.
+            pstar[i] = 0.
+            ustar_1[i] = 0.
+            pstar_1[i] = 0.
+            tmp_rho[i] = 0.
+            tmp_urho[i] = 0.
+            tmp_vrho[i] = 0.
+            tmp_Erho[i] = 0.
         end
     
         BizarriumEOS!(params, data)

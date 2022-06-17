@@ -32,7 +32,8 @@ mutable struct MeasureParams
     dimension::Vector{Int}
 
     # Armon params
-    cells_list::Vector{Vector{Int}}
+    cells_list::Vector{Int}
+    domain_list::Vector{Vector{Int}}
     tests_list::Vector{String}
     transpose_dims::Vector{Bool}
     axis_splitting::Vector{String}
@@ -124,8 +125,9 @@ function parse_measure_params(file_line_parser)
     jl_exclusive = [false]
     jl_places = ["cores"]
     jl_proc_bind = ["close"]
-    dimension = [1]
+    dimension = 1
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
+    domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     tests_list = ["Sod"]
     transpose_dims = [false]
     axis_splitting = ["Sequential"]
@@ -227,6 +229,8 @@ function parse_measure_params(file_line_parser)
             dimension = parse.(Int, split(value, ','))
         elseif option == "cells"
             cells_list = value
+        elseif option == "domains"
+            domain_list = value
         elseif option == "tests"
             tests_list = split(value, ',')
         elseif option == "transpose"
@@ -257,15 +261,12 @@ function parse_measure_params(file_line_parser)
     end
 
     # Post processing
-    if dimension == 1
-        cells_list = parse.(Float64, split(value, ','))
-        cells_list = convert.(Int, cells_list)
-        cells_list = [[cells] for cells in cells_list]
-    else
-        cells_list = split(cells_list, ';')
-        cells_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
-                      for cells_domain in cells_list]
-    end
+
+    cells_list = convert.(Int, parse.(Float64, split(cells_list, ',')))
+
+    domain_list = split(domain_list, ';')
+    domain_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
+                   for cells_domain in domain_list]
 
     if isnothing(name)
         error("Expected a name for the measurement at line ", last_i)
@@ -296,7 +297,8 @@ function parse_measure_params(file_line_parser)
         backends, threads, block_sizes, ieee_bits, use_simd, compilers,
         omp_schedule, omp_proc_bind, omp_places, 
         use_std_lib_threads, jl_exclusive, jl_proc_bind, jl_places, 
-        dimension, cells_list, tests_list, transpose_dims, axis_splitting, common_armon_params,
+        dimension, cells_list, domain_list, tests_list, 
+        transpose_dims, axis_splitting, common_armon_params,
         name, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file)
 end
@@ -566,14 +568,19 @@ function run_julia(measure::MeasureParams,
         # no option needed for CPU
     end
 
-    if threads == 1
-        cells_list = filter(x -> prod(x) < max_cells_for_one_thread, measure.cells_list)
-    else
+    if dimension == 1
         cells_list = measure.cells_list
+    else
+        cells_list = measure.domain_list
+    end
+
+    if threads == 1
+        # Limit the number of cells
+        cells_list = filter(x -> prod(x) < max_cells_for_one_thread, cells_list)
     end
 
     if dimension == 1
-        cells_list_str = join([string(cells[1]) for cells in cells_list], ',')
+        cells_list_str = join(cells_list, ',')
     else
         cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
     end
@@ -665,10 +672,14 @@ function run_armon(measure::MeasureParams, backend::Backend,
             "schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places), " * 
             "$(dimension)D")
 
-    if threads == 1
-        cells_list = filter(x -> prod(x) < max_cells_for_one_thread, measure.cells_list)
-    else
+    if dimension == 1
         cells_list = measure.cells_list
+    else
+        cells_list = measure.domain_list
+    end
+
+    if threads == 1
+        cells_list = filter(x -> prod(x) < max_cells_for_one_thread, cells_list)
     end
 
     if dimension != 1
@@ -985,7 +996,7 @@ function setup_env()
     end
 
     # Are we in a login node?
-    in_login_node = readchomp(`hostname`) == "login1"
+    in_login_node = startswith(readchomp(`hostname`), "login")
     if in_login_node
         # Check if all of the required modules are loaded
         modules_list_raw = readchomp(`bash -c "module list"`)
@@ -1053,7 +1064,7 @@ function main()
         end
     end
 
-    end_time = Dates.time()
+    end_time = Dates.now()
     duration = Dates.canonicalize(round(end_time - start_time, Dates.Second))
     println("Total time measurements time: ", duration)
 end
