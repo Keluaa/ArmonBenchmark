@@ -1,5 +1,6 @@
 
 using Printf
+using Dates
 
 @enum Device CPU CUDA ROCM
 @enum Backend CPP Kokkos Julia
@@ -1015,6 +1016,8 @@ function main()
         return
     end
 
+    start_time = Dates.now()
+
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
     for (i, measure) in enumerate(measures)
@@ -1049,6 +1052,10 @@ function main()
             inti_index += 1
         end
     end
+
+    end_time = Dates.time()
+    duration = Dates.canonicalize(round(end_time - start_time, Dates.Second))
+    println("Total time measurements time: ", duration)
 end
 
 

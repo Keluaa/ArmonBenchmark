@@ -1250,7 +1250,7 @@ end
 
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, 
         dta::T, domain_mask::V) where {T, V <: AbstractArray{T}}
-    (; cmat, umat, vmat) = data
+    (; cmat, umat, vmat, tmp_rho) = data
     (; cfl, Dt, ideb, ifin, nx, ny) = params
     @indexing_vars(params)
 
