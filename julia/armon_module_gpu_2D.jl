@@ -12,6 +12,7 @@ const use_std_lib_threads = parse(Bool, get(ENV, "USE_STD_LIB_THREADS", "false")
 if use_ROCM
     using AMDGPU
     using ROCKernels
+    AMDGPU.allowscalar(false)
     println("Using ROCM GPU")
 else
     using CUDA
@@ -20,12 +21,13 @@ else
     println("Using CUDA GPU")
 end
 
+const device = use_ROCM ? ROCDevice() : CUDADevice()
+
 
 export ArmonParameters, armon
 
 
 # TODO LIST
-# fix ROCM dtCFL (+ take into account the ghost cells)
 # make sure that the first touch is preserved in 2D
 # GPU dtCFL time
 # better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
@@ -568,11 +570,6 @@ end
 # GPU Kernels
 #
 
-const device = use_ROCM ? ROCDevice() : CUDADevice()
-const reduction_block_size = 1024;
-const reduction_block_size_log2 = convert(Int, log2(reduction_block_size))
-
-
 @kernel function gpu_acoustic_kernel!(i_0, s, ustar, pstar, 
         @Const(rho), @Const(u), @Const(pmat), @Const(cmat))
     i = @index(Global) + i_0
@@ -715,47 +712,25 @@ end
 end
 
 
-@kernel function gpu_dtCFL_reduction_kernel!(euler, ideb, ifin, x, cmat, umat, result, tmp_values, tmp_err_i)
-    tid = @index(Local)
+@kernel function gpu_dtCFL_reduction_euler_kernel!(dx, dy, out,
+        @Const(umat), @Const(vmat), @Const(cmat), @Const(domain_mask))
+    i = @index(Global)
 
-    values = @localmem eltype(x) reduction_block_size
+    c = cmat[i]
+    u = umat[i]
+    v = vmat[i]
+    mask = domain_mask[i]
 
-    min_val_thread::eltype(x) = Inf
-    if euler
-        for i in ideb+tid-1:reduction_block_size:ifin
-            dt_i = (x[i+1] - x[i]) / max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i]))
-            if isnan(dt_i) && tmp_err_i[tid] == -1
-                tmp_err_i[tid] = i
-                tmp_values[tid] = x[i+1] - x[i]
-            end
-            min_val_thread = min(min_val_thread, dt_i)
-        end
-    else
-        for i in ideb+tid-1:reduction_block_size:ifin
-            dt_i = (x[i+1] - x[i]) / cmat[i]
-            min_val_thread = min(min_val_thread, dt_i)
-        end
-    end
-    values[tid] = min_val_thread
-    #tmp_values[tid] = min_val_thread
+    out[i] = min(
+        dx / abs(max(abs(u + c), abs(u - c)) * mask),
+        dy / abs(max(abs(v + c), abs(v - c)) * mask)
+    )
+end
 
-    @synchronize
-    
-    step_size = reduction_block_size >> 1
-    
-    @unroll for _ in 1:reduction_block_size_log2
-        if tid <= step_size
-            values[tid] = min(values[tid], values[tid + step_size])
-        end
 
-        step_size >>= 1
-
-        @synchronize
-    end
-
-    if tid == 1
-        result[1] = values[1]
-    end
+@kernel function gpu_dtCFL_reduction_lagrange_kernel!(out, @Const(cmat), @Const(domain_mask))
+    i = @index(Global)
+    out[i] = 1. / (cmat[i] * domain_mask[i])
 end
 
 
@@ -841,7 +816,8 @@ gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
 gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
 gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
 gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, block_size)
-gpu_dtCFL_reduction! = gpu_dtCFL_reduction_kernel!(device, reduction_block_size, reduction_block_size)
+gpu_dtCFL_reduction_euler! = gpu_dtCFL_reduction_euler_kernel!(device, block_size)
+gpu_dtCFL_reduction_lagrange! = gpu_dtCFL_reduction_lagrange_kernel!(device, block_size)
 gpu_cell_update! = gpu_cell_update_kernel!(device, block_size)
 gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
 gpu_first_order_euler_remap_1! = gpu_first_order_euler_remap_kernel!(device, block_size)
@@ -1274,7 +1250,7 @@ end
 
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, 
         dta::T, domain_mask::V) where {T, V <: AbstractArray{T}}
-    (; x, cmat, umat, vmat) = data
+    (; cmat, umat, vmat) = data
     (; cfl, Dt, ideb, ifin, nx, ny) = params
     @indexing_vars(params)
 
@@ -1286,25 +1262,16 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V},
         # Constant time step
         dt = Dt
     elseif params.use_gpu && use_ROCM
-        error("dtCFL for ROCM NYI")  # TODO : fix the reduction + min(dt_x, dt_y)
-        # ROCM doesn't support Array Programming, so an explicit reduction kernel is needed
-        result = zeros(T, 1)  # temporary array of a single value, holding the result of the reduction
-        tmp_values = ones(T, 1024)
-        d_tmp_values = ROCArray(tmp_values)
-        tmp_err_i = -ones(Int, 1024)
-        d_tmp_err_i = ROCArray(tmp_err_i)
-        d_result = ROCArray(result)
-        gpu_dtCFL_reduction!(params.euler_projection, ideb, ifin, x, cmat, umat, d_result, d_tmp_values, d_tmp_err_i) |> wait
-        copyto!(result, d_result)
-        copyto!(tmp_values, d_tmp_values)
-        copyto!(tmp_err_i, d_tmp_err_i)
-        dt = result[1]
-        println("ROCM reduction result: ", dt)
-        for (tid, (value, err)) in enumerate(zip(tmp_values, tmp_err_i)ù)
-            #@printf("TID %2d: %f\n", tid, value)
-            #if err >= 0
-                @printf("TID %3d: err pos=%d, err=%g\n", tid, err, value)
-            #end
+        # AMDGPU doesn't support ArrayProgramming, however its implementation of `reduce` is quite
+        # fast. Therefore first we compute dt for all cells and store the result in a temporary
+        # array, then we reduce this array.
+        if params.euler_projection
+            gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask, 
+                ndrange=length(cmat)) |> wait
+            dt = reduce(min, tmp_rho)
+        else
+            gpu_dtCFL_reduction_lagrange!(tmp_rho, cmat, domain_mask, ndrange=length(cmat)) |> wait
+            dt = reduce(min, tmp_rho) * min(dx, dy)
         end
     elseif params.euler_projection
         if params.use_gpu
