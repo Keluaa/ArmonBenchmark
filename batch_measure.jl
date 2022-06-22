@@ -125,7 +125,7 @@ function parse_measure_params(file_line_parser)
     jl_exclusive = [false]
     jl_places = ["cores"]
     jl_proc_bind = ["close"]
-    dimension = 1
+    dimension = [1]
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     tests_list = ["Sod"]
@@ -514,20 +514,26 @@ function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_s
 end
 
 
-function maybe_recompile(device::Device, block_size::Int, use_simd::Int, ieee_bits::Int, compiler::Compiler, backend::Backend, prev_params)
+function maybe_recompile(device::Device, block_size::Int, use_simd::Int, ieee_bits::Int, 
+        compiler::Compiler, dimension::Int, backend::Backend, prev_params)
     # If 'prev_params' is empty, we are at the first iteration and we force a recompilation, to make sure that the version of the program is correct
     if length(prev_params) > 0
         # Check if the parameters changed enough so that a recompilation is needed
-        prev_block_size, prev_use_simd, prev_ieee_bits, prev_compiler, prev_backend, prev_exe_path = prev_params
+        prev_block_size, prev_use_simd, prev_ieee_bits, prev_compiler, prev_dimension, prev_backend, prev_exe_path = prev_params
         need_compilation = prev_backend != backend ||
                            prev_compiler != compiler ||
                            prev_use_simd != use_simd ||
                            prev_ieee_bits != ieee_bits ||
-                           prev_block_size != block_size
+                           prev_block_size != block_size ||
+                           prev_dimension != dimension
 
         if !need_compilation
             return prev_exe_path, prev_params
         end
+    end
+
+    if dimension != 1
+        error("C++ and Kokkos backends support only 1D")
     end
 
     if backend == CPP
@@ -542,9 +548,10 @@ function maybe_recompile(device::Device, block_size::Int, use_simd::Int, ieee_bi
 end
 
 
-function maybe_recompile(device::Device, _, use_simd::Int, ieee_bits::Int, compiler::Compiler, backend::Backend, prev_params)
+function maybe_recompile(device::Device, _, use_simd::Int, ieee_bits::Int, compiler::Compiler, 
+        dimension::Int, backend::Backend, prev_params)
     # Overload used by the C++ backend
-    return maybe_recompile(device, 0, use_simd, ieee_bits, compiler, backend, prev_params)
+    return maybe_recompile(device, 0, use_simd, ieee_bits, compiler, dimension, backend, prev_params)
 end
 
 
@@ -970,8 +977,8 @@ function run_measure(measure::MeasureParams, inti_index::Int)
             if backend == Julia
                 run_julia(measure, parameters..., base_file_name)
             else
-                exe_path, prev_params = maybe_recompile(measure.device, parameters[end-3:end]..., backend, prev_params)
-                run_armon(measure, backend, parameters[1:4]..., exe_path, base_file_name)
+                exe_path, prev_params = maybe_recompile(measure.device, parameters[end-4:end]..., backend, prev_params)
+                run_armon(measure, backend, parameters[1:4]..., parameters[end], exe_path, base_file_name)
             end
         end
     end
@@ -979,11 +986,10 @@ end
 
 
 function setup_env()
-    # Environment variables needed to configure ROCM so that hipcc works correctly
-    ENV["PATH"] *= ":/opt/rocm-4.5.0/hip/lib:/opt/rocm-4.5.0/hsa/lib"
-    ENV["ROCM_PATH"] = "/opt/rocm-4.5.0"
-    ENV["HIP_CLANG"] = "/opt/rocm-4.5.0/llvm/bin"
-    ENV["HSA_PATH"] = "/opt/rocm-4.5.0/hsa"
+    # Environment variables needed to configure ROCM so that hipcc works correctly. We mix ROCM 
+    # versions since our installation is broken.
+    ENV["HIP_CLANG_PATH"] = "/opt/rocm-4.5.0/llvm/bin"
+    ENV["hip_compiler"] = "/opt/rocm-5.1.2/bin/hipcc"  # Custom env variable used by the Makefile of the Kokkos backend
 
     # Make sure that the output folders exist
     mkpath(data_dir)

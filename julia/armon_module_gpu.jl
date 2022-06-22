@@ -10,6 +10,7 @@ use_ROCM = haskey(ENV, "USE_ROCM_GPU") && ENV["USE_ROCM_GPU"] == "true"
 if use_ROCM
     using AMDGPU
     using ROCKernels
+    AMDGPU.allowscalar(false)
     println("Using ROCM GPU")
     macro cuda(args...) end
 else
