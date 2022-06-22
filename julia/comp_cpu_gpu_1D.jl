@@ -61,7 +61,8 @@ end
 
 function diff_data(label::String, params::Armon.ArmonParameters{T}, 
         dd::Armon.ArmonData{V}, dg::Armon.ArmonData{W}, 
-        dg_tmp::Armon.ArmonData{V}) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        dg_tmp::Armon.ArmonData{V}, 
+        ignore::Vector{Symbol} = Vector{Symbol}(undef, 0)) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     if W != V
         all_data_from_gpu(dg_tmp, dg)
     end
@@ -70,6 +71,7 @@ function diff_data(label::String, params::Armon.ArmonParameters{T},
 
     for name in fieldnames(Armon.ArmonData{V})
         name == :gmat && continue
+        name in ignore && continue
 
         cpu_val = getfield(dd, name)
         gpu_val = getfield(dg_tmp, name)
@@ -108,11 +110,11 @@ function comp_cpu_gpu_loop(
     while t < maxtime && cycle < maxcycle
         Armon.boundaryConditions!(params_cpu, data_cpu)
         Armon.boundaryConditions!(params_gpu, data_gpu)
-        diff_data("boundaryConditions", params_cpu, data_cpu, data_gpu, data_gpu_tmp) && return cycle
+        diff_data("boundaryConditions", params_cpu, data_cpu, data_gpu, data_gpu_tmp, [:tmp_rho]) && return cycle
 
         c_dt = Armon.dtCFL(params_cpu, data_cpu, dta)
         g_dt = Armon.dtCFL(params_gpu, data_gpu, dta)
-        diff_data("dtCFL", params_cpu, data_cpu, data_gpu, data_gpu_tmp) && return cycle
+        diff_data("dtCFL", params_cpu, data_cpu, data_gpu, data_gpu_tmp, [:tmp_rho]) && return cycle
 
         if !isfinite(c_dt) || c_dt <= 0.
             error("Invalid c_dt: $(c_dt)")
@@ -126,11 +128,11 @@ function comp_cpu_gpu_loop(
 
         Armon.numericalFluxes!(params_cpu, data_cpu, c_dt)
         Armon.numericalFluxes!(params_gpu, data_gpu, g_dt)
-        diff_data("numericalFluxes!", params_cpu, data_cpu, data_gpu, data_gpu_tmp) && return cycle
+        diff_data("numericalFluxes!", params_cpu, data_cpu, data_gpu, data_gpu_tmp, [:tmp_rho]) && return cycle
 
         Armon.cellUpdate!(params_cpu, data_cpu, c_dt)
         Armon.cellUpdate!(params_gpu, data_gpu, g_dt)
-        diff_data("cellUpdate!", params_cpu, data_cpu, data_gpu, data_gpu_tmp) && return cycle
+        diff_data("cellUpdate!", params_cpu, data_cpu, data_gpu, data_gpu_tmp, [:tmp_rho]) && return cycle
 
         if euler_projection
             Armon.first_order_euler_remap!(params_cpu, data_cpu, c_dt)
@@ -140,7 +142,7 @@ function comp_cpu_gpu_loop(
 
         Armon.update_EOS!(params_cpu, data_cpu)
         Armon.update_EOS!(params_gpu, data_gpu)
-        diff_data("update_EOS!", params_cpu, data_cpu, data_gpu, data_gpu_tmp) && return cycle
+        diff_data("update_EOS!", params_cpu, data_cpu, data_gpu, data_gpu_tmp, [:tmp_rho]) && return cycle
 
         dt = (c_dt + g_dt) / 2
 
