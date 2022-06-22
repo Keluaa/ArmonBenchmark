@@ -136,6 +136,11 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - maxcycle:   ", p.maxcycle)
 end
 
+# Default copy method
+function Base.copy(p::ArmonParameters{T}) where T
+    return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
+end
+
 #
 # Data
 #
@@ -802,7 +807,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
-        gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
+        gpu_acoustic!(ideb - 1, ustar_1, pstar_1, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
         gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1,
             dt, x, ndrange=length(ideb:ifin+1))
         return
@@ -1103,7 +1108,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 
     # Projection of the conservative variables
-    @simd_threaded_loop for i in ideb:ifin+1
+    @simd_threaded_loop for i in ideb:ifin
         dx = X[i+1] - X[i]
         L₁ =  max(0, ustar[i]) * dt
         L₃ = -min(0, ustar[i+1]) * dt
@@ -1124,7 +1129,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 
     # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
-    @simd_threaded_loop for i in ideb:ifin+1
+    @simd_threaded_loop for i in ideb:ifin
         rho[i]  = tmp_rho[i]
         umat[i] = tmp_urho[i] / tmp_rho[i]
         vmat[i] = tmp_vrho[i] / tmp_rho[i]
@@ -1262,7 +1267,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         println(" ")
     end
 
-    return convert(T, 1 / grind_time)
+    return dt, convert(T, 1 / grind_time)
 end
 
 #
@@ -1319,17 +1324,17 @@ function armon(params::ArmonParameters{T}) where T
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
         if silent <= 3
-            @time cells_per_sec = time_loop(params, d_data)
+            @time dt, cells_per_sec = time_loop(params, d_data)
         else
-            cells_per_sec = time_loop(params, d_data)
+            dt, cells_per_sec = time_loop(params, d_data)
         end
 
         data_from_gpu(data, d_data)
     else
         if silent <= 3
-            @time cells_per_sec = time_loop(params, data)
+            @time dt, cells_per_sec = time_loop(params, data)
         else
-            cells_per_sec = time_loop(params, data)
+            dt, cells_per_sec = time_loop(params, data)
         end
     end
 
@@ -1345,7 +1350,7 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    return cells_per_sec, sort(collect(time_contrib))
+    return dt, cells_per_sec, sort(collect(time_contrib))
 end
 
 end

@@ -221,10 +221,6 @@ if dimension == 1
             euler_projection, maxtime, maxcycle, silent, write_output, 
             use_ccall, use_threading, use_simd, interleaving, use_gpu)
     end
-
-    function run_armon(params::ArmonParameters)
-        return armon(params)
-    end
 else
     function build_params(test, domain; 
             ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
@@ -236,11 +232,11 @@ else
             maxtime, maxcycle, silent, write_output, 
             use_ccall, use_threading, use_simd, use_gpu)
     end
+end
 
-    function run_armon(params::ArmonParameters)
-        _, cells_per_sec, time_contrib = armon(params)
-        return cells_per_sec, time_contrib
-    end
+function run_armon(params::ArmonParameters)
+    _, cells_per_sec, time_contrib = armon(params)
+    return cells_per_sec, time_contrib
 end
 
 

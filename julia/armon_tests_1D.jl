@@ -1,20 +1,18 @@
 
 using Test
 
-include("armon_module_gpu_2D.jl")
+include("armon_module_gpu.jl")
 using .Armon
 
 
-domain_bounds = [(100, 100), (50, 100), (100, 50), (43, 137)]
-CFD_tests = [:Sod, :Sod_y, :Sod_circ#= , :Bizarrium =#]
-transposition = [false, true]
+cells_list = [10000, 12345]
+CFD_tests = [:Sod#= , :Bizarrium =#]
 scheme = [:Godunov, :GAD_minmod]
-axis_splitting = [:Sequential, :SequentialSym, :Strang]
 
 
 default_params = (
     ieee_bits = 64,
-    euler_projection = true, transpose_dims = false, axis_splitting = :Sequential,
+    euler_projection = true,
     maxcycle = 100,
     silent = 5, 
     write_output = false,
@@ -24,59 +22,48 @@ default_params = (
 
 
 combinaisons = Iterators.product(
-    domain_bounds,
+    cells_list,
     CFD_tests,
-    transposition,
-    scheme,
-    axis_splitting
+    scheme
 )
 
 
-function test_armon(use_gpu, domain, test, transpose, s, axis)
+function test_armon(use_gpu, cells, test, s)
     try
         armon(ArmonParameters(;
             test = test,
             scheme = s,
-            transpose_dims = transpose,
-            nx = domain[1],
-            ny = domain[2],
+            nbcell = cells,
             use_gpu = use_gpu,
-            axis_splitting = axis,
             default_params...
         ))
         return true
     catch e
-        println("Test failed: ($(domain[1]), $(domain[2])), $test, transpose_dims=$transpose, scheme=$s, splitting=$axis")
+        println("Test failed: $(cells), $test, scheme=$s")
         rethrow(e)
     end
 end
 
 
-function test_comp_cpu_gpu(domain, test, transpose, s, axis)
+function test_comp_cpu_gpu(cells, test, s)
     try
         dt_cpu, _, _ = armon(ArmonParameters(;
             test = test,
             scheme = s,
-            transpose_dims = transpose,
-            nx = domain[1],
-            ny = domain[2],
+            nbcell = cells,
             use_gpu = false,
-            axis_splitting = axis,
             default_params...
         ))
         dt_gpu, _, _ = armon(ArmonParameters(;
             test = test,
             scheme = s,
-            transpose_dims = transpose,
-            nx = domain[1],
-            ny = domain[2],
-            use_gpu = false,
-            axis_splitting = axis,
+            nbcell = cells,
+            use_gpu = true,
             default_params...
         ))
         return isapprox(dt_cpu, dt_gpu; atol=1e-9)
     catch e
-        println("Test failed: ($(domain[1]), $(domain[2])), $test, transpose_dims=$transpose, scheme=$s, splitting=$axis")
+        println("Test failed: ($(cells)), $test, scheme=$s")
         rethrow(e)
     end
 end
