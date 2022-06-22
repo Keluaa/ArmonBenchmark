@@ -544,7 +544,7 @@ function maybe_recompile(device::Device, block_size::Int, use_simd::Int, ieee_bi
         error("Unknown backend")
     end
 
-    return exe_path, (block_size, use_simd, ieee_bits, compiler, backend, exe_path)
+    return exe_path, (block_size, use_simd, ieee_bits, compiler, dimension, backend, exe_path)
 end
 
 
@@ -675,7 +675,7 @@ function run_armon(measure::MeasureParams, backend::Backend,
         threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, 
         dimension::Int,
         exe_path::String, base_file_name::String)
-    println("Running $(backend == CPP ? "C++" : "Kokkos") with: $(threads) threads, " * 
+    println("Running $(backend == CPP ? "C++" : "Kokkos") for $(measure.device) with: $(threads) threads, " * 
             "schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places), " * 
             "$(dimension)D")
 
