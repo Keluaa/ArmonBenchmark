@@ -765,7 +765,7 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 Int32, Int32),
             ustar, pstar, rho, cmat, umat, pmat, ideb, ifin)
     elseif params.use_gpu
-        gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
+        gpu_acoustic!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1)) |> wait
     else
         @simd_threaded_loop for i in ideb:ifin+1
             rc_l = rho[i-1] * cmat[i-1]
@@ -807,9 +807,9 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
-        gpu_acoustic!(ideb - 1, ustar_1, pstar_1, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1))
+        gpu_acoustic!(ideb - 1, ustar_1, pstar_1, rho, umat, pmat, cmat, ndrange=length(ideb:ifin+1)) |> wait
         gpu_acoustic_GAD_minmod!(ideb - 1, ustar, pstar, rho, umat, pmat, cmat, ustar_1, pstar_1,
-            dt, x, ndrange=length(ideb:ifin+1))
+            dt, x, ndrange=length(ideb:ifin+1)) |> wait
         return
     end
 
@@ -993,7 +993,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     (; test, ideb, ifin) = params
 
     if params.use_gpu
-        gpu_boundary_conditions!(test == :Bizarrium, ideb, ifin, rho, umat, vmat, pmat, cmat, gmat)
+        gpu_boundary_conditions!(test == :Bizarrium, ideb, ifin, rho, umat, vmat, pmat, cmat, gmat) |> wait
         return
     end
 
@@ -1034,9 +1034,9 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
         # ROCM doesn't support Array Programming, so first we compute `dt` for all cells in the 
         # domain, then we reduce those values.
         if params.euler_projection
-            gpu_dtCFL_reduction_euler!(ideb - 1, tmp_rho, x, umat, cmat, ndrange=length(ideb:ifin))
+            gpu_dtCFL_reduction_euler!(ideb - 1, tmp_rho, x, umat, cmat, ndrange=length(ideb:ifin)) |> wait
         else
-            gpu_dtCFL_reduction_lagrange!(ideb - 1, tmp_rho, x, cmat, ndrange=length(ideb:ifin))
+            gpu_dtCFL_reduction_lagrange!(ideb - 1, tmp_rho, x, cmat, ndrange=length(ideb:ifin)) |> wait
         end
         dt = reduce(min, tmp_rho[ideb:ifin])
     elseif params.euler_projection
@@ -1101,9 +1101,9 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
     if params.use_gpu
         gpu_first_order_euler_remap_1!(ideb - 1, dt, X, ustar, rho, umat, vmat, Emat, 
-            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
+            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin)) |> wait
         gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
-            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin))
+            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ndrange=length(ideb:ifin)) |> wait
         return
     end
 
@@ -1145,10 +1145,10 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wher
     if params.use_gpu
         if params.euler_projection
             gpu_cell_update_euler!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
-                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin))
+                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin)) |> wait
         else
             gpu_cell_update_lagrange!(ideb - 1, ifin, dt, x, X, ustar, pstar, 
-                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin))
+                rho, umat, vmat, emat, Emat, ndrange=length(ideb:ifin)) |> wait
         end
         return
     end
@@ -1189,14 +1189,14 @@ function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V
 
         if params.use_gpu
             gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, emat, 
-                pmat, cmat, gmat, ndrange=length(ideb:ifin))
+                pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait
         else
             perfectGasEOS!(params, data, gamma)
         end
     elseif test == :Bizarrium
         if params.use_gpu
             gpu_update_bizarrium_EOS!(ideb - 1, rho, emat, 
-                pmat, cmat, gmat, ndrange=length(ideb:ifin))
+                pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait
         else
             BizarriumEOS!(params, data)
         end
