@@ -304,11 +304,16 @@ function parse_measure_params(file_line_parser)
 end
 
 
-function parse_measure_script_file(file::IOStream)
+function parse_measure_script_file(file::IOStream, name::String)
     measures::Vector{MeasureParams} = []
     file_line_parser = enumerate(eachline(file))
     while !eof(file)
-        measure = parse_measure_params(file_line_parser)
+        measure = try
+            parse_measure_params(file_line_parser)
+        catch e
+            println("Error while parsing measure $(length(measures)+1) of file '$name':")
+            rethrow(e)
+        end
         push!(measures, measure)
     end
     return measures
@@ -316,20 +321,33 @@ end
 
 
 function parse_arguments()
-    if !(1 <= length(ARGS) <= 4)
-        error("Invalid number of arguments. Usage: 'julia batch_measure.jl <script file>'")
+    if length(ARGS) == 0
+        error("Invalid number of arguments. Usage: 'julia batch_measure.jl <script files>...'")
     end
 
+    end_of_file_list = 0
     measure_index = 0
     inti_index = 0
 
-    script_file = open(ARGS[1], "r")
-    measures = parse_measure_script_file(script_file)        
-    close(script_file)
+    measures::Vector{MeasureParams} = []
 
-    if length(ARGS) > 1
-        measure_index = parse(Int, ARGS[2])
-        inti_index = parse(Int, ARGS[3])
+    for (i, arg) in enumerate(ARGS)
+        try
+            measure_index = parse(Int, arg)
+            end_of_file_list = i
+            break
+        catch
+            # Not a number
+        end
+
+        # Measure file
+        script_file = open(arg, "r")
+        append!(measures, parse_measure_script_file(script_file, arg))
+        close(script_file)
+    end
+
+    if end_of_file_list ≠ 0
+        inti_index = parse(Int, ARGS[end_of_file_list + 1])
     end
 
     return measures, measure_index, inti_index
