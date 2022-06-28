@@ -53,8 +53,8 @@ mutable struct MeasureParams
 end
 
 
-no_inti_cmd(measure_index, inti_index) = `julia $(PROGRAM_FILE) $(ARGS[1]) $(measure_index) $(inti_index)`
-inti_cmd(options, measure_index, inti_index) = `ccc_mprun $(options) julia $(PROGRAM_FILE) $(ARGS[1]) $(measure_index) $(inti_index)`
+no_inti_cmd(measure_index, inti_index) = `julia $(PROGRAM_FILE) $(ARGS) $(measure_index) $(inti_index)`
+inti_cmd(options, measure_index, inti_index) = `ccc_mprun $(options) julia $(PROGRAM_FILE) $(ARGS) $(measure_index) $(inti_index)`
 gnuplot_cmd(plot_file) = `gnuplot $(plot_file)`
 
 julia_options = ["-O3", "--check-bounds=no"]
