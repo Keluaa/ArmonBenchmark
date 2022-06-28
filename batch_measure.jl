@@ -83,13 +83,13 @@ plot_scripts_dir = "./plot_scripts/"
 plots_dir = "./plots/"
 
 
-base_gnuplot_script_commands(graph_file_name, title, log_scale) = """
+base_gnuplot_script_commands(graph_file_name, title, log_scale, legend_pos) = """
 set terminal pdfcairo color size 10in, 6in
 set output '$(graph_file_name)'
 set ylabel 'Giga Cells/sec'
 set xlabel 'Cells count'
 set title "$(title)"
-set key right top
+set key $(legend_pos) top
 $(log_scale ? "set logscale x" : "")
 `echo "$(graph_file_name)" > ./plots/last_update`
 plot """
@@ -103,7 +103,7 @@ set key left top
 set style fill solid 1.00 border 0
 plot """
 
-gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
+gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(replace(legend_title, '_' => "\\\\_"))'"
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
 
 function parse_measure_params(file_line_parser)    
@@ -335,7 +335,7 @@ function parse_arguments()
         try
             measure_index = parse(Int, arg)
             end_of_file_list = i
-            break
+            break  # There should be 2 numbers at the end of ARGS when running on INTI, this is the first one
         catch
             # Not a number
         end
@@ -377,41 +377,115 @@ function build_inti_combinaisons(measure::MeasureParams, inti_index::Int)
 end
 
 
+abstract type BackendParams end
+
+struct DummyParams <: BackendParams end
+
+struct JuliaParams <: BackendParams
+    backend::Backend
+    jl_places::String
+    jl_proc_bind::String
+    threads::Int
+    block_size::Int
+    use_simd::Int
+    ieee_bits::Int
+    std_lib_threads::String
+    exclusive::Bool
+    dimension::Int
+end
+
+
+struct CppParams <: BackendParams
+    backend::Backend
+    threads::Int
+    omp_schedule::String
+    omp_proc_bind::String
+    omp_places::String
+    dimension::Int
+    use_simd::Int
+    ieee_bits::Int
+    compiler::Compiler
+end
+
+
+struct KokkosParams <: BackendParams
+    backend::Backend
+    threads::Int
+    omp_schedule::String
+    omp_proc_bind::String
+    omp_places::String
+    dimension::Int
+    block_size::Int
+    use_simd::Int
+    ieee_bits::Int
+    compiler::Compiler
+end
+
+
+needs_recompilation(params::BackendParams, prev_params::BackendParams)::Bool = true
+
+
+function needs_recompilation(params::CppParams, prev_params::CppParams)::Bool
+    return params.dimension != prev_params.dimension ||
+           params.block_size != prev_params.block_size ||
+           params.use_simd != prev_params.use_simd ||
+           params.ieee_bits != prev_params.ieee_bits ||
+           params.compiler != prev_params.compiler
+end
+
+
+function needs_recompilation(params::KokkosParams, prev_params::KokkosParams)::Bool
+    return params.block_size != prev_params.block_size ||
+           params.use_simd != prev_params.use_simd ||
+           params.ieee_bits != prev_params.ieee_bits ||
+           params.compiler != prev_params.compiler
+end
+
+
 function parse_combinaisons(measure::MeasureParams, backend::Backend)
     if backend == Julia
-        return Iterators.product(
-            measure.jl_places,
-            measure.jl_proc_bind,
-            measure.threads,
-            measure.block_sizes,
-            measure.use_simd,
-            measure.ieee_bits,
-            measure.std_lib_threads,
-            measure.exclusive,
-            measure.dimension
+        return Iterators.map(
+            params->JuliaParams(Julia, params...),    
+            Iterators.product(
+                measure.jl_places,
+                measure.jl_proc_bind,
+                measure.threads,
+                measure.block_sizes,
+                measure.use_simd,
+                measure.ieee_bits,
+                measure.std_lib_threads,
+                measure.exclusive,
+                measure.dimension
+            )
         )
     elseif backend == CPP
-        return Iterators.product(
-            measure.threads,
-            measure.omp_schedule,
-            measure.omp_proc_bind,
-            measure.omp_places,
-            measure.use_simd,
-            measure.ieee_bits,
-            measure.compilers,
-            measure.dimension
+        return Iterators.map(
+            params->CppParams(CPP, params...),
+            Iterators.product(
+                measure.threads,
+                measure.omp_schedule,
+                measure.omp_proc_bind,
+                measure.omp_places,
+                measure.use_simd,
+                measure.ieee_bits,
+                measure.compilers,
+                measure.dimension
+            )
         )
     elseif backend == Kokkos
-        return Iterators.product(
-            measure.threads,
-            measure.omp_schedule,
-            measure.omp_proc_bind,
-            measure.omp_places,
-            measure.block_sizes,
-            measure.use_simd,
-            measure.ieee_bits,
-            measure.compilers,
-            measure.dimension
+        return Iterators.map(
+            params->KokkosParams(Kokkos, params...),
+            Iterators.product(
+                measure.threads,
+                measure.omp_schedule,
+                measure.omp_proc_bind,
+                measure.omp_places,
+                measure.dimension,
+                [-1],  # The Kokkos backend doesn't support custom block sizes for now
+                measure.use_simd,
+                measure.ieee_bits,
+                measure.compilers
+            )
         )
     end
 end
@@ -445,7 +519,7 @@ function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
 
         if length(measure.transpose_dims) > 1
             file_name *= transpose_dims ? "_transposed" : ""
-            legend *= "ᵀ"
+            legend *= transpose_dims ? "ᵀ" : ""
         end
 
         if length(measure.axis_splitting) > 1
@@ -459,21 +533,25 @@ function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
 end
 
 
-function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler)
+function recompile_backend(_, params::CppParams)
+    if params.dimension != 1
+        error("The C++ backend supports only 1D")
+    end
+
     make_options = [
         "--quiet",  # Don't print unuseful info
-        "use_simd=$(use_simd)",
-        "use_single_precision=$(ieee_bits == 32)",
+        "use_simd=$(params.use_simd)",
+        "use_single_precision=$(params.ieee_bits == 32)",
     ]
 
-    print("Recompiling the C++ code with: block_size=$(block_size), ieee_bits=$(ieee_bits), use_simd=$(use_simd), ")
-    if compiler == GCC
+    print("Recompiling the C++ code with: block_size=$(params.block_size), ieee_bits=$(params.ieee_bits), use_simd=$(params.use_simd), ")
+    if params.compiler == GCC
         println("using GCC")
         # the makefile uses gcc by default
-    elseif compiler == Clang
+    elseif params.compiler == Clang
         println("using Clang")
         push!(make_options, "use_clang=1")
-    elseif compiler == ICC
+    elseif params.compiler == ICC
         println("using ICC")
         push!(make_options, "use_icc=1")
     else
@@ -487,30 +565,30 @@ function recompile_cpp(block_size::Int, ieee_bits::Int, use_simd::Int, compiler:
 end
 
 
-function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_simd::Int, compiler::Compiler)
-    if block_size != 256
-        @warn "Kokkos doesn't support custom GPU block sizes. It is choosen at runtime depending on the kernels."
+function recompile_backend(device::Device, params::KokkosParams)
+    if params.block_size != -1
+        @warn "Kokkos doesn't support custom GPU block sizes. It is choosen at runtime depending on the kernels." maxlog=1
     end
 
     make_options = [
         "--quiet",    # Don't print unuseful info
         "use_omp=1",  # Always enable OpenMP for Kokkos, since it can still help a bit for GPUs in the host side
-        "use_simd=$(use_simd)",
-        "use_single=$(convert(Int, ieee_bits == 32))"
+        "use_simd=$(params.use_simd)",
+        "use_single=$(convert(Int, params.ieee_bits == 32))"
     ]
 
-    if compiler == GCC
+    if params.compiler == GCC
         push!(make_options, "compiler=gcc")
         compiler_str = "GCC"
-    elseif compiler == Clang
+    elseif params.compiler == Clang
         push!(make_options, "compiler=clang")
         compiler_str = "Clang"
-    elseif compiler == ICC
+    elseif params.compiler == ICC
         push!(make_options, "compiler=icc")
         compiler_str = "ICC"
     end
 
-    println("Recompiling the C++ Kokkos code with: block_size=$(block_size), ieee_bits=$(ieee_bits), use_simd=$(use_simd) using the $(compiler_str) compiler")
+    println("Recompiling the C++ Kokkos code with: ieee_bits=$(params.ieee_bits), use_simd=$(params.use_simd) using the $(compiler_str) compiler")
 
     if device == CPU
         make_target = "build-omp"
@@ -521,7 +599,7 @@ function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_s
     elseif device == ROCM
         make_target = "build-hip"
         make_run_target = "run-hip"
-        @warn "Kokkos on ROCM GPU can only use the hipcc compiler"
+        @warn "Kokkos on ROCM GPU can only use the hipcc compiler" maxlog=1
     else
         error("Wrong device")
     end
@@ -532,56 +610,32 @@ function recompile_kokkos(device::Device, block_size::Int, ieee_bits::Int, use_s
 end
 
 
-function maybe_recompile(device::Device, block_size::Int, use_simd::Int, ieee_bits::Int, 
-        compiler::Compiler, dimension::Int, backend::Backend, prev_params)
-    # If 'prev_params' is empty, we are at the first iteration and we force a recompilation, to make sure that the version of the program is correct
-    if length(prev_params) > 0
-        # Check if the parameters changed enough so that a recompilation is needed
-        prev_block_size, prev_use_simd, prev_ieee_bits, prev_compiler, prev_dimension, prev_backend, prev_exe_path = prev_params
-        need_compilation = prev_backend != backend ||
-                           prev_compiler != compiler ||
-                           prev_use_simd != use_simd ||
-                           prev_ieee_bits != ieee_bits ||
-                           prev_block_size != block_size ||
-                           prev_dimension != dimension
+function maybe_recompile(_::Device, params::JuliaParams, prev_params::BackendParams, prev_exe_path::String)
+    # There is nothing to recompile for Julia
+    return prev_exe_path, prev_params
+end
 
+
+function maybe_recompile(device::Device, params::BackendParams, prev_params::BackendParams, prev_exe_path::String)
+    # If 'prev_params' is a dummy, we are at the first iteration and we force a recompilation, to
+    # make sure that the version of the program is correct
+    if !isa(prev_params, DummyParams)
+        # Check if the parameters changed enough so that a recompilation is needed
+        need_compilation = needs_recompilation(params, prev_params)
         if !need_compilation
             return prev_exe_path, prev_params
         end
     end
 
-    if dimension != 1
-        error("C++ and Kokkos backends support only 1D")
-    end
-
-    if backend == CPP
-        exe_path = recompile_cpp(block_size, ieee_bits, use_simd, compiler)
-    elseif backend == Kokkos
-        exe_path = recompile_kokkos(device, block_size, ieee_bits, use_simd, compiler)
-    else
-        error("Unknown backend")
-    end
-
-    return exe_path, (block_size, use_simd, ieee_bits, compiler, dimension, backend, exe_path)
+    exe_path = recompile_backend(device, params)
+    return exe_path, params
 end
 
 
-function maybe_recompile(device::Device, _, use_simd::Int, ieee_bits::Int, compiler::Compiler, 
-        dimension::Int, backend::Backend, prev_params)
-    # Overload used by the C++ backend
-    return maybe_recompile(device, 0, use_simd, ieee_bits, compiler, dimension, backend, prev_params)
-end
-
-
-function run_julia(measure::MeasureParams, 
-        jl_places::String, jl_proc_bind::String,
-        threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
-        std_lib_threads::String, exclusive::Bool, 
-        dimension::Int,
-        base_file_name::String)
+function run_backend(measure::MeasureParams, params::JuliaParams, _::String, base_file_name::String)
     armon_options = []
 
-    if exclusive
+    if params.exclusive
         ENV["JULIA_EXCLUSIVE"] = 1
     end
 
@@ -593,18 +647,18 @@ function run_julia(measure::MeasureParams,
         # no option needed for CPU
     end
 
-    if dimension == 1
+    if params.dimension == 1
         cells_list = measure.cells_list
     else
         cells_list = measure.domain_list
     end
 
-    if threads == 1
+    if params.threads == 1
         # Limit the number of cells
         cells_list = filter(x -> prod(x) < max_cells_for_one_thread, cells_list)
     end
 
-    if dimension == 1
+    if params.dimension == 1
         cells_list_str = join(cells_list, ',')
     else
         cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
@@ -613,15 +667,15 @@ function run_julia(measure::MeasureParams,
     append!(armon_options, armon_base_options)
     append!(armon_options, measure.common_armon_params)
     append!(armon_options, [
-        "--dim", dimension,
-        "--block-size", block_size,
-        "--use-simd", use_simd,
-        "--ieee", ieee_bits,
+        "--dim", params.dimension,
+        "--block-size", params.block_size,
+        "--use-simd", params.use_simd,
+        "--ieee", params.ieee_bits,
         "--tests", join(measure.tests_list, ','),
         "--cells-list", cells_list_str,
-        "--use-std-threads", std_lib_threads,
-        "--threads-places", jl_places,
-        "--threads-proc-bind", jl_proc_bind,
+        "--use-std-threads", params.std_lib_threads,
+        "--threads-places", params.jl_places,
+        "--threads-proc-bind", params.jl_proc_bind,
         "--data-file", base_file_name,
         "--gnuplot-script", measure.gnuplot_script,
         "--verbose", (measure.verbose ? 2 : 5),
@@ -629,7 +683,7 @@ function run_julia(measure::MeasureParams,
         "--time-histogram", measure.time_histogram
     ])
 
-    if dimension > 1
+    if params.dimension > 1
         append!(armon_options, [
             "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
@@ -637,36 +691,41 @@ function run_julia(measure::MeasureParams,
         ])
     end
 
-    println("Running Julia with: $(threads) threads (exclusive: $(exclusive), places: $(jl_places), " *
-            "bind: $(jl_proc_bind)), $(block_size) block size, $(ieee_bits) bits, " *
-            "$(use_simd == 1 ? "with" : "without") SIMD, $(dimension)D")
+    println("""Running Julia with:
+ - $(params.threads) threads (exclusive: $(params.exclusive))
+ - threads binding: $(params.jl_proc_bind), places: $(params.jl_places)
+ - $(params.use_simd == 1 ? "with" : "without") SIMD
+ - $(params.dimension)D
+ - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
+""")
 
-    run(`julia -t $(threads) $(julia_options) $(julia_script_path) $(armon_options)`)
+    run(`julia -t $(params.threads) $(julia_options) $(julia_script_path) $(armon_options)`)
 end
 
 
-function get_cpp_run_cmd(exe_path, threads, omp_schedule, omp_proc_bind, omp_places, armon_options)
-    ENV["OMP_NUM_THREADS"] = threads
-    ENV["OMP_SCHEDULE"] = omp_schedule
-    ENV["OMP_PROC_BIND"] = omp_proc_bind
-    ENV["OMP_PLACES"] = omp_places
+function get_run_cmd(exe_path::String, params::CppParams, armon_options::Vector{String})
+    ENV["OMP_NUM_THREADS"] = params.threads
+    ENV["OMP_SCHEDULE"] = params.omp_schedule
+    ENV["OMP_PROC_BIND"] = params.omp_proc_bind
+    ENV["OMP_PLACES"] = params.omp_places
     cmd = `$(exe_path) $(armon_options)`
     return cmd
 end
 
 
-function get_kokkos_run_cmd(exe_path, threads, omp_schedule, omp_proc_bind, omp_places, armon_options)
-    # For Kokkos, the exe_path is not a path but a make target that compiles (if needed) the exe then runs it with the arguments given.
-    ENV["OMP_SCHEDULE"] = omp_schedule
-    ENV["OMP_PROC_BIND"] = omp_proc_bind
-    ENV["OMP_PLACES"] = omp_places
-    args = "--kokkos-threads=$(threads) $(join(string.(armon_options), ' '))"
+function get_run_cmd(exe_path::String, params::KokkosParams, armon_options::Vector{String})
+    # For Kokkos, the exe_path is not a path but a make target that compiles (if needed) the exe 
+    # then runs it with the arguments given.
+    ENV["OMP_SCHEDULE"] = params.omp_schedule
+    ENV["OMP_PROC_BIND"] = params.omp_proc_bind
+    ENV["OMP_PLACES"] = params.omp_places
+    args = "--kokkos-threads=$(params.threads) $(join(string.(armon_options), ' '))"
     cmd = Cmd(`make $(base_make_options) $(exe_path) args=\"$(args)\"`, dir=kokkos_make_dir)
     return cmd
 end
 
 
-function run_and_parse_output(cmd, verbose)
+function run_and_parse_output(cmd::Cmd, verbose::Bool)
     if verbose
         println(cmd)
     end
@@ -689,30 +748,29 @@ function run_and_parse_output(cmd, verbose)
 end
 
 
-function run_armon(measure::MeasureParams, backend::Backend, 
-        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String, 
-        dimension::Int,
+function run_backend(measure::MeasureParams, params::Union{CppParams, KokkosParams}, 
         exe_path::String, base_file_name::String)
-    println("Running $(backend == CPP ? "C++" : "Kokkos") for $(measure.device) with: $(threads) threads, " * 
-            "schedule: $(omp_schedule), binding: $(omp_proc_bind), places: $(omp_places), " * 
-            "$(dimension)D")
+    println("""Running $(params.backend == CPP ? "C++" : "Kokkos") for $(measure.device) with:
+ - $(params.threads) threads
+ - OpenMP schedule: $(params.omp_schedule)
+ - threads binding: $(params.omp_proc_bind), places: $(params.omp_places)
+ - $(params.dimension)D
+ - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
+""")
 
-    if dimension == 1
+    if params.dimension == 1
         cells_list = measure.cells_list
     else
         cells_list = measure.domain_list
     end
 
-    if threads == 1
+    if params.threads == 1
         cells_list = filter(x -> prod(x) < max_cells_for_one_thread, cells_list)
     end
 
-    if dimension != 1
-        error("Only 1D is supported for the C++ implementation")
-    end
-
-    for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
-        data_file_name, _ = build_armon_data_file_name(measure, dimension, base_file_name, "", test, transpose_dims, axis_splitting)
+    for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, params.dimension)
+        data_file_name, _ = build_armon_data_file_name(measure, params.dimension, base_file_name, 
+            "", test, transpose_dims, axis_splitting)
         data_file_name *= ".csv"
 
         for cells in cells_list
@@ -726,18 +784,9 @@ function run_armon(measure::MeasureParams, backend::Backend,
             append!(armon_options, measure.common_armon_params)
     
             # Do the measurement
-            if backend == CPP
-                cmd = get_cpp_run_cmd(exe_path, threads, omp_schedule, omp_proc_bind, omp_places, armon_options)
-            elseif backend == Kokkos
-                cmd = get_kokkos_run_cmd(exe_path, threads, omp_schedule, omp_proc_bind, omp_places, armon_options)
-            else
-                error("Wrong backend")
-            end
-
+            cmd = get_run_cmd(exe_path, params, armon_options)
             @printf(" - %s, %-10g cells: ", test, cells)
-
             cells_throughput = run_and_parse_output(cmd, measure.verbose)
-
             @printf("%.2f Giga cells/sec\n", cells_throughput)
     
             # Append the result to the output file
@@ -756,26 +805,18 @@ end
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, 
         threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
-        compiler::Compiler, backend::Backend)
+        compiler::Compiler, dimension::Int, backend::Backend)
     # Build a file name based on the measurement name and the parameters that don't have a single value
     name = data_dir * measure.name * "/"
 
     # Build a plot legend entry for the measurement
     legend = ""
 
-    if measure.device == CPU
-        name *= "CPU"
-        legend *= "CPU"
-    elseif measure.device == CUDA
-        name *= "CUDA"
-        legend *= "CUDA"
-    elseif measure.device == ROCM
-        name *= "ROCM"
-        legend *= "ROCM"
-    end
+    name *= string(measure.device)
+    legend *= string(measure.device)
 
     name *= isempty(measure.node) ? "_local" : "_" * measure.node
-    legend *= isempty(measure.node) ? ", local" : ", " * measure.node
+    legend *= isempty(measure.node) ? ", local" : (measure.device != CPU ? ", " * measure.node : "")
 
     if length(measure.distributions) > 1
         name *= "_" * distribution
@@ -788,29 +829,23 @@ function build_data_file_base_name(measure::MeasureParams,
     end
 
     if length(measure.backends) > 1
-        if backend == CPP
-            name *= "_CPP"
-            legend *= ", CPP"
-        elseif backend == Kokkos
-            name *= "_Kokkos"
-            legend *= ", Kokkos"
-        elseif backend == Julia
-            name *= "_Julia"
-            legend *= ", Julia"
-        end
+        name *= "_" * string(backend)
+        legend *= ", " * string(backend)
     end
 
     if length(measure.compilers) > 1 && backend != Julia
-        if compiler == GCC
-            name *= "_GCC"
-            legend *= " GCC"
-        elseif compiler == Clang
-            name *= "_Clang"
-            legend *= " Clang"
-        elseif compiler == ICC
-            name *= "_ICC"
-            legend *= " ICC"
+        if backend == Kokkos && measure.device == ROCM
+            name *= "_HIP"
+            legend *= " HIPCC"
+        else
+            name *= "_" * string(compiler)
+            legend *= " " * string(compiler)
         end
+    end
+
+    if length(measure.dimension) > 1
+        name *= "_$(dimension)D"
+        legend *= ", $(dimension)D"
     end
 
     if length(measure.ieee_bits) > 1
@@ -837,17 +872,8 @@ function build_data_file_base_name(measure::MeasureParams,
 end
 
 
-function build_data_file_base_name(measure::MeasureParams, 
-        processes::Int, distribution::String, 
-        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
-        block_size::Int, use_simd::Int, ieee_bits::Int, 
-        compiler::Compiler,
-        dimension::Int, 
-        backend::Backend)
-    # Overload used by the Kokkos and C++ backends
-    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, 
-                                             use_simd, ieee_bits, compiler, backend)
-    
+function build_data_file_base_name_omp_params(name::String, legend::String, measure::MeasureParams,
+        omp_schedule::String, omp_proc_bind::String, omp_places::String)
     if length(measure.omp_schedule) > 1
         name *= "_$(omp_schedule)"
         legend *= ", $(omp_schedule)"
@@ -863,64 +889,56 @@ function build_data_file_base_name(measure::MeasureParams,
         legend *= ", places: $(omp_places)"
     end
 
-    if length(measure.dimension) > 1
-        name *= "_$(dimension)D"
-        legend *= ", $(dimension)D"
-    end
+    return name, legend
+end
 
+
+function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
+        params::KokkosParams)
+    name, legend = build_data_file_base_name(measure, processes, distribution, params.threads, 
+                                             params.block_size, params.use_simd, params.ieee_bits, 
+                                             params.compiler, params.dimension, Kokkos)
+    name, legend = build_data_file_base_name_omp_params(name, legend, measure, params.omp_schedule, 
+                                                        params.omp_proc_bind, params.omp_places)
     return name * "_", legend
 end
 
 
-function build_data_file_base_name(measure::MeasureParams, 
-        processes::Int, distribution::String, 
-        threads::Int, omp_schedule::String, omp_proc_bind::String, omp_places::String,
-        use_simd::Int, ieee_bits::Int, 
-        compiler::Compiler, 
-        dimension::Int,
-        backend::Backend)
-    # Overload used by the C++'s backend
-    name, legend = build_data_file_base_name(measure, processes, distribution, threads, omp_schedule,
-                                             omp_proc_bind, omp_places, 0, use_simd, ieee_bits, 
-                                             compiler, dimension, backend)
+function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
+        params::CppParams)
+    name, legend = build_data_file_base_name(measure, processes, distribution, params.threads, 
+                                             0, params.use_simd, params.ieee_bits, 
+                                             params.compiler, params.dimension, CPP)
+    name, legend = build_data_file_base_name_omp_params(name, legend, measure, params.omp_schedule, 
+                                                        params.omp_proc_bind, params.omp_places)
     return name * "_", legend
 end
 
 
-function build_data_file_base_name(measure::MeasureParams, 
-        processes::Int, distribution::String, 
-        jl_places::String, jl_proc_bind::String,
-        threads::Int, block_size::Int, use_simd::Int, ieee_bits::Int, 
-        std_lib_threads::String, exclusive::Bool,
-        dimension::Int,
-        backend::Backend)
-    # Overload used by the Julia backend
-    name, legend = build_data_file_base_name(measure, processes, distribution, threads, block_size, 
-                                             use_simd, ieee_bits, GCC, backend)
+function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
+        params::JuliaParams)
+    name, legend = build_data_file_base_name(measure, processes, distribution, params.threads, 
+                                             params.block_size, params.use_simd, params.ieee_bits,
+                                             GCC, params.dimension, Julia)
 
     if length(measure.jl_proc_bind) > 1
-        name *= "_$(jl_proc_bind)"
-        legend *= ", bind: $(jl_proc_bind)"
+        name *= "_$(params.jl_proc_bind)"
+        legend *= ", bind: $(params.jl_proc_bind)"
     end
 
     if length(measure.jl_places) > 1
-        name *= "_$(jl_places)"
-        legend *= ", places: $(jl_places)"
+        name *= "_$(params.jl_places)"
+        legend *= ", places: $(params.jl_places)"
     end
 
     if length(measure.std_lib_threads) > 1
-        name *= "_std_th=$(std_lib_threads)"
-        legend *= ", std threads: $(std_lib_threads)"
+        name *= "_std_th=$(params.std_lib_threads)"
+        legend *= ", std threads: $(params.std_lib_threads)"
     end
     
     if length(measure.exclusive) > 1
-        name *= "_excl=$(exclusive)"
-        legend *= ", exclusive: $(exclusive)"
-    end
-
-    if length(measure.dimension) > 1
-        name *= "_$(dimension)D"
-        legend *= ", $(dimension)D"
+        name *= "_excl=$(params.exclusive)"
+        legend *= ", exclusive: $(params.exclusive)"
     end
 
     return name * "_", legend
@@ -944,8 +962,8 @@ function create_all_data_files_and_plot(measure::MeasureParams)
             end
 
             for parameters in parse_combinaisons(measure, backend)
-                base_file_name, legend_base = build_data_file_base_name(measure, processes, distribution, parameters..., backend)
-                dimension = parameters[end]
+                base_file_name, legend_base = build_data_file_base_name(measure, processes, distribution, parameters)
+                dimension = parameters.dimension
                 for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
                     data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting)
                     data_file_name = data_file_name_base * ".csv"
@@ -966,7 +984,8 @@ function create_all_data_files_and_plot(measure::MeasureParams)
 
     # Create the gnuplot script. It will then be run at each new data point
     open(measure.gnuplot_script, "w") do gnuplot_script
-        print(gnuplot_script, base_gnuplot_script_commands(measure.plot_file, measure.plot_title, measure.log_scale))
+        print(gnuplot_script, base_gnuplot_script_commands(measure.plot_file, measure.plot_title, 
+            measure.log_scale, measure.device == CPU ? "right" : "left"))
         plot_cmd = join(plot_commands, ", \\\n     ")
         println(gnuplot_script, plot_cmd)
     end
@@ -987,17 +1006,14 @@ function run_measure(measure::MeasureParams, inti_index::Int)
     # Therefore 'processes' and 'distribution' are fixed here. They are changed by an outer loop.
     ((processes, distribution), _) = iterate(build_inti_combinaisons(measure, inti_index))
 
-    prev_params = ()
+    prev_params = DummyParams()
+    exe_path = ""
 
     for backend in measure.backends
         for parameters in parse_combinaisons(measure, backend)
-            base_file_name, _ = build_data_file_base_name(measure, processes, distribution, parameters..., backend)
-            if backend == Julia
-                run_julia(measure, parameters..., base_file_name)
-            else
-                exe_path, prev_params = maybe_recompile(measure.device, parameters[end-4:end]..., backend, prev_params)
-                run_armon(measure, backend, parameters[1:4]..., parameters[end], exe_path, base_file_name)
-            end
+            base_file_name, _ = build_data_file_base_name(measure, processes, distribution, parameters)
+            exe_path, prev_params = maybe_recompile(measure.device, parameters, prev_params, exe_path)
+            run_backend(measure, parameters, exe_path, base_file_name)
         end
     end
 end
