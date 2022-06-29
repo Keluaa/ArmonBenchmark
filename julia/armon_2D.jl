@@ -23,6 +23,15 @@ end
 
 const device = use_ROCM ? ROCDevice() : CUDADevice()
 
+if use_ROCM
+    # Wait for the kernel to complete after its launch.
+    wait_d(event) = wait(event)
+else
+    # CUDA automatically detects dependencies between kernels, therefore waiting after each kernel launch is not needed.
+    # Furthermore, waiting actually greatly affects performance (~40%) for large numbers of cells.
+    wait_d(event) = nothing
+end
+
 
 export ArmonParameters, armon
 
@@ -93,6 +102,9 @@ mutable struct ArmonParameters{Flt_T}
     use_threading::Bool
     use_simd::Bool
     use_gpu::Bool
+
+    preserve_thread_ranges::Bool
+    threads_ranges::Vector{UnitRange{Int}}
 end
 
 
@@ -109,7 +121,8 @@ function ArmonParameters(;
         measure_time = true,
         use_ccall = false, use_threading = true, 
         use_simd = true, interleaving = false,
-        use_gpu = false
+        use_gpu = false,
+        preserve_thread_ranges = false
     )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
@@ -151,6 +164,9 @@ function ArmonParameters(;
     # Used only for indexing with the `@i` macro
     idx_row = row_length
     idx_col = 1
+
+    threads_ranges = Vector{UnitRange{Int}}(undef, Threads.nthreads())
+    fill!(threads_ranges, 1:0)
     
     return ArmonParameters{flt_type}(
         test, riemann, scheme,
@@ -166,7 +182,8 @@ function ArmonParameters(;
         silent, output_dir, output_file,
         write_output, write_ghosts, animation_step,
         measure_time,
-        use_ccall, use_threading, use_simd, use_gpu
+        use_ccall, use_threading, use_simd, use_gpu,
+        preserve_thread_ranges, threads_ranges
     )
 end
 
@@ -400,7 +417,29 @@ macro simd_threaded_loop(expr)
 
     return esc(quote
         if params.use_threading
-            if params.use_simd
+            if params.preserve_thread_ranges
+                __loop_range = $(loop_range)
+                __total_iter = length(__loop_range)
+                __num_threads = Threads.nthreads()
+                # Equivalent to __total_iter ÷ __num_threads
+                __batch = convert(Int, cld(__total_iter, __num_threads))::Int
+                __first_i = first(__loop_range)
+                __last_i = last(__loop_range)
+                __init_ranges = length(first(params.threads_ranges)) == 0
+                @batch minbatch=1 for _ = 1:__num_threads
+                    __i_thread = Threads.threadid()
+                    if __init_ranges
+                        __ideb = __first_i + (__i_thread - 1) * __batch
+                        __ifin = min(__ideb + __batch - 1, __last_i)
+                        params.threads_ranges[__i_thread] = __ideb:__ifin
+                    else
+                        __thread_range = params.threads_ranges[__i_thread]
+                        __ideb = max(__first_i, first(__thread_range))
+                        __ifin = min(__last_i, last(__thread_range))
+                    end
+                    @fastmath @inbounds @simd ivdep $(modified_loop_expr)
+                end
+            elseif params.use_simd
                 __loop_range = $(loop_range)
                 __total_iter = length(__loop_range)
                 __num_threads = Threads.nthreads()
@@ -833,7 +872,7 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
 
     if params.use_gpu
         gpu_acoustic!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, 
-            ndrange=length(ideb:last_i)) |> wait
+            ndrange=length(ideb:last_i)) |> wait_d
         return
     end
 
@@ -857,9 +896,9 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
         end
 
         gpu_acoustic!(ideb - 1, s, ustar_1, pstar_1, 
-            rho, u, pmat, cmat, ndrange=length(ideb:last_i)) |> wait
+            rho, u, pmat, cmat, ndrange=length(ideb:last_i)) |> wait_d
         gpu_acoustic_GAD_minmod!(ideb - 1, s, ustar, pstar, 
-            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx, ndrange=length(ideb:last_i)) |> wait
+            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx, ndrange=length(ideb:last_i)) |> wait_d
         return
     end
 
@@ -1013,14 +1052,14 @@ function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V
         gamma::T = 7/5
         if params.use_gpu
             gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait_d
         else
             perfectGasEOS!(params, data, gamma)
         end
     elseif test == :Bizarrium
         if params.use_gpu
             gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait
+                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait_d
         else
             BizarriumEOS!(params, data)
         end
@@ -1193,7 +1232,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}) whe
     if params.use_gpu
         gpu_boundary_conditions!(index_start, idx_row, idx_col, nx, ny, 
             u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=max(nx, ny)) |> wait
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=max(nx, ny)) |> wait_d
         return
     end
 
@@ -1265,10 +1304,10 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V},
         # array, then we reduce this array.
         if params.euler_projection
             gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask, 
-                ndrange=length(cmat)) |> wait
+                ndrange=length(cmat)) |> wait_d
             dt = reduce(min, tmp_rho)
         else
-            gpu_dtCFL_reduction_lagrange!(tmp_rho, cmat, domain_mask, ndrange=length(cmat)) |> wait
+            gpu_dtCFL_reduction_lagrange!(tmp_rho, cmat, domain_mask, ndrange=length(cmat)) |> wait_d
             dt = reduce(min, tmp_rho) * min(dx, dy)
         end
     elseif params.euler_projection
@@ -1333,10 +1372,10 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
 
     if params.use_gpu
         gpu_cell_update!(ideb - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
-            ndrange=length(ideb:ifin)) |> wait
+            ndrange=length(ideb:ifin)) |> wait_d
         if !params.euler_projection
             gpu_cell_update_lagrange!(ideb - 1, ifin, dt, s, x, ustar, 
-                ndrange=length(ideb:ifin)) |> wait
+                ndrange=length(ideb:ifin)) |> wait_d
         end
         return
     end
@@ -1378,16 +1417,16 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         gpu_first_order_euler_remap_1!(first(projection_range) - 1, dx, dt, s, 
             ustar, rho, umat, vmat, Emat, 
             tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask, 
-            ndrange=length(projection_range)) |> wait
+            ndrange=length(projection_range)) |> wait_d
 
         if transpose_dims
             gpu_first_order_euler_remap_2ᵀ!(first(projection_range) - 1, row_length, col_length,
                 rho, umat, vmat, Emat, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, 
-                ndrange=length(projection_range)) |> wait
+                ndrange=length(projection_range)) |> wait_d
         else
             gpu_first_order_euler_remap_2!(first(projection_range) - 1, rho, umat, vmat, Emat, 
                 tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, 
-                ndrange=length(projection_range)) |> wait
+                ndrange=length(projection_range)) |> wait_d
         end
         
         return
