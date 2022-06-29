@@ -34,6 +34,7 @@ gnuplot_script = ""
 gnuplot_hist_script = ""
 time_histogram = false
 flatten_time_dims = false
+repeats = 1
 
 
 dim_index = findfirst(x->x=="--dim", ARGS)
@@ -159,6 +160,9 @@ while i <= length(ARGS)
         block_size = parse(Int, ARGS[i+1])
         global i += 1
         ENV["GPU_BLOCK_SIZE"] = block_size
+    elseif arg == "--repeats"
+        global repeats = parse(Int, ARGS[i+1])
+        global i += 1
     elseif arg == "--data-file"
         global base_file_name = ARGS[i+1]
         global i += 1
@@ -235,8 +239,21 @@ else
 end
 
 function run_armon(params::ArmonParameters)
-    _, cells_per_sec, time_contrib = armon(params)
-    return cells_per_sec, time_contrib
+    _, total_cells_per_sec, total_time_contrib = armon(params)
+
+    for _ in 1:repeats-1
+        _, cells_per_sec, time_contrib = armon(params)
+
+        total_cells_per_sec += cells_per_sec
+
+        if dimension == 1
+            total_time_contrib = map((e, e′) -> (e.first => (e.second + e′.second)), total_time_contrib, time_contrib)
+        else
+            total_time_contrib = map.((e, e′) -> (e.first => (e.second + e′.second)), total_time_contrib, time_contrib)
+        end
+    end
+    
+    return total_cells_per_sec / repeats, total_time_contrib
 end
 
 
@@ -283,17 +300,14 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting
                 string(splitting), cells[1] * cells[2], cells[1], cells[2])
         end
 
-        cells_per_sec, time_contrib = -1., 0.
-        while cells_per_sec < 0
-            cells_per_sec, time_contrib = run_armon(build_params(test, cells; 
+        cells_per_sec, time_contrib = cells_per_sec, time_contrib = run_armon(
+            build_params(test, cells; 
                 ieee_bits, riemann, scheme, iterations, cfl, 
                 Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
                 maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
-                interleaving, use_gpu))
-            if cells_per_sec < 0
-                print(" (negative throughput, restarting...) ")
-            end
-        end
+                interleaving, use_gpu
+            )
+        )
  
         @printf("%.2g Giga cells/sec\n", cells_per_sec)
 

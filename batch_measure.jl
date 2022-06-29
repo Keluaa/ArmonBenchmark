@@ -41,6 +41,7 @@ mutable struct MeasureParams
 
     # Measurement params
     name::String
+    repeats::Int
     gnuplot_script::String
     plot_file::String
     log_scale::Bool
@@ -137,6 +138,7 @@ function parse_measure_params(file_line_parser)
         "--euler", "0"
     ]
     name = nothing
+    repeats = 1
     gnuplot_script = nothing
     plot_file = nothing
     log_scale = true
@@ -241,6 +243,8 @@ function parse_measure_params(file_line_parser)
             common_armon_params = split(value, ' ')
         elseif option == "name"
             name = value
+        elseif option == "repeats"
+            repeats = parse(Int, value)
         elseif option == "gnuplot"
             gnuplot_script = value
         elseif option == "plot"
@@ -299,7 +303,7 @@ function parse_measure_params(file_line_parser)
         use_std_lib_threads, jl_exclusive, jl_proc_bind, jl_places, 
         dimension, cells_list, domain_list, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
-        name, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
+        name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file)
 end
 
@@ -696,6 +700,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, _::String, bas
         "--threads-proc-bind", params.jl_proc_bind,
         "--data-file", base_file_name,
         "--gnuplot-script", measure.gnuplot_script,
+        "--repeats", measure.repeats,
         "--verbose", (measure.verbose ? 2 : 5),
         "--gnuplot-hist-script", measure.gnuplot_hist_script,
         "--time-histogram", measure.time_histogram
@@ -743,26 +748,33 @@ function get_run_cmd(exe_path::String, params::KokkosParams, armon_options::Vect
 end
 
 
-function run_and_parse_output(cmd::Cmd, verbose::Bool)
+function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int)
     if verbose
         println(cmd)
     end
 
-    output = read(cmd, String)
+    total_giga_cells_per_sec = 0
 
-    mega_cells_per_sec_raw = match(r"Cells/sec:\s*\K[0-9\.]+", output)
+    for _ in 1:repeats
+        output = read(cmd, String)
 
-    if isnothing(mega_cells_per_sec_raw)
-        println("Command failed, wrong output: ", cmd, "\nOutput:\n", output)
-        error("Wrong output")
-    elseif verbose
-        println(output)
+        mega_cells_per_sec_raw = match(r"Cells/sec:\s*\K[0-9\.]+", output)
+
+        if isnothing(mega_cells_per_sec_raw)
+            println("Command failed, wrong output: ", cmd, "\nOutput:\n", output)
+            error("Wrong output")
+        elseif verbose
+            println(output)
+        end
+
+        mega_cells_per_sec = parse(Float64, mega_cells_per_sec_raw.match)
+        giga_cells_per_sec = mega_cells_per_sec / 1e3
+        total_giga_cells_per_sec += giga_cells_per_sec
     end
 
-    mega_cells_per_sec = parse(Float64, mega_cells_per_sec_raw.match)
-    giga_cells_per_sec = mega_cells_per_sec / 1e3
+    total_giga_cells_per_sec /= repeats
 
-    return giga_cells_per_sec
+    return total_giga_cells_per_sec
 end
 
 
