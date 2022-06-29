@@ -906,7 +906,7 @@ function build_data_file_base_name(measure::MeasureParams,
         legend *= use_simd ? ", SIMD" : ""
     end
 
-    if length(measure.block_sizes) > 1
+    if length(measure.block_sizes) > 1 && block_size > 0  # The block size can be -1 for Kokkos
         name *= "_$(block_size)bs"
         legend *= ", $(block_size) Block size"
     end
