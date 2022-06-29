@@ -28,8 +28,6 @@ export ArmonParameters, armon
 
 
 # TODO LIST
-# make sure that the first touch is preserved in 2D
-# GPU dtCFL time
 # better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file

@@ -205,9 +205,9 @@ end
 println("Working in $(dimension)D")
 println("Loading...")
 if dimension == 1
-    include("armon_module_gpu.jl")
+    include("armon_1D.jl")
 else
-    include("armon_module_gpu_2D.jl")
+    include("armon_2D.jl")
 end
 using .Armon
 

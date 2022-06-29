@@ -11,7 +11,7 @@ else
     function reset_nan_flag() end
 end
 
-include("armon_module_gpu.jl")
+include("armon_1D.jl")
 
 
 function disp(params, label, array)

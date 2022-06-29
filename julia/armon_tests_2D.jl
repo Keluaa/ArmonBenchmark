@@ -1,7 +1,7 @@
 
 using Test
 
-include("armon_module_gpu_2D.jl")
+include("armon_2D.jl")
 using .Armon
 
 
