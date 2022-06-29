@@ -1121,13 +1121,12 @@ function main()
 
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
-    for (inti_index, measure) in Iterators.drop(enumerate(measures), start_at)
+    for (i, measure) in Iterators.drop(enumerate(measures), start_at - 1)
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
-
-        inti_index -= 1
 
         # Create the files and plot script once at the beginning
         create_all_data_files_and_plot(measure)
+        inti_index = 0
 
         # For each 'number of processes' and 'threads distribution' combinaison, create a new job
         for (processes, distribution) in build_inti_combinaisons(measure, inti_index)
