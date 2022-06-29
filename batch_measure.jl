@@ -103,7 +103,7 @@ set key left top
 set style fill solid 1.00 border 0
 plot """
 
-gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(replace(legend_title, '_' => "\\\\_"))'"
+gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(replace(legend_title, '_' => "\\_"))'"
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
 
 function parse_measure_params(file_line_parser)    
@@ -329,6 +329,8 @@ function parse_arguments()
     measure_index = 0
     inti_index = 0
 
+    node_overrides = Dict{String, String}()
+
     measures::Vector{MeasureParams} = []
 
     for (i, arg) in enumerate(ARGS)
@@ -340,14 +342,30 @@ function parse_arguments()
             # Not a number
         end
 
-        # Measure file
-        script_file = open(arg, "r")
-        append!(measures, parse_measure_script_file(script_file, arg))
-        close(script_file)
+        if (startswith(arg, "--"))
+            # Batch parameter
+            if (startswith(arg, "--override-node="))
+                node, replacement_node = split(split(arg, '=')[2], ',')
+                node_overrides[node] = replacement_node
+            else
+                error("Wrong batch option: " * arg)
+            end
+        else
+            # Measure file
+            script_file = open(arg, "r")
+            append!(measures, parse_measure_script_file(script_file, arg))
+            close(script_file)
+        end
     end
 
     if end_of_file_list ≠ 0
         inti_index = parse(Int, ARGS[end_of_file_list + 1])
+    end
+
+    for (node, replacement_node) in node_overrides
+        for measure in measures
+            measure.node == node && (measure.node = replacement_node)
+        end
     end
 
     return measures, measure_index, inti_index
@@ -720,7 +738,7 @@ function get_run_cmd(exe_path::String, params::KokkosParams, armon_options::Vect
     ENV["OMP_PROC_BIND"] = params.omp_proc_bind
     ENV["OMP_PLACES"] = params.omp_places
     args = "--kokkos-threads=$(params.threads) $(join(string.(armon_options), ' '))"
-    cmd = Cmd(`make $(base_make_options) $(exe_path) args=\"$(args)\"`, dir=kokkos_make_dir)
+    cmd = Cmd(`make $(base_make_options) dim=$(params.dimension) $(exe_path) args=\"$(args)\"`, dir=kokkos_make_dir)
     return cmd
 end
 
@@ -774,24 +792,38 @@ function run_backend(measure::MeasureParams, params::Union{CppParams, KokkosPara
         data_file_name *= ".csv"
 
         for cells in cells_list
-            cells = cells[1]
-
             armon_options = [
                 "-t", test,
-                "--cells", cells
+                "--cells"
             ]
+
+            if params.dimension == 1
+                push!(armon_options, string(cells[1]))
+            else
+                push!(armon_options, join(cells, ','))
+                push!(armon_options, "--transpose", string(Int(transpose_dims)), "--splitting", axis_splitting)
+            end
+            
             append!(armon_options, armon_base_options)
             append!(armon_options, measure.common_armon_params)
     
             # Do the measurement
             cmd = get_run_cmd(exe_path, params, armon_options)
-            @printf(" - %s, %-10g cells: ", test, cells)
+            
+            if params.dimension == 1
+                @printf(" - %s, %10g cells: ", test, cells[1])
+            else
+                @printf(" - %-4s %-14s %10g cells (%5gx%-5g): ",
+                    test * (transpose_dims ? "ᵀ" : ""),
+                    axis_splitting, prod(cells), cells[1], cells[2])
+            end
+
             cells_throughput = run_and_parse_output(cmd, measure.verbose)
             @printf("%.2f Giga cells/sec\n", cells_throughput)
     
             # Append the result to the output file
             open(data_file_name, "a") do file
-                println(file, cells, ", ", cells_throughput)
+                println(file, prod(cells), ", ", cells_throughput)
             end
 
             # Update the plot
@@ -1060,6 +1092,8 @@ end
 
 function main()
     measures, measure_index, inti_index = parse_arguments()
+
+    Base.exit_on_sigint(false) # To be able to properly handle Crtl-C
     
     if measure_index != 0
         # Sub loop, running inside of a compute node
@@ -1099,7 +1133,18 @@ function main()
                 cmd = inti_cmd(inti_options, i, inti_index)
                 println("Starting INTI job: ", cmd)
             end
-            run(cmd)
+
+            try
+                run(cmd)
+            catch e
+                if isa(e, InterruptException)
+                    # The user pressed Crtl-C
+                    println("Interrupted at $(i)/$(length(measures))")
+                    return
+                else
+                    rethrow(e)
+                end
+            end
             inti_index += 1
         end
     end
