@@ -332,6 +332,7 @@ function parse_arguments()
     end_of_file_list = 0
     measure_index = 0
     inti_index = 0
+    start_at = 0
 
     node_overrides = Dict{String, String}()
 
@@ -351,6 +352,9 @@ function parse_arguments()
             if (startswith(arg, "--override-node="))
                 node, replacement_node = split(split(arg, '=')[2], ',')
                 node_overrides[node] = replacement_node
+            elseif (startswith(arg, "--startat="))
+                value = split(arg, '=')[2]
+                start_at = parse(Int, value)
             else
                 error("Wrong batch option: " * arg)
             end
@@ -372,7 +376,7 @@ function parse_arguments()
         end
     end
 
-    return measures, measure_index, inti_index
+    return measures, measure_index, inti_index, start_at
 end
 
 
@@ -830,7 +834,7 @@ function run_backend(measure::MeasureParams, params::Union{CppParams, KokkosPara
                     axis_splitting, prod(cells), cells[1], cells[2])
             end
 
-            cells_throughput = run_and_parse_output(cmd, measure.verbose)
+            cells_throughput = run_and_parse_output(cmd, measure.verbose, measure.repeats)
             @printf("%.2f Giga cells/sec\n", cells_throughput)
     
             # Append the result to the output file
@@ -1103,7 +1107,7 @@ end
 
 
 function main()
-    measures, measure_index, inti_index = parse_arguments()
+    measures, measure_index, inti_index, start_at = parse_arguments()
 
     Base.exit_on_sigint(false) # To be able to properly handle Crtl-C
     
@@ -1117,12 +1121,13 @@ function main()
 
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
-    for (i, measure) in enumerate(measures)
+    for (inti_index, measure) in Iterators.drop(enumerate(measures), start_at)
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
+
+        inti_index -= 1
 
         # Create the files and plot script once at the beginning
         create_all_data_files_and_plot(measure)
-        inti_index = 0
 
         # For each 'number of processes' and 'threads distribution' combinaison, create a new job
         for (processes, distribution) in build_inti_combinaisons(measure, inti_index)
