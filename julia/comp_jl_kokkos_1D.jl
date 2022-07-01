@@ -2,7 +2,6 @@
 using Printf
 using PrettyTables
 using Libdl
-using Debugger
 
 
 const enable_NaN_tracking = false

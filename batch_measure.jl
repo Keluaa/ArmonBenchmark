@@ -56,7 +56,6 @@ end
 
 no_inti_cmd(measure_index, inti_index) = `julia $(PROGRAM_FILE) $(ARGS) $(measure_index) $(inti_index)`
 inti_cmd(options, measure_index, inti_index) = `ccc_mprun $(options) julia $(PROGRAM_FILE) $(ARGS) $(measure_index) $(inti_index)`
-gnuplot_cmd(plot_file) = `gnuplot $(plot_file)`
 
 julia_options = ["-O3", "--check-bounds=no"]
 armon_base_options = [
@@ -1130,8 +1129,6 @@ function main()
 
         # For each 'number of processes' and 'threads distribution' combinaison, create a new job
         for (processes, distribution) in build_inti_combinaisons(measure, inti_index)
-            processes == 1 || error("Running multiple processes at once is not yet implemented")  # TODO
-
             if isempty(measure.node)
                 println("Running outside of INTI: cannot control processes count and distribution type")
                 cmd = no_inti_cmd(i, inti_index)

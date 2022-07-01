@@ -6,6 +6,7 @@ include("omp_simili.jl")
 scheme = :GAD_minmod
 riemann = :acoustic
 iterations = 4
+nghost = 2
 cfl = 0.6
 Dt = 0.
 maxtime = 0.0
@@ -28,6 +29,8 @@ transpose_dims = []
 axis_splitting = []
 tests = []
 cells_list = []
+
+use_MPI = false
 
 base_file_name = ""
 gnuplot_script = ""
@@ -98,6 +101,9 @@ while i <= length(ARGS)
     elseif arg == "--cst-dt"
         global cst_dt = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--nghost"
+        global nghost = parse(Int, ARGS[i+1])
+        global i += 1
 
     # 1D only params
     elseif arg == "--iterations"
@@ -141,6 +147,11 @@ while i <= length(ARGS)
             end
             global cells_list = domains_list_t
         end
+        global i += 1
+    
+    # MPI params
+    elseif arg == "--use-mpi"
+        global use_MPI = parse(Bool, ARGS[i+1])
         global i += 1
 
     # Additionnal params
@@ -197,19 +208,39 @@ while i <= length(ARGS)
 end
 
 
-if !use_gpu
-    omp_bind_threads(threads_places, threads_proc_bind)
-end
+if use_MPI
+    using MPI
+    MPI.Init()
+    is_root = MPI.Comm_rank(MPI.COMM_WORLD) == 0
+    if is_root
+        println("Using MPI with $(MPI.Comm_size(MPI.COMM_WORLD)) processes")
+        println("Loading...")
+    end
 
-
-println("Working in $(dimension)D")
-println("Loading...")
-if dimension == 1
-    include("armon_1D.jl")
+    if dimension == 1
+        include("armon_1D_MPI.jl")
+    else
+        # include("armon_2D_MPI.jl")
+        error("2D MPI NYI")
+    end
 else
-    include("armon_2D.jl")
+    println("Loading...")
+
+    if dimension == 1
+        include("armon_1D.jl")
+    else
+        include("armon_2D.jl")
+    end
+    is_root = true
 end
 using .Armon
+
+
+if !use_gpu
+    # TODO : make sure that threads of different processes but on the same node don't pin their threads on the same cores
+    is_root && @warn "Thread pinning might be problematic with MPI"
+    omp_bind_threads(threads_places, threads_proc_bind)
+end
 
 
 if dimension == 1
@@ -220,7 +251,7 @@ if dimension == 1
             ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
             axis_splitting, maxtime, maxcycle, silent, write_output, 
             use_ccall, use_threading, use_simd, interleaving, use_gpu)
-        return ArmonParameters(; ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, 
+        return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
             test=test, nbcell=cells,
             euler_projection, maxtime, maxcycle, silent, write_output, 
             use_ccall, use_threading, use_simd, interleaving, use_gpu)
@@ -230,7 +261,7 @@ else
             ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
             axis_splitting, maxtime, maxcycle, silent, write_output, 
             use_ccall, use_threading, use_simd, interleaving, use_gpu)
-        return ArmonParameters(; ieee_bits, riemann, scheme, cfl, Dt, cst_dt, 
+        return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
             test=test, nx=domain[1], ny=domain[2],
             euler_projection, transpose_dims, axis_splitting, 
             maxtime, maxcycle, silent, write_output, 
@@ -238,26 +269,112 @@ else
     end
 end
 
+
+function merge_time_contribution(time_contrib_1, time_contrib_2)
+    if isnothing(time_contrib_1)
+        return time_contrib_2
+    elseif isnothing(time_contrib_2)
+        return time_contrib_1
+    end
+
+    if dimension == 1
+        return map((e, f) -> (e.first => (e.second + f.second)), time_contrib_1, time_contrib_2)
+    else
+        return map.((e, f) -> (e.first => (e.second + f.second)), time_contrib_1, time_contrib_2)
+    end
+end
+
+
 function run_armon(params::ArmonParameters)
-    _, total_cells_per_sec, total_time_contrib = armon(params)
+    total_cells_per_sec = 0
+    total_time_contrib = nothing
 
-    for _ in 1:repeats-1
+    for _ in 1:repeats
         _, cells_per_sec, time_contrib = armon(params)
-
         total_cells_per_sec += cells_per_sec
-
-        if dimension == 1
-            total_time_contrib = map((e, e′) -> (e.first => (e.second + e′.second)), total_time_contrib, time_contrib)
-        else
-            total_time_contrib = map.((e, e′) -> (e.first => (e.second + e′.second)), total_time_contrib, time_contrib)
-        end
+        total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
     end
     
     return total_cells_per_sec / repeats, total_time_contrib
 end
 
 
-println("Compiling...")
+function do_measure(data_file_name, test, cells, transpose, splitting)
+    params = build_params(test, cells; 
+        ieee_bits, riemann, scheme, iterations, cfl, 
+        Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
+        maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
+        interleaving, use_gpu
+    )
+
+    if dimension == 1
+        @printf(" - %s, %10g cells: ", test, cells)
+    else
+        @printf(" - %-4s %-14s %10g cells (%5gx%-5g): ", 
+            string(test) * (transpose ? "ᵀ" : ""),
+            string(splitting), cells[1] * cells[2], cells[1], cells[2])
+    end
+
+    cells_per_sec, time_contrib = run_armon(params)
+
+    @printf("%.2g Giga cells/sec\n", cells_per_sec)
+
+    # Append the result to the data file
+    open(data_file_name, "a") do data_file
+        if dimension == 1
+            println(data_file, cells, ", ", cells_per_sec)
+        else
+            println(data_file, cells[1] * cells[2], ", ", cells_per_sec)
+        end
+    end
+
+    return time_contrib
+end
+
+
+function do_measure_MPI(data_file_name, test, cells, transpose, splitting)
+    if is_root
+        if dimension == 1
+            @printf(" - %s, %10g cells: ", test, cells)
+        else
+            @printf(" - %-4s %-14s %10g cells (%5gx%-5g): ", 
+                string(test) * (transpose ? "ᵀ" : ""),
+                string(splitting), cells[1] * cells[2], cells[1], cells[2])
+        end
+    end
+
+    cells_per_sec, time_contrib = run_armon(build_params(test, cells; 
+        ieee_bits, riemann, scheme, iterations, cfl, 
+        Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
+        maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
+        interleaving, use_gpu
+    ))
+
+    is_root && @printf("%.2g Giga cells/sec\n", cells_per_sec)
+
+    # Merge the results of all processes
+    cells_per_sec = MPI.Reduce(cells_per_sec, MPI.Op(+, typeof(cells_per_sec)), 0, MPI.COMM_WORLD)
+
+    # Merge the time distribution of all processes
+    # TODO
+    #time_contrib = MPI.Reduce(time_contrib, MPI.Op(merge_time_contribution; iscommutative=true), 0, MPI.COMM_WORLD)
+
+    if is_root
+        # Append the result to the data file
+        open(data_file_name, "a") do data_file
+            if dimension == 1
+                println(data_file, cells, ", ", cells_per_sec)
+            else
+                println(data_file, cells[1] * cells[2], ", ", cells_per_sec)
+            end
+        end
+    end
+
+    return time_contrib
+end
+
+
+is_root && println("Compiling...")
 for test in tests, transpose in transpose_dims
     run_armon(build_params(test, dimension == 1 ? 10000 : (10, 10);
         ieee_bits, riemann, scheme, iterations, cfl, 
@@ -292,59 +409,27 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting
     total_time_contrib = nothing
 
     for cells in cells_list
-        if dimension == 1
-            @printf(" - %s, %10g cells: ", test, cells)
+        if use_MPI
+            time_contrib = do_measure_MPI(data_file_name, test, cells, transpose, splitting)
         else
-            @printf(" - %-4s %-14s %10g cells (%5gx%-5g): ", 
-                string(test) * (transpose ? "ᵀ" : ""),
-                string(splitting), cells[1] * cells[2], cells[1], cells[2])
+            time_contrib = do_measure(data_file_name, test, cells, transpose, splitting)
         end
 
-        cells_per_sec, time_contrib = cells_per_sec, time_contrib = run_armon(
-            build_params(test, cells; 
-                ieee_bits, riemann, scheme, iterations, cfl, 
-                Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
-                maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
-                interleaving, use_gpu
-            )
-        )
- 
-        @printf("%.2g Giga cells/sec\n", cells_per_sec)
+        if is_root
+            total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
 
-        # Append the result to the data file
-        open(data_file_name, "a") do data_file
-            if dimension == 1
-                println(data_file, cells, ", ", cells_per_sec)
-            else
-                println(data_file, cells[1] * cells[2], ", ", cells_per_sec)
-            end
-        end
-
-        if !isempty(gnuplot_script)
-            # We redirect the output of gnuplot to null so that there is no warning messages displayed
-            run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
-        end
-
-        if isnothing(total_time_contrib)
-            total_time_contrib = time_contrib
-        else
-            if dimension == 1
-                total_time_contrib = map((e, e′) -> (e.first => (e.second + e′.second)), total_time_contrib, time_contrib)
-            else
-                total_time_contrib = map.((e, e′) -> (e.first => (e.second + e′.second)), total_time_contrib, time_contrib)
+            if !isempty(gnuplot_script)
+                # We redirect the output of gnuplot to null so that there is no warning messages displayed
+                run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
             end
         end
     end
 
-    if time_histogram
+    if time_histogram && is_root
         if flatten_time_dims
             flat_time_contrib = nothing
             for axis_time_contrib in total_time_contrib
-                if isnothing(flat_time_contrib)
-                    flat_time_contrib = axis_time_contrib
-                else
-                    flat_time_contrib = map((e, e′) -> (e.first => (e.second + e′.second)), flat_time_contrib, axis_time_contrib)
-                end
+                flat_time_contrib = merge_time_contribution(flat_time_contrib, axis_time_contrib)
             end
             total_time_contrib = flat_time_contrib
         elseif dimension == 2
