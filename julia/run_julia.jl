@@ -349,23 +349,22 @@ function do_measure_MPI(data_file_name, test, cells, transpose, splitting)
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu
     ))
-
-    is_root && @printf("%.2g Giga cells/sec\n", cells_per_sec)
-
-    # Merge the results of all processes
-    cells_per_sec = MPI.Reduce(cells_per_sec, MPI.Op(+, typeof(cells_per_sec)), 0, MPI.COMM_WORLD)
+    
+    # Merge the cells throughput
+    total_cells_per_sec = MPI.Reduce(cells_per_sec, MPI.Op(+, typeof(cells_per_sec)), 0, MPI.COMM_WORLD)
 
     # Merge the time distribution of all processes
     # TODO
     #time_contrib = MPI.Reduce(time_contrib, MPI.Op(merge_time_contribution; iscommutative=true), 0, MPI.COMM_WORLD)
 
     if is_root
+        @printf("%.2g Giga cells/sec\n", total_cells_per_sec)
         # Append the result to the data file
         open(data_file_name, "a") do data_file
             if dimension == 1
-                println(data_file, cells, ", ", cells_per_sec)
+                println(data_file, cells, ", ", total_cells_per_sec)
             else
-                println(data_file, cells[1] * cells[2], ", ", cells_per_sec)
+                println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec)
             end
         end
     end

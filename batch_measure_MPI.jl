@@ -62,15 +62,13 @@ end
 no_inti_cmd(armon_options, nprocs) = `mpiexecjl -n $(nprocs) $(armon_options)`
 inti_cmd(armon_options, inti_options) = `ccc_mprun $(inti_options) $(armon_options)`
 
-julia_options = ["-O3", "--check-bounds=no"]
+julia_options = ["-O3", "--check-bounds=no", "--project"]
 armon_base_options = [
     "--write-output", "0",
     "--verbose", "2"
 ]
 min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
 max_inti_cores = 128  # Maximum number of cores in a node
-
-max_cells_for_one_thread = 1e6  # Serial programs can take too much time for large number of cells
 
 required_modules = ["cuda", "rocm", "hwloc"]  # Modules required
 
@@ -401,11 +399,6 @@ function run_backend(measure::MeasureParams, params::JuliaParams, base_file_name
         cells_list = measure.domain_list
     end
 
-    if params.threads == 1
-        # Limit the number of cells
-        cells_list = filter(x -> prod(x) < max_cells_for_one_thread, cells_list)
-    end
-
     if params.dimension == 1
         cells_list_str = join(cells_list, ',')
     else
@@ -531,6 +524,7 @@ end
 function build_inti_options(measure::MeasureParams, inti_params::IntiParams)
     return [
         "-p", measure.node,
+        "-N", "1", # TODO
         "-n", inti_params.processes,                   # Number of processes
         "-E", "-m block:$(inti_params.distribution)",  # Threads distribution
         # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to

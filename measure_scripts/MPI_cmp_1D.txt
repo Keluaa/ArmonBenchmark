@@ -1,0 +1,14 @@
+name=MPI_cmp_1D_1thread_8nodes
+device=CPU
+node=a100
+processes=64,128,256
+threads=1
+dim=1
+jl_places=cores
+jl_proc_bind=false
+cells=200e3,400e3,800e3,1e6,2e6,5e6,10e6,50e6,100e6,200e6,400e6
+tests=Sod
+armon=--euler 1 --cycle 20
+log_scale=true
+title=1D Eulerian 2nd-order hydro with sub-domains, 1 thread
+max_time=5400
