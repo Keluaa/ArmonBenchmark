@@ -11,6 +11,7 @@ mutable struct MeasureParams
     node::String
     distributions::Vector{String}
     processes::Vector{Int}
+    node_count::Vector{Int}
     max_time::Int
     use_MPI::Bool
 
@@ -54,6 +55,7 @@ end
 struct IntiParams
     processes::Int
     distribution::String
+    node_count::Int
 end
 
 
@@ -137,6 +139,7 @@ function parse_measure_params(file_line_parser)
     node = "a100"
     distributions = ["block"]
     processes = [1]
+    node_count = [1]
     max_time = 3600  # 1h
     threads = [4]
     use_simd = [true]
@@ -195,6 +198,8 @@ function parse_measure_params(file_line_parser)
             distributions = split(value, ',')
         elseif option == "processes"
             processes = parse.(Int, split(value, ','))
+        elseif option == "node_count"
+            node_count = parse.(Int, split(value, ','))
         elseif option == "max_time"
             max_time = parse(Int, value)
         elseif option == "threads"
@@ -286,7 +291,7 @@ function parse_measure_params(file_line_parser)
     gnuplot_MPI_script = plot_scripts_dir * name * "_MPI_time.plot"
     time_MPI_plot_file = plots_dir * name * "_MPI_time.pdf"
 
-    return MeasureParams(device, node, distributions, processes, max_time, use_MPI,
+    return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         threads, use_simd, jl_proc_bind, jl_places, 
         dimension, cells_list, domain_list, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
@@ -358,7 +363,8 @@ function build_inti_combinaisons(measure::MeasureParams)
         params->IntiParams(params...),
         Iterators.product(
             measure.processes,
-            measure.distributions
+            measure.distributions,
+            measure.node_count
         )
     )
 end
@@ -568,7 +574,7 @@ end
 function build_inti_options(measure::MeasureParams, inti_params::IntiParams)
     return [
         "-p", measure.node,
-        "-N", "1", # TODO
+        "-N", inti_params.node_count,                  # Number of nodes to distribute the processes to
         "-n", inti_params.processes,                   # Number of processes
         "-E", "-m block:$(inti_params.distribution)",  # Threads distribution
         # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to
