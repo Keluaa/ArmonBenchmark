@@ -4,7 +4,7 @@ using Dates
 
 @enum Device CPU CUDA ROCM
 @enum Backend CPP Kokkos Julia
-@enum Compiler GCC Clang ICC
+@enum Compiler GCC Clang ICC DPCPP
 
 
 mutable struct MeasureParams
@@ -208,6 +208,8 @@ function parse_measure_params(file_line_parser)
                     push!(compilers, Clang)
                 elseif compiler == "icc"
                     push!(compilers, ICC)
+                elseif compiler == "dpcpp"
+                    push!(compilers, DPCPP)
                 else
                     error("Unknown compiler: $(compiler), at line $(i)")
                 end
@@ -452,7 +454,6 @@ needs_recompilation(params::BackendParams, prev_params::BackendParams)::Bool = t
 
 function needs_recompilation(params::CppParams, prev_params::CppParams)::Bool
     return params.dimension != prev_params.dimension ||
-           params.block_size != prev_params.block_size ||
            params.use_simd != prev_params.use_simd ||
            params.ieee_bits != prev_params.ieee_bits ||
            params.compiler != prev_params.compiler
@@ -491,10 +492,10 @@ function parse_combinaisons(measure::MeasureParams, backend::Backend)
                 measure.omp_schedule,
                 measure.omp_proc_bind,
                 measure.omp_places,
+                measure.dimension,
                 measure.use_simd,
                 measure.ieee_bits,
-                measure.compilers,
-                measure.dimension
+                measure.compilers
             )
         )
     elseif backend == Kokkos
@@ -569,13 +570,16 @@ function recompile_backend(_, params::CppParams)
         "use_single_precision=$(params.ieee_bits == 32)",
     ]
 
-    print("Recompiling the C++ code with: block_size=$(params.block_size), ieee_bits=$(params.ieee_bits), use_simd=$(params.use_simd), ")
+    print("Recompiling the C++ code with: ieee_bits=$(params.ieee_bits), use_simd=$(params.use_simd), ")
     if params.compiler == GCC
         println("using GCC")
         # the makefile uses gcc by default
     elseif params.compiler == Clang
         println("using Clang")
         push!(make_options, "use_clang=1")
+    elseif params.compiler == DPCPP
+        println("using DPCPP")
+        push!(make_options, "use_dpcpp=1")
     elseif params.compiler == ICC
         println("using ICC")
         push!(make_options, "use_icc=1")

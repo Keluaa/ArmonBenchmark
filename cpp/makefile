@@ -10,6 +10,9 @@ ifdef use_clang
 else ifdef use_icc
 	C = icc
 	CXX = icpc
+else ifdef use_dpcpp
+	C = dpcpp
+	CXX = dpcpp
 else
 	C = gcc
 	CXX = g++
