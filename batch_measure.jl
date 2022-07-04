@@ -103,12 +103,13 @@ set key left top
 set style fill solid 1.00 border 0
 plot """
 
-gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(replace(legend_title, '_' => "\\_"))'"
+gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
+
 
 function parse_measure_params(file_line_parser)    
     device = CPU
-    node = "a100-bxi"
+    node = "a100"
     distributions = ["block"]
     processes = [1]
     max_time = 3600  # 1h
@@ -1017,6 +1018,9 @@ function create_all_data_files_and_plot(measure::MeasureParams)
                 dimension = parameters.dimension
                 for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
                     data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting)
+                    
+                    legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
+
                     data_file_name = data_file_name_base * ".csv"
                     open(data_file_name, "w") do _ end  # Create/Clear the file
                     plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
@@ -1024,7 +1028,7 @@ function create_all_data_files_and_plot(measure::MeasureParams)
 
                     if measure.time_histogram
                         hist_file_name = data_file_name_base * "_hist.csv"
-                        open(data_file_name, "w") do _ end  # Create/Clear the file
+                        open(hist_file_name, "w") do _ end  # Create/Clear the file
                         plot_cmd = gnuplot_hist_plot_command(hist_file_name, legend, point_type)
                         push!(hist_commands, plot_cmd)
                     end

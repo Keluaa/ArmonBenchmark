@@ -35,8 +35,10 @@ use_MPI = false
 base_file_name = ""
 gnuplot_script = ""
 gnuplot_hist_script = ""
+gnuplot_MPI_script = ""
 time_histogram = false
 flatten_time_dims = false
+time_MPI_graph = false
 repeats = 1
 
 
@@ -186,6 +188,12 @@ while i <= length(ARGS)
     elseif arg == "--time-histogram"
         global time_histogram = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--time-MPI-graph"
+        global time_MPI_graph = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--gnuplot-MPI-script"
+        global gnuplot_MPI_script = ARGS[i+1]
+        global i += 1
     elseif arg == "--use-std-threads"
         use_std_threads = parse(Bool, ARGS[i+1])
         if use_std_threads
@@ -332,7 +340,12 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
 end
 
 
-function do_measure_MPI(data_file_name, test, cells, transpose, splitting)
+function test_red(a::Vector{Float64}, b::Vector{Float64})::Vector{Float64}
+    return a .+ b
+end
+
+
+function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, splitting)
     if is_root
         if dimension == 1
             @printf(" - %s, %10g cells: ", test, cells)
@@ -350,14 +363,22 @@ function do_measure_MPI(data_file_name, test, cells, transpose, splitting)
         interleaving, use_gpu
     ))
     
-    # Merge the cells throughput
-    total_cells_per_sec = MPI.Reduce(cells_per_sec, MPI.Op(+, typeof(cells_per_sec)), 0, MPI.COMM_WORLD)
-
-    # Merge the time distribution of all processes
-    # TODO
-    #time_contrib = MPI.Reduce(time_contrib, MPI.Op(merge_time_contribution; iscommutative=true), 0, MPI.COMM_WORLD)
+    # Merge the cells throughput and the time distribution of all processes in one reduction
+    # Since 'time_contrib' is an array of pairs, it is not a bits type. We first convert the values
+    # to an array of floats, and then rebuild the array of pairs using the one of the root process.
+    if dimension == 1
+        time_contrib_vals = Vector{Float64}(undef, length(time_contrib)+1)
+        time_contrib_vals[1:end-1] .= last.(time_contrib)
+    else
+        time_contrib_vals = Vector{Float64}(undef, sum(length.(time_contrib))+1)
+        time_contrib_vals[1:end-1] .= last.(Iterators.flatten(time_contrib))
+    end
+    time_contrib_vals[end] = cells_per_sec
+    merged_time_contrib_vals = MPI.Reduce(time_contrib_vals, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
 
     if is_root
+        total_cells_per_sec = merged_time_contrib_vals[end]
+
         @printf("%.2g Giga cells/sec\n", total_cells_per_sec)
         # Append the result to the data file
         open(data_file_name, "a") do data_file
@@ -365,6 +386,58 @@ function do_measure_MPI(data_file_name, test, cells, transpose, splitting)
                 println(data_file, cells, ", ", total_cells_per_sec)
             else
                 println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec)
+            end
+        end
+        
+        # Unflatten the values
+        if dimension == 1
+            for ((i, key_val_pair), time_val) in zip(enumerate(time_contrib), merged_time_contrib_vals)
+                time_contrib[i] = key_val_pair.first => key_val_pair.second + time_val
+            end
+        else
+            i = 1
+            for (_, axis_time_contrib) in time_contrib
+                for (i, key_val_pair) in enumerate(axis_time_contrib)
+                    axis_time_contrib[i] = key_val_pair.first => key_val_pair.second + merged_time_contrib_vals[i]
+                    i += 1
+                end
+            end
+        end
+
+        if time_MPI_graph
+            # Sum the time of each MPI communications. Time positions with a label ending with '_MPI'
+            # count as time spent in MPI.
+            total_time = 0.
+            total_MPI_time = 0.
+            if dimension == 1
+                for (key, key_time) in time_contrib
+                    total_time += key_time
+                    if endswith(key, "_MPI")
+                        total_MPI_time += key_time
+                    end
+                end
+            else
+                for (_, axis_time_contrib) in time_contrib
+                    for (key, key_time) in axis_time_contrib
+                        total_time += key_time
+                        if endswith(key, "_MPI")
+                            total_MPI_time += key_time
+                        end
+                    end
+                end
+            end
+
+            # ns to sec
+            total_time /= 1e9
+            total_MPI_time /= 1e9
+
+            # Append the result to the data file
+            open(comm_file_name, "a") do data_file
+                if dimension == 1
+                    println(data_file, cells, ", ", total_MPI_time, ", ", total_time)
+                else
+                    println(data_file, cells[1] * cells[2], ", ", total_MPI_time, ", ", total_time)
+                end
             end
         end
     end
@@ -387,29 +460,28 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting
     if dimension == 1
         data_file_name = base_file_name * string(test) * ".csv"
         hist_file_name = base_file_name * string(test) * "_hist.csv"
+        comm_file_name = base_file_name * string(test) * "_MPI_time.csv"
     else
         data_file_name = base_file_name * string(test)
-        hist_file_name = base_file_name * string(test) 
 
         if length(transpose_dims) > 1
             data_file_name *= transpose ? "_transposed" : ""
-            hist_file_name *= transpose ? "_transposed" : ""
         end
 
         if length(axis_splitting) > 1
             data_file_name *= "_" * string(splitting)
-            hist_file_name *= "_" * string(splitting)
         end
 
+        hist_file_name = data_file_name * "_hist.csv"
+        comm_file_name = data_file_name * "_MPI_time.csv"
         data_file_name *= ".csv"
-        hist_file_name *= "_hist.csv"
     end
 
     total_time_contrib = nothing
 
     for cells in cells_list
         if use_MPI
-            time_contrib = do_measure_MPI(data_file_name, test, cells, transpose, splitting)
+            time_contrib = do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, splitting)
         else
             time_contrib = do_measure(data_file_name, test, cells, transpose, splitting)
         end
@@ -420,6 +492,11 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting
             if !isempty(gnuplot_script)
                 # We redirect the output of gnuplot to null so that there is no warning messages displayed
                 run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
+            end
+
+            if !isempty(gnuplot_MPI_script)
+                # Same for the MPI time graph
+                run(pipeline(`gnuplot $(gnuplot_MPI_script)`, stdout=devnull, stderr=devnull))
             end
         end
     end
@@ -432,7 +509,7 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting
             end
             total_time_contrib = flat_time_contrib
         elseif dimension == 2
-            # Append the axis name at the beginning of each label and merge into a single list
+            # Append the axis name at the beginning of each label and merge into a single list
             axes = ["X ", "Y "]
             merged_time_contrib = []
             for (axis, axis_time_contrib) in enumerate(total_time_contrib)

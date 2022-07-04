@@ -7,3 +7,6 @@ plot_scripts
 
 output*
 *.gif
+
+Manifest.toml
+LocalPreferences.toml

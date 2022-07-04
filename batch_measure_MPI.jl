@@ -37,10 +37,17 @@ mutable struct MeasureParams
     log_scale::Bool
     plot_title::String
     verbose::Bool
+
+    # > Time histogram
     time_histogram::Bool
     flatten_time_dims::Bool
     gnuplot_hist_script::String
     hist_plot_file::String
+
+    # > MPI communications time plot
+    time_MPI_plot::Bool
+    gnuplot_MPI_script::String
+    time_MPI_plot_file::String
 end
 
 
@@ -63,6 +70,7 @@ no_inti_cmd(armon_options, nprocs) = `mpiexecjl -n $(nprocs) $(armon_options)`
 inti_cmd(armon_options, inti_options) = `ccc_mprun $(inti_options) $(armon_options)`
 
 julia_options = ["-O3", "--check-bounds=no", "--project"]
+julia_options_no_inti = ["-O3", "--check-bounds=no"]
 armon_base_options = [
     "--write-output", "0",
     "--verbose", "2"
@@ -70,7 +78,7 @@ armon_base_options = [
 min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
 max_inti_cores = 128  # Maximum number of cores in a node
 
-required_modules = ["cuda", "rocm", "hwloc"]  # Modules required
+required_modules = ["cuda", "rocm", "hwloc", "mpi"]
 
 julia_script_path = "./julia/run_julia.jl"
 julia_tmp_script_output_file = "./tmp_script_output.txt"
@@ -100,8 +108,29 @@ set key left top
 set style fill solid 1.00 border 0
 plot """
 
-gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(replace(legend_title, '_' => "\\_"))'"
+base_gnuplot_MPI_time_script_commands(graph_file_name, title, log_scale, legend_pos) = """
+set terminal pdfcairo color size 10in, 6in
+set output '$(graph_file_name)'
+set ylabel 'Time [sec]'
+set xlabel 'Cells count'
+set title "$(title)"
+set key $(legend_pos) top
+set ytics nomirror
+set mytics
+set yrange [0:]
+set y2tics
+set my2tics
+set y2range [0:]
+set y2label 'Communication Time / Total Time [%]'
+$(log_scale ? "set logscale x" : "")
+`echo "$(graph_file_name)" > ./plots/last_update`
+plot """
+
+gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
+gnuplot_MPI_plot_command_1(data_file, legend_title, pt_index) = "'$(data_file)' using 1:2 axis x1y1 w lp pt $(pt_index) title '$(legend_title)'"
+gnuplot_MPI_plot_command_2(data_file, legend_title, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp pt $(pt_index) dt 4 title '$(legend_title)'"
+
 
 function parse_measure_params(file_line_parser)    
     device = CPU
@@ -132,8 +161,11 @@ function parse_measure_params(file_line_parser)
     log_scale = true
     plot_title = nothing
     verbose = false
+
     time_histogram = false
     flatten_time_dims = false
+
+    time_MPI_plot = false
 
     last_i = 0
     for (i, line) in file_line_parser
@@ -207,6 +239,8 @@ function parse_measure_params(file_line_parser)
             time_histogram = parse(Bool, value)
         elseif option == "flat_hist_dims"
             flatten_time_dims = parse(Bool, value)
+        elseif option == "time_MPI_plot"
+            time_MPI_plot = parse(Bool, value)
         else
             error("Unknown option: $(option), at line $(i)")
         end
@@ -238,6 +272,10 @@ function parse_measure_params(file_line_parser)
         error("The histogram can only be made when there is only a single test to do")
     end
 
+    if time_MPI_plot && !use_MPI
+        error("Cannot make an MPI communications time graph without using MPI")
+    end
+
     mkpath(data_dir * name)
     gnuplot_script = plot_scripts_dir * gnuplot_script
     plot_file = plots_dir * plot_file
@@ -245,12 +283,16 @@ function parse_measure_params(file_line_parser)
     gnuplot_hist_script = plot_scripts_dir * name * "_hist.plot"
     hist_plot_file = plots_dir * name * "_hist.pdf"
 
+    gnuplot_MPI_script = plot_scripts_dir * name * "_MPI_time.plot"
+    time_MPI_plot_file = plots_dir * name * "_MPI_time.pdf"
+
     return MeasureParams(device, node, distributions, processes, max_time, use_MPI,
         threads, use_simd, jl_proc_bind, jl_places, 
         dimension, cells_list, domain_list, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
         name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
-        time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file)
+        time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
+        time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file)
 end
 
 
@@ -382,7 +424,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, base_file_name
     armon_options = [
         "julia", "-t", params.threads
     ]
-    append!(armon_options, julia_options)
+    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
     push!(armon_options, julia_script_path)
 
     if measure.device == CUDA
@@ -422,6 +464,8 @@ function run_backend(measure::MeasureParams, params::JuliaParams, base_file_name
         "--verbose", (measure.verbose ? 2 : 5),
         "--gnuplot-hist-script", measure.gnuplot_hist_script,
         "--time-histogram", measure.time_histogram,
+        "--time-MPI-graph", measure.time_MPI_plot,
+        "--gnuplot-MPI-script", measure.gnuplot_MPI_script,
         "--use-mpi", measure.use_MPI
     ])
 
@@ -540,6 +584,7 @@ end
 function create_all_data_files_and_plot(measure::MeasureParams)
     plot_commands = []
     hist_commands = []
+    plot_MPI_commands = []
     for init_params in build_inti_combinaisons(measure)
         # Marker style for the plot
         point_type = 5
@@ -549,6 +594,9 @@ function create_all_data_files_and_plot(measure::MeasureParams)
             dimension = parameters.dimension
             for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
                 data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting)
+                
+                legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
+                
                 data_file_name = data_file_name_base * ".csv"
                 open(data_file_name, "w") do _ end  # Create/Clear the file
                 plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
@@ -556,9 +604,19 @@ function create_all_data_files_and_plot(measure::MeasureParams)
 
                 if measure.time_histogram
                     hist_file_name = data_file_name_base * "_hist.csv"
-                    open(data_file_name, "w") do _ end  # Create/Clear the file
+                    open(hist_file_name, "w") do _ end  # Create/Clear the file
                     plot_cmd = gnuplot_hist_plot_command(hist_file_name, legend, point_type)
                     push!(hist_commands, plot_cmd)
+                end
+
+                if measure.time_MPI_plot
+                    MPI_plot_file_name = data_file_name_base * "_MPI_time.csv"
+                    open(MPI_plot_file_name, "w") do _ end  # Create/Clear the file
+                    plot_cmd = gnuplot_MPI_plot_command_1(MPI_plot_file_name, legend, point_type)
+                    push!(plot_MPI_commands, plot_cmd)
+                    plot_cmd = gnuplot_MPI_plot_command_2(MPI_plot_file_name, 
+                        measure.device == CPU ? ("(relative) " * legend) : (legend * " (relative)"), point_type)
+                    push!(plot_MPI_commands, plot_cmd)
                 end
             end
         end
@@ -577,6 +635,17 @@ function create_all_data_files_and_plot(measure::MeasureParams)
         open(measure.gnuplot_hist_script, "w") do gnuplot_script
             print(gnuplot_script, base_gnuplot_histogram_script_commands(measure.hist_plot_file, measure.plot_title))
             plot_cmd = join(hist_commands, ", \\\n     ")
+            println(gnuplot_script, plot_cmd)
+        end
+    end
+
+    if measure.time_MPI_plot
+        # Same for the MPI plot script
+        open(measure.gnuplot_MPI_script, "w") do gnuplot_script
+            plot_title = measure.plot_title * ", MPI communications time"
+            print(gnuplot_script, base_gnuplot_MPI_time_script_commands(measure.time_MPI_plot_file, plot_title,
+                measure.log_scale, measure.device == CPU ? "right" : "left"))
+            plot_cmd = join(plot_MPI_commands, ", \\\n     ")
             println(gnuplot_script, plot_cmd)
         end
     end
