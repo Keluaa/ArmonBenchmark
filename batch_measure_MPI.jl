@@ -77,7 +77,6 @@ armon_base_options = [
     "--write-output", "0",
     "--verbose", "2"
 ]
-min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
 max_inti_cores = 128  # Maximum number of cores in a node
 
 required_modules = ["cuda", "rocm", "hwloc", "mpi"]
@@ -488,7 +487,7 @@ end
 
 
 function build_data_file_base_name(measure::MeasureParams, 
-        processes::Int, distribution::String, 
+        processes::Int, distribution::String, node_count::Int,
         threads::Int, use_simd::Int, dimension::Int)
     # Build a file name based on the measurement name and the parameters that don't have a single value
     name = data_dir * measure.name * "/"
@@ -510,6 +509,11 @@ function build_data_file_base_name(measure::MeasureParams,
     if length(measure.processes) > 1
         name *= "_$(processes)proc"
         legend *= ", $(processes) processes"
+    end
+
+    if length(measure.node_count) > 1
+        name *= "_$(node_count)nodes"
+        legend *= ", $(node_count) nodes"
     end
 
     if length(measure.dimension) > 1
@@ -553,8 +557,8 @@ end
 
 
 function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
-        params::JuliaParams)
-    name, legend = build_data_file_base_name(measure, processes, distribution, params.threads, 
+        node_count::Int, params::JuliaParams)
+    name, legend = build_data_file_base_name(measure, processes, distribution, node_count, params.threads, 
                                              params.use_simd, params.dimension)
 
     if length(measure.jl_proc_bind) > 1
@@ -571,7 +575,7 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
 end
 
 
-function build_inti_options(measure::MeasureParams, inti_params::IntiParams)
+function build_inti_options(measure::MeasureParams, inti_params::IntiParams, threads::Int)
     return [
         "-p", measure.node,
         "-N", inti_params.node_count,                  # Number of nodes to distribute the processes to
@@ -580,9 +584,7 @@ function build_inti_options(measure::MeasureParams, inti_params::IntiParams)
         # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to
         # further control threads/memory usage
         "-x",
-        # Allocate for the maximum number of threads needed
-        # To make sure that there is enough memory available, there is a minimum number of core allocated.
-        "-c", min(max(maximum(measure.threads), min_inti_cores), max_inti_cores)
+        "-c", threads
     ]
 end
 
@@ -591,13 +593,18 @@ function create_all_data_files_and_plot(measure::MeasureParams)
     plot_commands = []
     hist_commands = []
     plot_MPI_commands = []
-    for init_params in build_inti_combinaisons(measure)
+    for inti_params in build_inti_combinaisons(measure)
         # Marker style for the plot
         point_type = 5
         
         for parameters in parse_combinaisons(measure)
-            base_file_name, legend_base = build_data_file_base_name(measure, init_params.processes, init_params.distribution, parameters)
+            if parameters.threads * inti_params.processes > max_inti_cores * inti_params.node_count
+                continue
+            end
+
+            base_file_name, legend_base = build_data_file_base_name(measure, inti_params.processes, inti_params.distribution, inti_params.node_count, parameters)
             dimension = parameters.dimension
+
             for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
                 data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting)
                 
@@ -659,8 +666,13 @@ end
 
 
 function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_params::IntiParams)
+    if julia_params.threads * inti_params.processes > max_inti_cores * inti_params.node_count
+        println("Skipping running $(inti_params.processes) Julia processes with $(julia_params.threads) threads on $(inti_params.node_count) nodes.")
+        return
+    end
+
     base_file_name, _ = build_data_file_base_name(measure, 
-        inti_params.processes, inti_params.distribution, julia_params)
+        inti_params.processes, inti_params.distribution, inti_params.node_count, julia_params)
     armon_options = run_backend(measure, julia_params, base_file_name)
 
     println("""Running Julia with:
@@ -669,13 +681,13 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
  - $(julia_params.use_simd == 1 ? "with" : "without") SIMD
  - $(julia_params.dimension)D
  - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
- - with $(inti_params.processes) processes ($(inti_params.distribution) distribution)
+ - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
 """)
 
     if isempty(measure.node)
         cmd = no_inti_cmd(armon_options, inti_params.processes)
     else
-        inti_options = build_inti_options(measure, inti_params)
+        inti_options = build_inti_options(measure, inti_params, julia_params.threads)
         cmd = inti_cmd(armon_options, inti_options)
     end
 
