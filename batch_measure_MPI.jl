@@ -87,35 +87,37 @@ julia_tmp_script_output_file = "./tmp_script_output.txt"
 data_dir = "./data/"
 plot_scripts_dir = "./plot_scripts/"
 plots_dir = "./plots/"
+plots_update_file = plots_dir * "last_update"
 
 
 base_gnuplot_script_commands(graph_file_name, title, log_scale, legend_pos) = """
 set terminal pdfcairo color size 10in, 6in
-set output '$(graph_file_name)'
+set output '$graph_file_name'
 set ylabel 'Giga Cells/sec'
 set xlabel 'Cells count'
-set title "$(title)"
-set key $(legend_pos) top
+set title "$title"
+set key $legend_pos top
 $(log_scale ? "set logscale x" : "")
-`echo "$(graph_file_name)" > ./plots/last_update`
+`echo "$graph_file_name" >> $plots_update_file`
 plot """
 
 base_gnuplot_histogram_script_commands(graph_file_name, title) = """
 set terminal pdfcairo color size 10in, 6in
-set output '$(graph_file_name)'
+set output '$graph_file_name'
 set ylabel 'Total loop time (%)'
-set title "$(title)"
+set title "$title"
 set key left top
 set style fill solid 1.00 border 0
+`echo "$graph_file_name" >> $plots_update_file`
 plot """
 
 base_gnuplot_MPI_time_script_commands(graph_file_name, title, log_scale, legend_pos) = """
 set terminal pdfcairo color size 10in, 6in
-set output '$(graph_file_name)'
+set output '$graph_file_name'
 set ylabel 'Time [sec]'
 set xlabel 'Cells count'
-set title "$(title)"
-set key $(legend_pos) top
+set title "$title"
+set key $legend_pos top
 set ytics nomirror
 set mytics
 set yrange [0:]
@@ -124,7 +126,7 @@ set my2tics
 set y2range [0:]
 set y2label 'Communication Time / Total Time [%]'
 $(log_scale ? "set logscale x" : "")
-`echo "$(graph_file_name)" > ./plots/last_update`
+`echo "$graph_file_name" >> $plots_update_file`
 plot """
 
 gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
@@ -712,6 +714,9 @@ function setup_env()
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
     mkpath(plots_dir)
+
+    # Clear the plots update file
+    run(`truncate -s 0 $plots_update_file`)
 
     # Are we in a login node?
     in_login_node = startswith(readchomp(`hostname`), "login")

@@ -16,14 +16,20 @@ fi
 # If the timestamp changes, read the file to get the path to the updated plot and update its display
 while true    
 do
-   file_timestamp=`stat -c %Z $last_update_file_path`
+    file_timestamp=`stat -c %Z $last_update_file_path`
 
-   if [[ "$file_timestamp" != "$last_update_timestamp" ]]
-   then    
-       last_update_timestamp=$file_timestamp
-       updated_plot=`echo $(<$last_update_file_path)`
-       #echo Updated plot '$updated_plot'
-       $display_cmd $updated_plot 2> /dev/null
-   fi
-   sleep 0.1
+    if [[ "$file_timestamp" != "$last_update_timestamp" ]]
+    then    
+        last_update_timestamp=$file_timestamp
+
+        # Each line of the file is one plot to update
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            echo Updated plot $line
+            $display_cmd $line 2> /dev/null
+        done < "$last_update_file_path"
+
+        # Clear the file
+        truncate -s 0 $last_update_file_path
+    fi
+    sleep 0.1
 done
