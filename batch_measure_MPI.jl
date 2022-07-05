@@ -129,8 +129,8 @@ plot """
 
 gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
-gnuplot_MPI_plot_command_1(data_file, legend_title, pt_index) = "'$(data_file)' using 1:2 axis x1y1 w lp pt $(pt_index) title '$(legend_title)'"
-gnuplot_MPI_plot_command_2(data_file, legend_title, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp pt $(pt_index) dt 4 title '$(legend_title)'"
+gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:2 axis x1y1 w lp lc $(color_index) pt $(pt_index) title '$(legend_title)'"
+gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
 
 
 function parse_measure_params(file_line_parser)    
@@ -593,6 +593,7 @@ function create_all_data_files_and_plot(measure::MeasureParams)
     plot_commands = []
     hist_commands = []
     plot_MPI_commands = []
+    color_index = 1
     for inti_params in build_inti_combinaisons(measure)
         # Marker style for the plot
         point_type = 5
@@ -625,11 +626,12 @@ function create_all_data_files_and_plot(measure::MeasureParams)
                 if measure.time_MPI_plot
                     MPI_plot_file_name = data_file_name_base * "_MPI_time.csv"
                     open(MPI_plot_file_name, "w") do _ end  # Create/Clear the file
-                    plot_cmd = gnuplot_MPI_plot_command_1(MPI_plot_file_name, legend, point_type)
+                    plot_cmd = gnuplot_MPI_plot_command_1(MPI_plot_file_name, legend, color_index, point_type)
                     push!(plot_MPI_commands, plot_cmd)
                     plot_cmd = gnuplot_MPI_plot_command_2(MPI_plot_file_name, 
-                        measure.device == CPU ? ("(relative) " * legend) : (legend * " (relative)"), point_type)
+                        measure.device == CPU ? ("(relative) " * legend) : (legend * " (relative)"), color_index, point_type)
                     push!(plot_MPI_commands, plot_cmd)
+                    color_index += 1  # Each line and its relative counterpart will have the same color
                 end
             end
         end
