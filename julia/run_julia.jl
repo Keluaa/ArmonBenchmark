@@ -31,6 +31,7 @@ tests = []
 cells_list = []
 
 use_MPI = false
+verbose_MPI = false
 
 base_file_name = ""
 gnuplot_script = ""
@@ -155,6 +156,9 @@ while i <= length(ARGS)
     elseif arg == "--use-mpi"
         global use_MPI = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--verbose-mpi"
+        global verbose_MPI = parse(Bool, ARGS[i+1])
+        global i += 1
 
     # Additionnal params
     elseif arg == "--gpu"
@@ -219,10 +223,14 @@ end
 if use_MPI
     using MPI
     MPI.Init()
-    is_root = MPI.Comm_rank(MPI.COMM_WORLD) == 0
+
+    rank = MPI.Comm_rank(MPI.COMM_WORLD)
+    global_size = MPI.Comm_size(MPI.COMM_WORLD)
+    is_root = rank == 0
     if is_root
-        println("Using MPI with $(MPI.Comm_size(MPI.COMM_WORLD)) processes")
+        println("Using MPI with $global_size processes")
         println("Loading...")
+        loading_start_time = time_ns()
     end
 
     if dimension == 1
@@ -230,6 +238,41 @@ if use_MPI
     else
         # include("armon_2D_MPI.jl")
         error("2D MPI NYI")
+    end
+
+    # Create a communicator for each node of the MPI world
+    node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.MPI_COMM_TYPE_SHARED, rank)
+
+    # Get the rank and the number of processes running on the same node
+    local_rank = MPI.Comm_rank(node_local_comm)
+    local_size = MPI.Comm_size(node_local_comm)
+
+    # Pin the threads on the node with no overlap with the other processes running on the same node
+    thread_offset = local_rank * Threads.nthreads()
+    omp_bind_threads(thread_offset, threads_places, threads_proc_bind)
+
+    if verbose_MPI
+        # Call 'MPI_Get_processor_name', which is not exposed by MPI.jl, in order to get the name of
+        # the node on which the current process is running.
+        raw_node_name = Vector{UInt8}(undef, 256)  # MPI_MAX_PROCESSOR_NAME == 256
+        len = Ref{Cint}()
+        #= MPI.@mpichk  =#ccall((:MPI_Get_processor_name, MPI.libmpi), Cint, (Ptr{Cuchar}, Ptr{Cint}), raw_node_name, len)
+        node_name = unsafe_string(pointer(raw_node_name), len[])
+
+        using ThreadPinning  # To use threadinfo()
+        
+        if is_root
+            println("Processes info:")
+        end
+
+        # Print the debug info in order, one process at a time
+        for i in 1:global_size
+            if i == rank+1
+                @printf(" - %-4d: local %-2d/%2d, node %s\n", rank+1, local_rank+1, local_size, node_name)
+                threadinfo(; color=false, blocksize=64)
+            end
+            MPI.Barrier(MPI.COMM_WORLD)
+        end
     end
 else
     println("Loading...")
@@ -240,15 +283,12 @@ else
         include("armon_2D.jl")
     end
     is_root = true
+
+    if !use_gpu
+        omp_bind_threads(threads_places, threads_proc_bind)
+    end
 end
 using .Armon
-
-
-if !use_gpu
-    # TODO : make sure that threads of different processes but on the same node don't pin their threads on the same cores
-    is_root && @warn "Thread pinning might be problematic with MPI"
-    omp_bind_threads(threads_places, threads_proc_bind)
-end
 
 
 if dimension == 1
@@ -446,13 +486,24 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
 end
 
 
-is_root && println("Compiling...")
+if is_root
+    loading_end_time = time_ns()
+    @printf("Loading time: %3.1f sec\n", (loading_end_time - loading_start_time) / 1e9)
+    println("Compiling...")
+    compile_start_time = time_ns()
+end
+
 for test in tests, transpose in transpose_dims
     run_armon(build_params(test, dimension == 1 ? 10000 : (10, 10);
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
         maxtime, maxcycle=1, silent=5, write_output=false, use_ccall, use_threading, use_simd, 
         interleaving, use_gpu))
+end
+
+if is_root
+    compile_end_time = time_ns()
+    @printf("Compile time: %3.1f sec\n", (compile_end_time - compile_start_time) / 1e9)
 end
 
 
