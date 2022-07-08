@@ -5,19 +5,17 @@ using Polyester
 using KernelAbstractions
 using KernelAbstractions.Extras: @unroll
 
-use_ROCM = haskey(ENV, "USE_ROCM_GPU") && ENV["USE_ROCM_GPU"] == "true"
+const use_ROCM = parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
 
 if use_ROCM
     using AMDGPU
     using ROCKernels
     AMDGPU.allowscalar(false)
-    println("Using ROCM GPU")
     macro cuda(args...) end
 else
     using CUDA
     using CUDAKernels
     CUDA.allowscalar(false)
-    println("Using CUDA GPU")
 end
 
 
@@ -46,11 +44,11 @@ mutable struct ArmonParameters{Flt_T}
     euler_projection::Bool
     cst_dt::Bool
 
-    # Bounds
+    # Bounds
     maxtime::Flt_T
     maxcycle::Int
     
-    # Output
+    # Output
     silent::Int
     write_output::Bool
     measure_time::Bool
@@ -78,7 +76,7 @@ function ArmonParameters(; ieee_bits = 64,
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
 
-    # Make sure that all floating point types are the same
+    # Make sure that all floating point types are the same
     cfl = flt_type(cfl)
     Dt = flt_type(Dt)
     maxtime = flt_type(maxtime)
@@ -136,7 +134,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - maxcycle:   ", p.maxcycle)
 end
 
-# Default copy method
+# Default copy method
 function Base.copy(p::ArmonParameters{T}) where T
     return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
 end
@@ -309,17 +307,17 @@ macro simd_threaded_loop(expr)
         throw(ArgumentError("Expected a valid for loop"))
     end
 
-    # Only in for the case of a threaded loop with SIMD:
-    # Extract the range of the loop and replace it with the new variables
+    # Only in for the case of a threaded loop with SIMD:
+    # Extract the range of the loop and replace it with the new variables
     modified_loop_expr = copy(expr)
     range_expr = modified_loop_expr.args[1]
-    loop_range = copy(range_expr.args[2])  # The original loop range
+    loop_range = copy(range_expr.args[2])  # The original loop range
     range_expr.args[2] = :(__ideb:__ifin)  # The new loop range
 
-    # Same but with interleaving
+    # Same but with interleaving
     interleaved_loop_expr = copy(expr)
     range_expr = interleaved_loop_expr.args[1]
-    range_expr.args[2] = :((__first_i + __i_thread):__num_threads:__last_i)  # The interleaved loop range
+    range_expr.args[2] = :((__first_i + __i_thread):__num_threads:__last_i)  # The interleaved loop range
 
     return esc(quote
         if params.use_threading
@@ -337,7 +335,7 @@ macro simd_threaded_loop(expr)
                     __loop_range = $(loop_range)
                     __total_iter = length(__loop_range)
                     __num_threads = Threads.nthreads()
-                    # Equivalent to __total_iter ÷ __num_threads
+                    # Equivalent to __total_iter ÷ __num_threads
                     __batch = convert(Int, cld(__total_iter, __num_threads))::Int
                     __first_i = first(__loop_range)
                     __last_i = last(__loop_range)
@@ -493,7 +491,7 @@ end
     @synchronize
 
     dm = rho[i] * (x_[i+1] - x_[i])
-    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
+    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
     rho[i]  = dm / (x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i]))
     umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
     Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
@@ -522,7 +520,7 @@ end
     @synchronize
 
     dm = rho[i] * (x_[i+1] - x_[i])
-    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
+    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
     dx = x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i])
     rho[i]  = dm / dx
     umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
@@ -814,7 +812,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T) wh
     end
 
     # First order
-    @simd_threaded_loop for i in ideb:ifin+1
+    @simd_threaded_loop for i in ideb-1:ifin+2
         rc_l = rho[i-1] * cmat[i-1]
         rc_r = rho[i]   * cmat[i]
         ustar_1[i] = (rc_l * umat[i-1] + rc_r * umat[i] +               (pmat[i-1] - pmat[i])) /
@@ -895,7 +893,7 @@ end
 
 #
 # Test initialisation
-# 
+#
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat) = data
@@ -1107,7 +1105,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         return
     end
 
-    # Projection of the conservative variables
+    # Projection of the conservative variables
     @simd_threaded_loop for i in ideb:ifin
         dx = X[i+1] - X[i]
         L₁ =  max(0, ustar[i]) * dt
@@ -1128,7 +1126,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                      + L₃ * rho[i+1] * Emat[i+1]) / dx
     end
 
-    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
     @simd_threaded_loop for i in ideb:ifin
         rho[i]  = tmp_rho[i]
         umat[i] = tmp_urho[i] / tmp_rho[i]

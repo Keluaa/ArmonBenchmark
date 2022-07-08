@@ -25,6 +25,7 @@ mutable struct MeasureParams
     # Armon params
     cells_list::Vector{Int}
     domain_list::Vector{Vector{Int}}
+    process_grids::Vector{Vector{Int}}
     tests_list::Vector{String}
     transpose_dims::Vector{Bool}
     axis_splitting::Vector{String}
@@ -149,13 +150,13 @@ function parse_measure_params(file_line_parser)
     dimension = [1]
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
+    process_grids = ["1,1"]
     tests_list = ["Sod"]
     transpose_dims = [false]
     axis_splitting = ["Sequential"]
     common_armon_params = [
         "--write-output", "0",
-        "--verbose", "2",
-        "--euler", "0"
+        "--verbose", "2"
     ]
     use_MPI = true
     name = nothing
@@ -217,6 +218,8 @@ function parse_measure_params(file_line_parser)
             cells_list = value
         elseif option == "domains"
             domain_list = value
+        elseif option == "process_grids"
+            process_grids = split(value, ';')
         elseif option == "tests"
             tests_list = split(value, ',')
         elseif option == "transpose"
@@ -260,6 +263,9 @@ function parse_measure_params(file_line_parser)
     domain_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
                    for cells_domain in domain_list]
 
+    process_grids = [parse.(Int, split(process_grid, ','))
+                   for process_grid in process_grids]
+
     if isnothing(name)
         error("Expected a name for the measurement at line ", last_i)
     end
@@ -294,7 +300,7 @@ function parse_measure_params(file_line_parser)
 
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         threads, use_simd, jl_proc_bind, jl_places, 
-        dimension, cells_list, domain_list, tests_list, 
+        dimension, cells_list, domain_list, process_grids, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
         name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
@@ -390,13 +396,15 @@ function armon_combinaisons(measure::MeasureParams, dimension::Int)
         return Iterators.product(
             measure.tests_list,
             [false],
-            ["Sequential"]
+            ["Sequential"],
+            [[1, 1]]
         )
     else
         return Iterators.product(
             measure.tests_list,
             measure.transpose_dims,
-            measure.axis_splitting
+            measure.axis_splitting,
+            measure.process_grids
         )
     end
 end
@@ -404,7 +412,7 @@ end
 
 function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
         base_file_name::String, legend_base::String,
-        test::String, transpose_dims::Bool, axis_splitting::String)
+        test::String, transpose_dims::Bool, axis_splitting::String, process_grid::Vector{Int})
     file_name = base_file_name * test
     if dimension == 1
         legend = "$test, $legend_base"
@@ -417,8 +425,14 @@ function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
         end
 
         if length(measure.axis_splitting) > 1
-            file_name *= "_" * string(axis_splitting)
-            legend *= ", " * string(axis_splitting)
+            file_name *= "_" * axis_splitting
+            legend *= ", " * axis_splitting
+        end
+
+        if length(measure.process_grids) > 1
+            grid_str = join(process_grid, 'x')
+            file_name *= "_pg=$grid_str"
+            legend *= ", process grid: $grid_str"
         end
 
         legend *= ", " * legend_base
@@ -480,6 +494,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, base_file_name
         append!(armon_options, [
             "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
+            "--proc-grid", join([join(string.(process_grid), ',') for process_grid in measure.process_grids], ';'),
             "--flat-dims", measure.flatten_time_dims
         ])
     end
@@ -608,8 +623,8 @@ function create_all_data_files_and_plot(measure::MeasureParams)
             base_file_name, legend_base = build_data_file_base_name(measure, inti_params.processes, inti_params.distribution, inti_params.node_count, parameters)
             dimension = parameters.dimension
 
-            for (test, transpose_dims, axis_splitting) in armon_combinaisons(measure, dimension)
-                data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting)
+            for (test, transpose_dims, axis_splitting, process_grid) in armon_combinaisons(measure, dimension)
+                data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting, process_grid)
                 
                 legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
                 

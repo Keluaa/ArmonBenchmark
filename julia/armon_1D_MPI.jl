@@ -8,20 +8,18 @@ using MPI
 
 export ArmonParameters, armon
 
-# GPU init
+# GPU init
 
-use_ROCM = haskey(ENV, "USE_ROCM_GPU") && ENV["USE_ROCM_GPU"] == "true"
+const use_ROCM = parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
 
 if use_ROCM
     using AMDGPU
     using ROCKernels
     AMDGPU.allowscalar(false)
-    # @info "Using ROCM GPU" maxlog=1
 else
     using CUDA
     using CUDAKernels
     CUDA.allowscalar(false)
-    # @info "Using CUDA GPU" maxlog=1
 end
 
 const device = use_ROCM ? ROCDevice() : CUDADevice()
@@ -56,11 +54,11 @@ mutable struct ArmonParameters{Flt_T}
     euler_projection::Bool
     cst_dt::Bool
 
-    # Bounds
+    # Bounds
     maxtime::Flt_T
     maxcycle::Int
     
-    # Output
+    # Output
     silent::Int
     write_output::Bool
     measure_time::Bool
@@ -98,7 +96,7 @@ function ArmonParameters(; ieee_bits = 64,
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
 
-    # Make sure that all floating point types are the same
+    # Make sure that all floating point types are the same
     cfl = flt_type(cfl)
     Dt = flt_type(Dt)
     maxtime = flt_type(maxtime)
@@ -184,7 +182,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - rank:       ", p.rank, "/", p.proc_size - 1)
 end
 
-# Default copy method
+# Default copy method
 function Base.copy(p::ArmonParameters{T}) where T
     return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
 end
@@ -357,17 +355,17 @@ macro simd_threaded_loop(expr)
         throw(ArgumentError("Expected a valid for loop"))
     end
 
-    # Only in for the case of a threaded loop with SIMD:
-    # Extract the range of the loop and replace it with the new variables
+    # Only in for the case of a threaded loop with SIMD:
+    # Extract the range of the loop and replace it with the new variables
     modified_loop_expr = copy(expr)
     range_expr = modified_loop_expr.args[1]
-    loop_range = copy(range_expr.args[2])  # The original loop range
+    loop_range = copy(range_expr.args[2])  # The original loop range
     range_expr.args[2] = :(__ideb:__ifin)  # The new loop range
 
-    # Same but with interleaving
+    # Same but with interleaving
     interleaved_loop_expr = copy(expr)
     range_expr = interleaved_loop_expr.args[1]
-    range_expr.args[2] = :((__first_i + __i_thread):__num_threads:__last_i)  # The interleaved loop range
+    range_expr.args[2] = :((__first_i + __i_thread):__num_threads:__last_i)  # The interleaved loop range
 
     return esc(quote
         if params.use_threading
@@ -385,7 +383,7 @@ macro simd_threaded_loop(expr)
                     __loop_range = $(loop_range)
                     __total_iter = length(__loop_range)
                     __num_threads = Threads.nthreads()
-                    # Equivalent to __total_iter ÷ __num_threads
+                    # Equivalent to __total_iter ÷ __num_threads
                     __batch = convert(Int, cld(__total_iter, __num_threads))::Int
                     __first_i = first(__loop_range)
                     __last_i = last(__loop_range)
@@ -486,7 +484,7 @@ end
     @synchronize
 
     dm = rho[i] * (x_[i+1] - x_[i])
-    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
+    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
     rho[i]  = dm / (x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i]))
     umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
     Emat[i] = Emat[i] + dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1])
@@ -515,7 +513,7 @@ end
     @synchronize
 
     dm = rho[i] * (x_[i+1] - x_[i])
-    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
+    # We must use this instead of X[i+1]-X[i] since X can be overwritten by other workgroups
     dx = x_[i+1] + dt * ustar[i+1] - (x_[i] + dt * ustar[i])
     rho[i]  = dm / dx
     umat[i] = umat[i] + dt / dm * (pstar[i] - pstar[i+1])
@@ -861,7 +859,7 @@ end
 
 #
 # Test initialisation
-# 
+#
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, rho, pmat, umat, vmat, emat, Emat, cmat, gmat) = data
@@ -880,7 +878,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         gamma::T = 1.4
 
         # -1-nghost                      -> local range to 0 to N_local-1
-        # +first(global_cells_range) - 1 -> local range to global range
+        # +first(global_cells_range) - 1 -> local range to global range
         offset = - 1 - nghost + first(global_cells_range) - 1
 
         @simd_threaded_loop for i in 1:nbcell+2*nghost
@@ -1036,15 +1034,14 @@ end
 function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; nghost, ideb, ifin, rank, proc_size) = params
     # TODO : use active RMA instead?
-    # TODO : use CUDA/ROCM-aware MPI 
-    # TODO : 2D: use 4 views for each side for each variable ? (2 will be contigous, 2 won't) <- pre-calculate them!
+    # TODO : use CUDA/ROCM-aware MPI
 
     tmp_array = Vector{T}(undef, nghost * 7)
 
-    # r even:
+    # rank even:
     #   - send+receive left
     #   - send+receive right
-    # r odd:
+    # rank odd:
     #   - send+receive right
     #   - send+receive left
     if rank % 2 == 0
@@ -1135,7 +1132,7 @@ end
 function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
     local_dt::T = dtCFL(params, data, dta)
 
-    # Reduce all local_dts and broadcast the result to all processes
+    # Reduce all local_dts and broadcast the result to all processes
     @time_pos params "dt_Allreduce_MPI" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), COMM)
     return dt
 end
@@ -1172,7 +1169,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         return
     end
 
-    # Projection of the conservative variables
+    # Projection of the conservative variables
     @simd_threaded_loop for i in ideb:ifin
         dx = X[i+1] - X[i]
         L₁ =  max(0, ustar[i]) * dt
@@ -1193,7 +1190,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                      + L₃ * rho[i+1] * Emat[i+1]) / dx
     end
 
-    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
     @simd_threaded_loop for i in ideb:ifin
         rho[i]  = tmp_rho[i]
         umat[i] = tmp_urho[i] / tmp_rho[i]
@@ -1306,7 +1303,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             end
     
             if !isfinite(dt) || dt <= 0.
-                error("Invalid dt at cycle $(cycle): $(dt) (rank: $(params.rank+1))")
+                error("Invalid dt at cycle $(cycle): $(dt)")
             end
     
             if cycle == 5
@@ -1321,9 +1318,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
     if is_root
         if cycle <= 5 && maxcycle > 5
-            error("More than 5 cycles are needed to compute the grind time, got: $(cycle) (rank: $(params.rank+1))")
+            error("More than 5 cycles are needed to compute the grind time, got: $(cycle)")
         elseif t2 < t_warmup
-            error("Clock error: $(t2) < $(t_warmup) (rank: $(params.rank+1))")
+            error("Clock error: $(t2) < $(t_warmup)")
         end
     
         if silent < 3
@@ -1414,10 +1411,6 @@ function armon(params::ArmonParameters{T}) where T
     if params.write_output
         write_result(params, data)
     end
-
-# 46 47 48 49 50 51 52 53
-# 46 47 48 49 50 51
-#       48 49 50 51 52 53
 
     if params.measure_time && is_root && silent < 3 && !isempty(time_contrib)
         total_time = mapreduce(x->x[2], +, collect(time_contrib))

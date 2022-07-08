@@ -16,6 +16,7 @@ cst_dt = false
 ieee_bits = 64
 silent = 2
 write_output = false
+write_ghosts = false
 use_ccall = false
 use_threading = true
 use_simd = true
@@ -32,6 +33,7 @@ cells_list = []
 
 use_MPI = false
 verbose_MPI = false
+proc_domains = [(1, 1)]
 
 base_file_name = ""
 gnuplot_script = ""
@@ -57,7 +59,7 @@ i = 1
 while i <= length(ARGS)
     arg = ARGS[i]
     if arg == "-s"
-        global scheme=Symbol(replace(ARGS[i+1], '-' => '_'))
+        global scheme = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
     elseif arg == "--ieee"
         global ieee_bits = parse(Int, ARGS[i+1])
@@ -82,6 +84,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--write-output"
         global write_output = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--write-ghosts"
+        global write_ghosts = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--use-ccall"
         global use_ccall = parse(Bool, ARGS[i+1])
@@ -158,6 +163,15 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--verbose-mpi"
         global verbose_MPI = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--proc-grid"
+        raw_proc_domain_list = split(ARGS[i+1], ';')
+        raw_proc_domain_list = split.(raw_proc_domain_list, ',')
+        proc_domain_list_t = Vector{NTuple{2, Int}}(undef, length(raw_proc_domain_list))
+        for (i, proc_domain) in enumerate(raw_proc_domain_list)
+            proc_domain_list_t[i] = Tuple(parse.(Int, proc_domain))
+        end
+        global proc_domains = proc_domain_list_t
         global i += 1
 
     # Additionnal params
@@ -236,9 +250,9 @@ if use_MPI
     if dimension == 1
         include("armon_1D_MPI.jl")
     else
-        # include("armon_2D_MPI.jl")
-        error("2D MPI NYI")
+        include("armon_2D_MPI.jl")
     end
+    using .Armon
 
     # Create a communicator for each node of the MPI world
     node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.MPI_COMM_TYPE_SHARED, rank)
@@ -256,7 +270,7 @@ if use_MPI
         # the node on which the current process is running.
         raw_node_name = Vector{UInt8}(undef, 256)  # MPI_MAX_PROCESSOR_NAME == 256
         len = Ref{Cint}()
-        #= MPI.@mpichk  =#ccall((:MPI_Get_processor_name, MPI.libmpi), Cint, (Ptr{Cuchar}, Ptr{Cint}), raw_node_name, len)
+        #= MPI.@mpichk =# ccall((:MPI_Get_processor_name, MPI.libmpi), Cint, (Ptr{Cuchar}, Ptr{Cint}), raw_node_name, len)
         node_name = unsafe_string(pointer(raw_node_name), len[])
 
         using ThreadPinning  # To use threadinfo()
@@ -274,47 +288,88 @@ if use_MPI
             MPI.Barrier(MPI.COMM_WORLD)
         end
     end
+
+    if dimension == 1
+        function build_params(test, cells; 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                axis_splitting, maxtime, maxcycle, silent, write_output, 
+                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
+                use_MPI, px, py)
+            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
+                test=test, nbcell=cells,
+                euler_projection, maxtime, maxcycle, silent, write_output, write_ghosts,
+                use_ccall, use_threading, use_simd, interleaving, use_gpu, use_MPI)
+        end
+    else
+        function build_params(test, domain; 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                axis_splitting, maxtime, maxcycle, silent, write_output, 
+                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
+                use_MPI, px, py)
+            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
+                test=test, nx=domain[1], ny=domain[2],
+                euler_projection, transpose_dims, axis_splitting, 
+                maxtime, maxcycle, silent, write_output, write_ghosts,
+                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py)
+        end
+    end
 else
     println("Loading...")
-
+    loading_start_time = time_ns()
+    
     if dimension == 1
         include("armon_1D.jl")
     else
         include("armon_2D.jl")
     end
+    using .Armon
+
     is_root = true
 
     if !use_gpu
         omp_bind_threads(threads_places, threads_proc_bind)
     end
+
+    if dimension == 1
+        function build_params(test, cells; 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                axis_splitting, maxtime, maxcycle, silent, write_output, 
+                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
+                use_MPI, px, py)
+            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
+                test=test, nbcell=cells,
+                euler_projection, maxtime, maxcycle, silent, write_output, write_ghosts,
+                use_ccall, use_threading, use_simd, interleaving, use_gpu)
+        end
+    else
+        function build_params(test, domain; 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                axis_splitting, maxtime, maxcycle, silent, write_output, 
+                use_ccall, use_threading, use_simd, interleaving, use_gpu,
+                use_MPI, px, py)
+            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
+                test=test, nx=domain[1], ny=domain[2],
+                euler_projection, transpose_dims, axis_splitting, 
+                maxtime, maxcycle, silent, write_output, write_ghosts,
+                use_ccall, use_threading, use_simd, use_gpu)
+        end
+    end
 end
-using .Armon
+
+
+
+if use_gpu && is_root
+    if getkey(ENV, "USE_ROCM_GPU", false)
+        println("Using ROCM GPU")
+    else
+        println("Using CUDA GPU")
+    end
+end
 
 
 if dimension == 1
     transpose_dims = [false]
     axis_splitting = [:Sequential]
-
-    function build_params(test, cells; 
-            ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
-            axis_splitting, maxtime, maxcycle, silent, write_output, 
-            use_ccall, use_threading, use_simd, interleaving, use_gpu)
-        return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
-            test=test, nbcell=cells,
-            euler_projection, maxtime, maxcycle, silent, write_output, 
-            use_ccall, use_threading, use_simd, interleaving, use_gpu)
-    end
-else
-    function build_params(test, domain; 
-            ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
-            axis_splitting, maxtime, maxcycle, silent, write_output, 
-            use_ccall, use_threading, use_simd, interleaving, use_gpu)
-        return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
-            test=test, nx=domain[1], ny=domain[2],
-            euler_projection, transpose_dims, axis_splitting, 
-            maxtime, maxcycle, silent, write_output, 
-            use_ccall, use_threading, use_simd, use_gpu)
-    end
 end
 
 
@@ -352,7 +407,8 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
-        interleaving, use_gpu
+        interleaving, use_gpu,
+        use_MPI=false, px=0, py=0
     )
 
     if dimension == 1
@@ -380,17 +436,13 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
 end
 
 
-function test_red(a::Vector{Float64}, b::Vector{Float64})::Vector{Float64}
-    return a .+ b
-end
-
-
-function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, splitting)
+function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, splitting, px, py)
     if is_root
         if dimension == 1
             @printf(" - %s, %10g cells: ", test, cells)
         else
-            @printf(" - %-4s %-14s %10g cells (%5gx%-5g): ", 
+            @printf(" - (%2dx%-2d) %-4s %-14s %10g cells (%5gx%-5g): ", 
+                px, py,
                 string(test) * (transpose ? "ᵀ" : ""),
                 string(splitting), cells[1] * cells[2], cells[1], cells[2])
         end
@@ -400,19 +452,19 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
-        interleaving, use_gpu
+        interleaving, use_gpu,
+        use_MPI, px, py
     ))
+
+    if dimension == 1
+        time_contrib = [time_contrib]
+    end
     
     # Merge the cells throughput and the time distribution of all processes in one reduction
     # Since 'time_contrib' is an array of pairs, it is not a bits type. We first convert the values
     # to an array of floats, and then rebuild the array of pairs using the one of the root process.
-    if dimension == 1
-        time_contrib_vals = Vector{Float64}(undef, length(time_contrib)+1)
-        time_contrib_vals[1:end-1] .= last.(time_contrib)
-    else
-        time_contrib_vals = Vector{Float64}(undef, sum(length.(time_contrib))+1)
-        time_contrib_vals[1:end-1] .= last.(Iterators.flatten(time_contrib))
-    end
+    time_contrib_vals = Vector{Float64}(undef, (isempty(time_contrib) ? 0 : sum(length.(time_contrib))) + 1)
+    time_contrib_vals[1:end-1] .= last.(Iterators.flatten(time_contrib))
     time_contrib_vals[end] = cells_per_sec
     merged_time_contrib_vals = MPI.Reduce(time_contrib_vals, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
 
@@ -430,17 +482,11 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         end
         
         # Unflatten the values
-        if dimension == 1
-            for ((i, key_val_pair), time_val) in zip(enumerate(time_contrib), merged_time_contrib_vals)
-                time_contrib[i] = key_val_pair.first => key_val_pair.second + time_val
-            end
-        else
-            i = 1
-            for (_, axis_time_contrib) in time_contrib
-                for (i, key_val_pair) in enumerate(axis_time_contrib)
-                    axis_time_contrib[i] = key_val_pair.first => key_val_pair.second + merged_time_contrib_vals[i]
-                    i += 1
-                end
+        j = 1
+        for axis_time_contrib in time_contrib
+            for (i, key_val_pair) in enumerate(axis_time_contrib)
+                axis_time_contrib[i] = key_val_pair.first => key_val_pair.second + merged_time_contrib_vals[j]
+                j += 1
             end
         end
 
@@ -449,20 +495,11 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
             # count as time spent in MPI.
             total_time = 0.
             total_MPI_time = 0.
-            if dimension == 1
-                for (key, key_time) in time_contrib
+            for axis_time_contrib in time_contrib
+                for (key, key_time) in axis_time_contrib
                     total_time += key_time
                     if endswith(key, "_MPI")
                         total_MPI_time += key_time
-                    end
-                end
-            else
-                for (_, axis_time_contrib) in time_contrib
-                    for (key, key_time) in axis_time_contrib
-                        total_time += key_time
-                        if endswith(key, "_MPI")
-                            total_MPI_time += key_time
-                        end
                     end
                 end
             end
@@ -498,7 +535,7 @@ for test in tests, transpose in transpose_dims
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
         maxtime, maxcycle=1, silent=5, write_output=false, use_ccall, use_threading, use_simd, 
-        interleaving, use_gpu))
+        interleaving, use_gpu, use_MPI=false, px=1, py=1))
 end
 
 if is_root
@@ -507,7 +544,7 @@ if is_root
 end
 
 
-for test in tests, transpose in transpose_dims, splitting in axis_splitting
+for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px, py) in proc_domains
     if dimension == 1
         data_file_name = base_file_name * string(test) * ".csv"
         hist_file_name = base_file_name * string(test) * "_hist.csv"
@@ -523,6 +560,10 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting
             data_file_name *= "_" * string(splitting)
         end
 
+        if length(proc_domains) > 1
+            data_file_name *= "_pg=$(px)x$(py)"
+        end
+
         hist_file_name = data_file_name * "_hist.csv"
         comm_file_name = data_file_name * "_MPI_time.csv"
         data_file_name *= ".csv"
@@ -532,7 +573,7 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting
 
     for cells in cells_list
         if use_MPI
-            time_contrib = do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, splitting)
+            time_contrib = do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, splitting, px, py)
         else
             time_contrib = do_measure(data_file_name, test, cells, transpose, splitting)
         end
