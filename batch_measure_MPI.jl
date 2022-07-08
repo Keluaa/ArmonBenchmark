@@ -684,7 +684,7 @@ function create_all_data_files_and_plot(measure::MeasureParams)
 end
 
 
-function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_params::IntiParams)
+function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_params::IntiParams, i::Int)
     if julia_params.threads * inti_params.processes > max_inti_cores * inti_params.node_count
         println("Skipping running $(inti_params.processes) Julia processes with $(julia_params.threads) threads on $(inti_params.node_count) nodes.")
         return
@@ -715,7 +715,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
     catch e
         if isa(e, InterruptException)
             # The user pressed Crtl-C
-            println("Interrupted at $(i)/$(length(measures))")
+            println("Interrupted at measure n°$(i)")
             return
         else
             rethrow(e)
@@ -778,7 +778,7 @@ function main()
         # For each main parameter combinaison, run a job
         for julia_params in parse_combinaisons(measure)
             for inti_params in build_inti_combinaisons(measure)
-                run_measure(measure, julia_params, inti_params)
+                run_measure(measure, julia_params, inti_params, i)
             end
         end
     end

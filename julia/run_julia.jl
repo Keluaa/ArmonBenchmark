@@ -421,7 +421,7 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
 
     cells_per_sec, time_contrib = run_armon(params)
 
-    @printf("%.2g Giga cells/sec\n", cells_per_sec)
+    @printf("%6.3f Giga cells/sec\n", cells_per_sec)
 
     # Append the result to the data file
     open(data_file_name, "a") do data_file
@@ -471,7 +471,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
     if is_root
         total_cells_per_sec = merged_time_contrib_vals[end]
 
-        @printf("%.2g Giga cells/sec\n", total_cells_per_sec)
+        @printf("%6.3f Giga cells/sec\n", total_cells_per_sec)
         # Append the result to the data file
         open(data_file_name, "a") do data_file
             if dimension == 1
