@@ -34,6 +34,7 @@ cells_list = []
 use_MPI = false
 verbose_MPI = false
 proc_domains = [(1, 1)]
+proc_grid_ratios = nothing
 
 base_file_name = ""
 gnuplot_script = ""
@@ -172,6 +173,15 @@ while i <= length(ARGS)
             proc_domain_list_t[i] = Tuple(parse.(Int, proc_domain))
         end
         global proc_domains = proc_domain_list_t
+        global i += 1
+    elseif arg == "--proc-grid-ratio"
+        raw_proc_grid_ratios = split(ARGS[i+1], ';')
+        raw_proc_grid_ratios = split.(raw_proc_grid_ratios, ',')
+        proc_grid_ratios_t = Vector{NTuple{2, Int}}(undef, length(raw_proc_grid_ratios))
+        for (i, grid_ratio) in enumerate(raw_proc_grid_ratios)
+            proc_grid_ratios_t[i] = Tuple(parse.(Int, grid_ratio))
+        end
+        global proc_grid_ratios = proc_grid_ratios_t
         global i += 1
 
     # Additionnal params
@@ -324,6 +334,7 @@ else
     end
     using .Armon
 
+    global_size = 1
     is_root = true
 
     if !use_gpu
@@ -520,6 +531,22 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
     end
 
     return time_contrib
+end
+
+
+function process_ratio_to_grid(n_proc, ratios)
+    (rpx, rpy) = ratios
+    r = rpx / rpy
+    # In theory the ratios have been pre-checked so that those convertions don't throw InexactError
+    px = convert(Int, √(n_proc * r))
+    py = convert(Int, √(n_proc / r))
+    return px, py
+end
+
+
+if !isnothing(proc_grid_ratios)
+    # Convert the ratios to process grids
+    proc_domains = map(Base.Fix1(process_ratio_to_grid, global_size), proc_grid_ratios)
 end
 
 

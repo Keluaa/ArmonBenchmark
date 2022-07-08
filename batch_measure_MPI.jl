@@ -26,6 +26,7 @@ mutable struct MeasureParams
     cells_list::Vector{Int}
     domain_list::Vector{Vector{Int}}
     process_grids::Vector{Vector{Int}}
+    process_grid_ratios::Union{Nothing, Vector{Vector{Int}}}
     tests_list::Vector{String}
     transpose_dims::Vector{Bool}
     axis_splitting::Vector{String}
@@ -151,6 +152,7 @@ function parse_measure_params(file_line_parser)
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     process_grids = ["1,1"]
+    process_grid_ratios = nothing
     tests_list = ["Sod"]
     transpose_dims = [false]
     axis_splitting = ["Sequential"]
@@ -220,6 +222,8 @@ function parse_measure_params(file_line_parser)
             domain_list = value
         elseif option == "process_grids"
             process_grids = split(value, ';')
+        elseif option == "process_grid_ratios"
+            process_grid_ratios = split(value, ';')
         elseif option == "tests"
             tests_list = split(value, ',')
         elseif option == "transpose"
@@ -263,8 +267,14 @@ function parse_measure_params(file_line_parser)
     domain_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
                    for cells_domain in domain_list]
 
-    process_grids = [parse.(Int, split(process_grid, ','))
-                   for process_grid in process_grids]
+    if !isnothing(process_grid_ratios)
+        # Make sure that all ratios are compatible with all processes counts
+        process_grid_ratios = [parse.(Int, split(ratio, ',')) for ratio in process_grid_ratios]
+        process_grids = [[1, 1]] # Provide a dummy grid
+    else
+        # Use the explicitly defined process grid.
+        process_grids = [parse.(Int, split(process_grid, ',')) for process_grid in process_grids]
+    end
 
     if isnothing(name)
         error("Expected a name for the measurement at line ", last_i)
@@ -278,6 +288,10 @@ function parse_measure_params(file_line_parser)
     end
     if isnothing(plot_title)
         plot_title = "You forgot to add a title"
+    end
+
+    if !isnothing(process_grid_ratios) && dimension == 1
+        error("'process_grid_ratio' is incompatible with 1D") 
     end
 
     if time_histogram && length(tests_list) > 1
@@ -300,7 +314,7 @@ function parse_measure_params(file_line_parser)
 
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         threads, use_simd, jl_proc_bind, jl_places, 
-        dimension, cells_list, domain_list, process_grids, tests_list, 
+        dimension, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
         name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
@@ -404,9 +418,32 @@ function armon_combinaisons(measure::MeasureParams, dimension::Int)
             measure.tests_list,
             measure.transpose_dims,
             measure.axis_splitting,
-            measure.process_grids
+            isnothing(measure.process_grid_ratios) ? measure.process_grids : [nothing],
+            isnothing(measure.process_grid_ratios) ? [nothing] : measure.process_grid_ratios
         )
     end
+end
+
+
+function check_ratio_for_grid(n_proc, ratios)
+    (rpx, rpy) = ratios
+    r = rpx / rpy
+    try
+        px = convert(Int, √(n_proc * r)) 
+        py = convert(Int, √(n_proc / r))
+    catch
+        return false
+    end
+    return true
+end
+
+
+function process_ratio_to_grid(n_proc, ratios)
+    (rpx, rpy) = ratios
+    r = rpx / rpy
+    px = convert(Int, √(n_proc * r)) 
+    py = convert(Int, √(n_proc / r))
+    return px, py
 end
 
 
@@ -441,7 +478,7 @@ function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
 end
 
 
-function run_backend(measure::MeasureParams, params::JuliaParams, base_file_name::String)
+function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::IntiParams, base_file_name::String)
     armon_options = [
         "julia", "-t", params.threads
     ]
@@ -494,9 +531,21 @@ function run_backend(measure::MeasureParams, params::JuliaParams, base_file_name
         append!(armon_options, [
             "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
-            "--proc-grid", join([join(string.(process_grid), ',') for process_grid in measure.process_grids], ';'),
             "--flat-dims", measure.flatten_time_dims
         ])
+
+        if isnothing(measure.process_grid_ratios)
+            push!(armon_options, "--proc-grid", join([
+                join(string.(process_grid), ',') 
+                for process_grid in measure.process_grids
+            ], ';'))
+        else
+            push!(armon_options, "--proc-grid-ratio", join([
+                join(string.(ratio), ',')
+                for ratio in measure.process_grid_ratios
+                if check_ratio_for_grid(inti_params.processes, ratio)
+            ], ';'))
+        end
     end
 
     return armon_options
@@ -623,7 +672,16 @@ function create_all_data_files_and_plot(measure::MeasureParams)
             base_file_name, legend_base = build_data_file_base_name(measure, inti_params.processes, inti_params.distribution, inti_params.node_count, parameters)
             dimension = parameters.dimension
 
-            for (test, transpose_dims, axis_splitting, process_grid) in armon_combinaisons(measure, dimension)
+            for (test, transpose_dims, axis_splitting, process_grid, process_grid_ratio) in armon_combinaisons(measure, dimension)
+                if dimension > 1 && isnothing(process_grid)
+                    if check_ratio_for_grid(inti_params.processes, process_grid_ratio)
+                        px, py = process_ratio_to_grid(inti_params.processes, process_grid_ratio)
+                    else
+                        continue  # This ratio is incompatible with this process count
+                    end
+                    process_grid = Int[px, py]
+                end
+                
                 data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting, process_grid)
                 
                 legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
@@ -690,9 +748,14 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
         return
     end
 
+    if !any(map(Base.Fix1(check_ratio_for_grid, inti_params.processes), measure.process_grid_ratios))
+        println("Skipping running $(inti_params.processes) Julia processes since none of the given grid ratios can entirely divide $(inti_params.processes)")
+        return
+    end
+
     base_file_name, _ = build_data_file_base_name(measure, 
         inti_params.processes, inti_params.distribution, inti_params.node_count, julia_params)
-    armon_options = run_backend(measure, julia_params, base_file_name)
+    armon_options = run_backend(measure, julia_params, inti_params, base_file_name)
 
     println("""Running Julia with:
  - $(julia_params.threads) threads
