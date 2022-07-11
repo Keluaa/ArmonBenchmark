@@ -35,6 +35,7 @@ use_MPI = false
 verbose_MPI = false
 proc_domains = [(1, 1)]
 proc_grid_ratios = nothing
+single_comm_per_axis_pass = false
 
 base_file_name = ""
 gnuplot_script = ""
@@ -183,6 +184,9 @@ while i <= length(ARGS)
         end
         global proc_grid_ratios = proc_grid_ratios_t
         global i += 1
+    elseif arg == "--single-comm"
+        global single_comm_per_axis_pass = parse(Bool, ARGS[i+1])
+        global i += 1
 
     # Additionnal params
     elseif arg == "--gpu"
@@ -304,7 +308,7 @@ if use_MPI
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py)
+                use_MPI, px, py, single_comm_per_axis_pass)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
                 test=test, nbcell=cells,
                 euler_projection, maxtime, maxcycle, silent, write_output, write_ghosts,
@@ -315,12 +319,13 @@ if use_MPI
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py)
+                use_MPI, px, py, single_comm_per_axis_pass)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
                 maxtime, maxcycle, silent, write_output, write_ghosts,
-                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py)
+                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
+                single_comm_per_axis_pass)
         end
     end
 else
@@ -346,7 +351,7 @@ else
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py)
+                use_MPI, px, py, single_comm_per_axis_pass)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
                 test=test, nbcell=cells,
                 euler_projection, maxtime, maxcycle, silent, write_output, write_ghosts,
@@ -357,7 +362,7 @@ else
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu,
-                use_MPI, px, py)
+                use_MPI, px, py, single_comm_per_axis_pass)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
@@ -419,7 +424,8 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
-        use_MPI=false, px=0, py=0
+        use_MPI=false, px=0, py=0,
+        single_comm_per_axis_pass=false
     )
 
     if dimension == 1
@@ -464,7 +470,8 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
-        use_MPI, px, py
+        use_MPI, px, py,
+        single_comm_per_axis_pass
     ))
 
     if dimension == 1
@@ -562,7 +569,7 @@ for test in tests, transpose in transpose_dims
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
         maxtime, maxcycle=1, silent=5, write_output=false, use_ccall, use_threading, use_simd, 
-        interleaving, use_gpu, use_MPI=false, px=1, py=1))
+        interleaving, use_gpu, use_MPI=false, px=1, py=1, single_comm_per_axis_pass))
 end
 
 if is_root

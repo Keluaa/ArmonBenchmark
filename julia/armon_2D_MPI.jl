@@ -114,6 +114,7 @@ mutable struct ArmonParameters{Flt_T}
     cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid
     neighbours::NamedTuple{(:top, :bottom, :left, :right), NTuple{4, Int}}  # Ranks of the neighbours of this process
     global_grid::NTuple{2, Int}  # Dimensions (nx, ny) of the global grid
+    single_comm_per_axis_pass::Bool
 end
 
 
@@ -131,7 +132,8 @@ function ArmonParameters(;
         use_ccall = false, use_threading = true, 
         use_simd = true, interleaving = false,
         use_gpu = false,
-        use_MPI = true, px = 1, py = 1
+        use_MPI = true, px = 1, py = 1,
+        single_comm_per_axis_pass = false
     )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
@@ -159,6 +161,11 @@ function ArmonParameters(;
 
     if write_output && write_ghosts && merge_files
         error("Writing the ghost cells to a single output file is not possible")
+    end
+
+    if (single_comm_per_axis_pass && (scheme == :Godunov && nghost < 2 || nghost < 3)
+            || (scheme == :Godunov && nghost < 1 || nghost < 2))
+        error("Not enough ghost cells for the scheme.")
     end
 
     if (nx % px != 0) || (ny % py != 0)
@@ -228,7 +235,8 @@ function ArmonParameters(;
         measure_time,
         use_ccall, use_threading, use_simd, use_gpu,
         use_MPI, is_root, rank, root_rank, 
-        proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny)
+        proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
+        single_comm_per_axis_pass
     )
 end
 
@@ -272,6 +280,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - global:     ", p.global_grid[1], "x", p.global_grid[2])
     println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2])
     println(" - coords:     ", p.cart_coords[1], "x", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
+    println(" - comms per axis: ", p.single_comm_per_axis_pass ? 1 : 2)
 end
 
 
@@ -876,13 +885,23 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     (; ustar, pstar, rho, pmat, cmat) = data
     (; ideb, s) = params
 
+    if params.single_comm_per_axis_pass
+        (; nx, ny, ifin) = params
+        @indexing_vars(params)
+        first_i = @i(0, 0)
+        last_i = @i(nx+1, ny+1) + last_i - ifin
+    else
+        first_i = ideb
+        last_i = last_i
+    end
+
     if params.use_gpu
-        gpu_acoustic!(ideb - 1, s, ustar, pstar, rho, u, pmat, cmat, 
-            ndrange=length(ideb:last_i)) |> wait_d
+        gpu_acoustic!(first_i - 1, s, ustar, pstar, rho, u, pmat, cmat, 
+            ndrange=length(first_i:last_i)) |> wait_d
         return
     end
 
-    @simd_threaded_loop for i in ideb:last_i
+    @simd_threaded_loop for i in first_i:last_i
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
         ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -896,20 +915,30 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     (; ustar, pstar, rho, pmat, cmat, ustar_1, pstar_1) = data
     (; scheme, dx, ideb, s) = params
 
+    if params.single_comm_per_axis_pass
+        (; nx, ny, ifin) = params
+        @indexing_vars(params)
+        first_i = @i(0, 0)
+        last_i = @i(nx+1, ny+1) + last_i - ifin
+    else
+        first_i = ideb
+        last_i = last_i
+    end
+
     if params.use_gpu
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        gpu_acoustic!(ideb - 1, s, ustar_1, pstar_1, 
-            rho, u, pmat, cmat, ndrange=length(ideb:last_i)) |> wait_d
-        gpu_acoustic_GAD_minmod!(ideb - 1, s, ustar, pstar, 
-            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx, ndrange=length(ideb:last_i)) |> wait_d
+        gpu_acoustic!(first_i - 1, s, ustar_1, pstar_1, 
+            rho, u, pmat, cmat, ndrange=length(first_i:last_i)) |> wait_d
+        gpu_acoustic_GAD_minmod!(first_i - 1, s, ustar, pstar, 
+            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx, ndrange=length(first_i:last_i)) |> wait_d
         return
     end
 
     # First order
-    @simd_threaded_loop for i in ideb-s:last_i+s
+    @simd_threaded_loop for i in first_i-s:last_i+s
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
         ustar_1[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -918,7 +947,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
 
     # Second order, for each flux limiter
     if scheme == :GAD_minmod
-        @simd_threaded_loop for i in ideb:last_i
+        @simd_threaded_loop for i in first_i:last_i
             r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
             r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
             r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
@@ -942,7 +971,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
                                                      r_p_m * (pstar_1[i] -  pmat[i-s]))
         end
     elseif scheme == :GAD_superbee
-        @simd_threaded_loop for i in ideb:last_i
+        @simd_threaded_loop for i in first_i:last_i
             r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
             r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
             r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
@@ -966,7 +995,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
                                                      r_p_m * (pstar_1[i] -  pmat[i-s]))
         end
     elseif scheme == :GAD_no_limiter
-        @simd_threaded_loop for i in ideb:last_i
+        @simd_threaded_loop for i in first_i:last_i
             dm_l = rho[i-s] * dx
             dm_r = rho[i]   * dx
             rc_l = rho[i-s] * cmat[i-s]
@@ -1022,7 +1051,7 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
     (; ideb, ifin) = params
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
-    # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state",
+    # "Dissipative issue of high-order shock capturing schemes with non-convex equations of state",
     # JCP 2009
 
     rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
@@ -1132,6 +1161,8 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     pos_x = cx * nx
     pos_y = cy * ny
 
+    one_more_ring = params.single_comm_per_axis_pass
+
     @simd_threaded_loop for i in 1:nbcell
         ix = ((i-1) % row_length) - nghost
         iy = ((i-1) ÷ row_length) - nghost
@@ -1156,7 +1187,15 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         vmat[i] = 0.
 
         # Set to 1 if the cell is in the real domain or 0 in the ghost domain
-        domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1. : 0.
+        if one_more_ring
+            domain_mask[i] = (
+                (-1 ≤   ix < nx+1 && -1 ≤   iy < ny+1)  # Include as well one ring of ghost cells...
+             && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
+             && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
+            ) ? 1. : 0
+        else
+            domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1. : 0
+        end
 
         # Set to zero to make sure no non-initialized values changes the result
         pmat[i] = 0.
@@ -1550,26 +1589,36 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
     (; ustar, pstar, rho, Emat, domain_mask) = data
     (; dx, ideb, ifin, s) = params
 
+    if params.single_comm_per_axis_pass
+        (; nx, ny) = params
+        @indexing_vars(params)
+        first_i = @i(0, 0)
+        last_i = @i(nx+1, ny+1)
+    else
+        first_i = ideb
+        last_i = ifin
+    end
+
     if params.use_gpu
-        gpu_cell_update!(ideb - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
-            ndrange=length(ideb:ifin)) |> wait_d
+        gpu_cell_update!(first_i - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
+            ndrange=length(first_i:last_i)) |> wait_d
         if !params.euler_projection
-            gpu_cell_update_lagrange!(ideb - 1, ifin, dt, s, x, ustar, 
-                ndrange=length(ideb:ifin)) |> wait_d
+            gpu_cell_update_lagrange!(first_i - 1, last_i, dt, s, x, ustar, 
+                ndrange=length(first_i:last_i)) |> wait_d
         end
         return
     end
 
-    @simd_threaded_loop for i in ideb:ifin
+    @simd_threaded_loop for i in first_i:last_i
         mask = domain_mask[i]
         dm = rho[i] * dx
         rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
         u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
         Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
     end
- 
+
     if !params.euler_projection
-        @simd_threaded_loop for i in ideb:ifin
+        @simd_threaded_loop for i in first_i:last_i
             x[i] += dt * ustar[i]
         end
     end
@@ -1828,7 +1877,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             @time_pos cellUpdate!(params, data, dt * dt_factor, u, x_)
     
             if params.euler_projection
-                @time_pos boundaryConditions_MPI!(params, data, axis)
+                if !params.single_comm_per_axis_pass 
+                    @time_pos boundaryConditions_MPI!(params, data, axis) 
+                end
                 @time_pos first_order_euler_remap!(params, data, dt * dt_factor)
             end
 
