@@ -24,7 +24,7 @@ do
 
         # Each line of the file is one plot to update
         while IFS= read -r line || [[ -n "$line" ]]; do
-            echo Updated plot $line
+            # echo Updated plot $line
             $display_cmd $line 2> /dev/null
         done < "$last_update_file_path"
 

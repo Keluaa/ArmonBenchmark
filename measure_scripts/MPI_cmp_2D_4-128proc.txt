@@ -1,0 +1,23 @@
+name=MPI_cmp_2D_4-128proc_1nodes
+device=CPU
+node=milan-bxi
+processes=4,16,32,64,128
+node_count=1
+# The threads option is ignored since 'use_max_threads=true'
+threads=1,2,4,8,16,32
+use_max_threads=true
+dim=2
+jl_places=cores
+jl_proc_bind=close
+domains=800,800; 1600,1600; 2000,2000; 2400,2400; 3200,3200; 6400,6400; 7200,7200; 10000,10000; 16000,16000; 20000,20000; 24000,24000; 30000,30000; 34000,34000
+# The script only keeps the grid ratios which can properly distribute the processes
+process_grid_ratios=1,1; 2,1
+splitting=Sequential
+repeats=5
+tests=Sod_circ
+armon=--verbose-mpi 0 --euler 1 --cycle 20
+log_scale=true
+time_MPI_plot=true
+title=2D Eulerian 2nd-order hydro with sub-domains, cylindrical Sod, 20 cycles, 5 samples 
+max_time=5400
+

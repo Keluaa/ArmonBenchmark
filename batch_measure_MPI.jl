@@ -40,6 +40,7 @@ mutable struct MeasureParams
     log_scale::Bool
     plot_title::String
     verbose::Bool
+    use_max_threads::Bool
 
     # > Time histogram
     time_histogram::Bool
@@ -168,6 +169,7 @@ function parse_measure_params(file_line_parser)
     log_scale = true
     plot_title = nothing
     verbose = false
+    use_max_threads = false
 
     time_histogram = false
     flatten_time_dims = false
@@ -248,6 +250,8 @@ function parse_measure_params(file_line_parser)
             log_scale = parse(Bool, value)
         elseif option == "verbose"
             verbose = parse(Bool, value)
+        elseif option == "use_max_threads"
+            use_max_threads = parse(Bool, value)
         elseif option == "time_hist"
             time_histogram = parse(Bool, value)
         elseif option == "flat_hist_dims"
@@ -316,7 +320,7 @@ function parse_measure_params(file_line_parser)
         threads, use_simd, jl_proc_bind, jl_places, 
         dimension, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
-        name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, 
+        name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, use_max_threads, 
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file)
 end
@@ -344,6 +348,7 @@ function parse_arguments()
     end
 
     start_at = 1
+    skip_first = 0
 
     node_overrides = Dict{String, String}()
 
@@ -355,9 +360,12 @@ function parse_arguments()
             if (startswith(arg, "--override-node="))
                 node, replacement_node = split(split(arg, '=')[2], ',')
                 node_overrides[node] = replacement_node
-            elseif (startswith(arg, "--startat="))
+            elseif (startswith(arg, "--start-at="))
                 value = split(arg, '=')[2]
                 start_at = parse(Int, value)
+            elseif (startswith(arg, "--skip-first="))
+                value = split(arg, '=')[2]
+                skip_first = parse(Int, value)
             else
                 error("Wrong batch option: " * arg)
             end
@@ -375,7 +383,7 @@ function parse_arguments()
         end
     end
 
-    return measures, start_at
+    return measures, start_at, skip_first
 end
 
 
@@ -391,17 +399,32 @@ function build_inti_combinaisons(measure::MeasureParams)
 end
 
 
-function parse_combinaisons(measure::MeasureParams)
-    return Iterators.map(
-        params->JuliaParams(params...),    
-        Iterators.product(
-            measure.jl_places,
-            measure.jl_proc_bind,
-            measure.threads,
-            measure.use_simd,
-            measure.dimension
+function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
+    if measure.use_max_threads
+        process_per_node = inti_params.processes ÷ inti_params.node_count
+        threads_per_process = max_inti_cores ÷ process_per_node
+        return Iterators.map(
+            params->JuliaParams(params...),
+            Iterators.product(
+                measure.jl_places,
+                measure.jl_proc_bind,
+                [threads_per_process],
+                measure.use_simd,
+                measure.dimension
+            )
         )
-    )
+    else
+        return Iterators.map(
+            params->JuliaParams(params...),    
+            Iterators.product(
+                measure.jl_places,
+                measure.jl_proc_bind,
+                measure.threads,
+                measure.use_simd,
+                measure.dimension
+            )
+        )
+    end
 end
 
 
@@ -655,16 +678,20 @@ function build_inti_options(measure::MeasureParams, inti_params::IntiParams, thr
 end
 
 
-function create_all_data_files_and_plot(measure::MeasureParams)
+function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
     plot_commands = []
     hist_commands = []
     plot_MPI_commands = []
     color_index = 1
+    comb_i = 0
     for inti_params in build_inti_combinaisons(measure)
         # Marker style for the plot
         point_type = 5
         
-        for parameters in parse_combinaisons(measure)
+        for parameters in parse_combinaisons(measure, inti_params)
+            comb_i += 1
+            erase_files = comb_i > skip_first
+            
             if parameters.threads * inti_params.processes > max_inti_cores * inti_params.node_count
                 continue
             end
@@ -687,20 +714,20 @@ function create_all_data_files_and_plot(measure::MeasureParams)
                 legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
                 
                 data_file_name = data_file_name_base * ".csv"
-                open(data_file_name, "w") do _ end  # Create/Clear the file
+                erase_files && (open(data_file_name, "w") do _ end)  # Create/Clear the file
                 plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
                 push!(plot_commands, plot_cmd)
 
                 if measure.time_histogram
                     hist_file_name = data_file_name_base * "_hist.csv"
-                    open(hist_file_name, "w") do _ end  # Create/Clear the file
+                    erase_files && (open(hist_file_name, "w") do _ end)  # Create/Clear the file
                     plot_cmd = gnuplot_hist_plot_command(hist_file_name, legend, point_type)
                     push!(hist_commands, plot_cmd)
                 end
 
                 if measure.time_MPI_plot
                     MPI_plot_file_name = data_file_name_base * "_MPI_time.csv"
-                    open(MPI_plot_file_name, "w") do _ end  # Create/Clear the file
+                    erase_files && (open(MPI_plot_file_name, "w") do _ end)  # Create/Clear the file
                     plot_cmd = gnuplot_MPI_plot_command_1(MPI_plot_file_name, legend, color_index, point_type)
                     push!(plot_MPI_commands, plot_cmd)
                     plot_cmd = gnuplot_MPI_plot_command_2(MPI_plot_file_name, 
@@ -820,7 +847,7 @@ end
 
 
 function main()
-    measures, start_at = parse_arguments()
+    measures, start_at, skip_first = parse_arguments()
 
     Base.exit_on_sigint(false) # To be able to properly handle Crtl-C
     
@@ -836,11 +863,16 @@ function main()
         end
 
         # Create the files and plot script once at the beginning
-        create_all_data_files_and_plot(measure)
+        create_all_data_files_and_plot(measure, i == start_at ? skip_first : 0)
 
         # For each main parameter combinaison, run a job
-        for julia_params in parse_combinaisons(measure)
-            for inti_params in build_inti_combinaisons(measure)
+        comb_i = 0
+        for inti_params in build_inti_combinaisons(measure)
+            for julia_params in parse_combinaisons(measure, inti_params)
+                comb_i += 1
+                if (i == start_at && comb_i <= skip_first)
+                    continue
+                end
                 run_measure(measure, julia_params, inti_params, i)
             end
         end
