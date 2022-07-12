@@ -100,6 +100,7 @@ set ylabel 'Giga Cells/sec'
 set xlabel 'Cells count'
 set title "$title"
 set key $legend_pos top
+set yrange [0:]
 $(log_scale ? "set logscale x" : "")
 `echo "$graph_file_name" >> $plots_update_file`
 plot """
