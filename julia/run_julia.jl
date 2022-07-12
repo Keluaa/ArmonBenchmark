@@ -11,7 +11,7 @@ cfl = 0.6
 Dt = 0.
 maxtime = 0.0
 maxcycle = 500
-euler_projection = false
+euler_projection = true
 cst_dt = false
 ieee_bits = 64
 silent = 2
@@ -33,9 +33,11 @@ cells_list = []
 
 use_MPI = false
 verbose_MPI = false
+file_MPI_dump = ""
 proc_domains = [(1, 1)]
 proc_grid_ratios = nothing
 single_comm_per_axis_pass = false
+reorder_grid = true
 
 base_file_name = ""
 gnuplot_script = ""
@@ -166,6 +168,9 @@ while i <= length(ARGS)
     elseif arg == "--verbose-mpi"
         global verbose_MPI = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--file-mpi-dump"
+        global file_MPI_dump = ARGS[i+1]
+        global i += 1
     elseif arg == "--proc-grid"
         raw_proc_domain_list = split(ARGS[i+1], ';')
         raw_proc_domain_list = split.(raw_proc_domain_list, ',')
@@ -186,6 +191,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--single-comm"
         global single_comm_per_axis_pass = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--reorder-grid"
+        global reorder_grid = parse(Bool, ARGS[i+1])
         global i += 1
 
     # Additionnal params
@@ -279,7 +287,7 @@ if use_MPI
     thread_offset = local_rank * Threads.nthreads()
     omp_bind_threads(thread_offset, threads_places, threads_proc_bind)
 
-    if verbose_MPI
+    if verbose_MPI || !isempty(file_MPI_dump)
         # Call 'MPI_Get_processor_name', which is not exposed by MPI.jl, in order to get the name of
         # the node on which the current process is running.
         raw_node_name = Vector{UInt8}(undef, 256)  # MPI_MAX_PROCESSOR_NAME == 256
@@ -287,19 +295,42 @@ if use_MPI
         #= MPI.@mpichk =# ccall((:MPI_Get_processor_name, MPI.libmpi), Cint, (Ptr{Cuchar}, Ptr{Cint}), raw_node_name, len)
         node_name = unsafe_string(pointer(raw_node_name), len[])
 
-        using ThreadPinning  # To use threadinfo()
+        using ThreadPinning  # To use threadinfo() and getcpuids()
         
-        if is_root
-            println("Processes info:")
+        if !isempty(file_MPI_dump)
+            is_root && println("Writing MPI process info to $file_MPI_dump...")
+            # Write the debug info to the file, ordered by process rank
+            mpi_info_file = MPI.File.open(MPI.COMM_WORLD, file_MPI_dump; write=true)
+
+            info_line_length = 300
+            cores_line_length = 10+512
+            proc_offset = info_line_length + cores_line_length + 2
+
+            info_line = @sprintf("%4d: local %-2d/%2d in node %s", rank, local_rank+1, local_size, node_name)
+            cores_line = Vector{String}()
+            push!(cores_line, " - cores: ")
+            for tid in getcpuids()
+                push!(cores_line, @sprintf("%4d", tid))
+            end
+            cores_line = reduce(*, cores_line)
+
+            info_line = @sprintf("%-300s\n", info_line[1:min(length(info_line), info_line_length)])
+            cores_line = @sprintf("%-522s\n", cores_line[1:min(length(cores_line), cores_line_length)])
+            proc_info_lines = info_line * cores_line
+
+            MPI.File.write_at_all(mpi_info_file, proc_offset * rank, proc_info_lines)
         end
 
-        # Print the debug info in order, one process at a time
-        for i in 1:global_size
-            if i == rank+1
-                @printf(" - %-4d: local %-2d/%2d, node %s\n", rank+1, local_rank+1, local_size, node_name)
-                threadinfo(; color=false, blocksize=64)
+        if verbose_MPI
+            is_root && println("Processes info:")
+            # Print the debug info in order, one process at a time
+            for i in 1:global_size
+                if i == rank+1
+                    @printf(" - %-4d: local %-2d/%2d in node %s\n", rank, local_rank+1, local_size, node_name)
+                    threadinfo(; color=false, blocksize=64)
+                end
+                MPI.Barrier(MPI.COMM_WORLD)
             end
-            MPI.Barrier(MPI.COMM_WORLD)
         end
     end
 
@@ -308,7 +339,7 @@ if use_MPI
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
                 test=test, nbcell=cells,
                 euler_projection, maxtime, maxcycle, silent, write_output, write_ghosts,
@@ -319,13 +350,13 @@ if use_MPI
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
                 maxtime, maxcycle, silent, write_output, write_ghosts,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
-                single_comm_per_axis_pass)
+                single_comm_per_axis_pass, reorder_grid)
         end
     end
 else
@@ -351,7 +382,7 @@ else
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
                 test=test, nbcell=cells,
                 euler_projection, maxtime, maxcycle, silent, write_output, write_ghosts,
@@ -362,7 +393,7 @@ else
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu,
-                use_MPI, px, py, single_comm_per_axis_pass)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
@@ -425,7 +456,7 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
         use_MPI=false, px=0, py=0,
-        single_comm_per_axis_pass=false
+        single_comm_per_axis_pass=false, reorder_grid=false
     )
 
     if dimension == 1
@@ -471,7 +502,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
         use_MPI, px, py,
-        single_comm_per_axis_pass
+        single_comm_per_axis_pass, reorder_grid
     ))
 
     if dimension == 1
@@ -569,7 +600,7 @@ for test in tests, transpose in transpose_dims
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
         maxtime, maxcycle=1, silent=5, write_output=false, use_ccall, use_threading, use_simd, 
-        interleaving, use_gpu, use_MPI=false, px=1, py=1, single_comm_per_axis_pass))
+        interleaving, use_gpu, use_MPI=false, px=1, py=1, single_comm_per_axis_pass, reorder_grid=false))
 end
 
 if is_root

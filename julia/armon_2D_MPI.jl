@@ -115,6 +115,7 @@ mutable struct ArmonParameters{Flt_T}
     neighbours::NamedTuple{(:top, :bottom, :left, :right), NTuple{4, Int}}  # Ranks of the neighbours of this process
     global_grid::NTuple{2, Int}  # Dimensions (nx, ny) of the global grid
     single_comm_per_axis_pass::Bool
+    reorder_grid::Bool
 end
 
 
@@ -133,7 +134,7 @@ function ArmonParameters(;
         use_simd = true, interleaving = false,
         use_gpu = false,
         use_MPI = true, px = 1, py = 1,
-        single_comm_per_axis_pass = false
+        single_comm_per_axis_pass = false, reorder_grid = true
     )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
@@ -177,8 +178,9 @@ function ArmonParameters(;
         rank = MPI.Comm_rank(COMM)
         proc_size = MPI.Comm_size(COMM)
 
-        # TODO : try to use reordering (then we can still use 'rank' but only with C_COMM)
-        C_COMM = MPI.Cart_create(COMM, [Int32(px), Int32(py)], [Int32(0), Int32(0)], false)
+        # Create a cartesian grid communicator of px × py processes. reorder=true can be very
+        # important for performance since it will optimize the layout of the processes.
+        C_COMM = MPI.Cart_create(COMM, [Int32(px), Int32(py)], [Int32(0), Int32(0)], reorder_grid)
         (cx, cy) = MPI.Cart_coords(C_COMM)
 
         neighbours = (
@@ -236,7 +238,7 @@ function ArmonParameters(;
         use_ccall, use_threading, use_simd, use_gpu,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
-        single_comm_per_axis_pass
+        single_comm_per_axis_pass, reorder_grid
     )
 end
 
@@ -278,7 +280,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - domain:     ", p.nx, "x", p.ny, " (", p.nghost, " ghosts)")
     println(" - nbcell:     ", p.nx * p.ny, " (", p.nbcell, " total)")
     println(" - global:     ", p.global_grid[1], "x", p.global_grid[2])
-    println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2])
+    println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2], "($(p.reorder_grid ? "" : "not ")reordered)")
     println(" - coords:     ", p.cart_coords[1], "x", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
     println(" - comms per axis: ", p.single_comm_per_axis_pass ? 1 : 2)
 end
