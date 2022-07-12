@@ -118,7 +118,7 @@ plot """
 base_gnuplot_MPI_time_script_commands(graph_file_name, title, log_scale, legend_pos) = """
 set terminal pdfcairo color size 10in, 6in
 set output '$graph_file_name'
-set ylabel 'Time [sec]'
+set ylabel 'Communications Time [sec]'
 set xlabel 'Cells count'
 set title "$title"
 set key $legend_pos top
