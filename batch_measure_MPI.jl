@@ -14,6 +14,7 @@ mutable struct MeasureParams
     node_count::Vector{Int}
     max_time::Int
     use_MPI::Bool
+    create_sub_job_chain::Bool
 
     # Backend params
     threads::Vector{Int}
@@ -91,6 +92,7 @@ data_dir = "./data/"
 plot_scripts_dir = "./plot_scripts/"
 plots_dir = "./plots/"
 plots_update_file = plots_dir * "last_update"
+sub_scripts_dir = "./sub_scripts/"
 
 
 base_gnuplot_script_commands(graph_file_name, title, log_scale, legend_pos) = """
@@ -139,6 +141,23 @@ gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$
 gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
 
 
+sub_script_content(job_name, partition, nodes, processes, cores_per_process, command, next_script) = """
+#!/bin/bash
+#MSUB -r $job_name
+#MSUB -o stdout_$job_name.txt
+#MSUB -e stderr_$job_name.txt
+#MSUB -q $partition
+#MSUB -N $nodes
+#MSUB -n $processes
+#MSUB -c $cores_per_process
+#MSUB -x
+cd ${BRIDGE_MSUB_PWD}
+module load $(join(required_modules, ' '))
+$(string(command)[2:end-1])
+$(!isnothing(next_script) ? "ccc_msub $next_script" : "echo 'All done.'")
+"""
+
+
 function parse_measure_params(file_line_parser)    
     device = CPU
     node = "a100"
@@ -146,6 +165,7 @@ function parse_measure_params(file_line_parser)
     processes = [1]
     node_count = [1]
     max_time = 3600  # 1h
+    create_sub_job_chain = false
     threads = [4]
     use_simd = [true]
     jl_places = ["cores"]
@@ -209,6 +229,8 @@ function parse_measure_params(file_line_parser)
             node_count = parse.(Int, split(value, ','))
         elseif option == "max_time"
             max_time = parse(Int, value)
+        elseif option == "create_sub_job_chain"
+            create_sub_job_chain = parse(Bool, value)
         elseif option == "threads"
             threads = parse.(Int, split(value, ','))
         elseif option == "use_simd"
@@ -318,6 +340,7 @@ function parse_measure_params(file_line_parser)
     time_MPI_plot_file = plots_dir * name * "_MPI_time.pdf"
 
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
+        create_sub_job_chain,
         threads, use_simd, jl_proc_bind, jl_places, 
         dimension, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
@@ -666,16 +689,23 @@ end
 
 
 function build_inti_options(measure::MeasureParams, inti_params::IntiParams, threads::Int)
-    return [
-        "-p", measure.node,
-        "-N", inti_params.node_count,                  # Number of nodes to distribute the processes to
-        "-n", inti_params.processes,                   # Number of processes
-        "-E", "-m block:$(inti_params.distribution)",  # Threads distribution
-        # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to
-        # further control threads/memory usage
-        "-x",
-        "-c", threads
-    ]
+    if measure.create_sub_job_chain
+        # The rest of the parameters are put in the job submission script
+        return [
+            "-E", "-m block:$(inti_params.distribution)"
+        ]
+    else
+        return [
+            "-p", measure.node,
+            "-N", inti_params.node_count,                  # Number of nodes to distribute the processes to
+            "-n", inti_params.processes,                   # Number of processes
+            "-E", "-m block:$(inti_params.distribution)",  # Threads distribution
+            # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to
+            # further control threads/memory usage
+            "-x",
+            "-c", threads
+        ]
+    end
 end
 
 
@@ -801,6 +831,10 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
         cmd = inti_cmd(armon_options, inti_options)
     end
 
+    if measure.create_sub_job_chain
+        return cmd
+    end
+
     try
         run(cmd)
     catch e
@@ -815,11 +849,38 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
 end
 
 
+function make_submission_scripts(commands::Vector{Tuple{MeasureParams, IntiParams, JuliaParams, Cmd}})
+    # Remove all previous scripts (if any)
+    rm_sub_scripts_files = "rm -f $(sub_scripts_dir)sub_*.sh"
+    run(`bash -c $rm_sub_scripts_files`)
+
+    # Save each command to a submission script, which will launch the next command after the job
+    # completes.
+    for (i, (measure, inti_params, julia_params, command)) in enumerate(commands)
+        sub_script_name = sub_scripts_dir * measure.name * "_$i.sh"
+        open(sub_script_name, "w") do sub_script_file
+            if i < length(commands)
+                next_job_name = commands[i+1][1].name
+                next_job_file_name = sub_scripts_dir * next_job_name * "_$(i+1).sh"
+            else
+                next_job_file_name = nothing
+            end
+
+            print(sub_script_file, 
+                sub_script_content("JOB_ARMON_$i", measure.node, 
+                    inti_params.node_count, inti_params.processes, julia_params.threads, command,
+                    next_job_file_name))
+        end
+    end
+end
+
+
 function setup_env()
     # Make sure that the output folders exist
     mkpath(data_dir)
     mkpath(plot_scripts_dir)
     mkpath(plots_dir)
+    mkpath(sub_scripts_dir)
 
     # Clear the plots update file
     run(`truncate -s 0 $plots_update_file`)
@@ -854,6 +915,8 @@ function main()
     
     start_time = Dates.now()
 
+    commands = Tuple{MeasureParams, IntiParams, JuliaParams, Cmd}[]
+
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
     for (i, measure) in Iterators.drop(enumerate(measures), start_at - 1)
@@ -874,14 +937,23 @@ function main()
                 if (i == start_at && comb_i <= skip_first)
                     continue
                 end
-                run_measure(measure, julia_params, inti_params, i)
+
+                command = run_measure(measure, julia_params, inti_params, i)
+
+                if measure.create_sub_job_chain && !isnothing(command)
+                    push!(commands, (measure, inti_params, julia_params, command))
+                end
             end
         end
     end
 
-    end_time = Dates.now()
-    duration = Dates.canonicalize(round(end_time - start_time, Dates.Second))
-    println("Total time measurements time: ", duration)
+    if !isempty(commands)
+        make_submission_scripts(commands)
+    else
+        end_time = Dates.now()
+        duration = Dates.canonicalize(round(end_time - start_time, Dates.Second))
+        println("Total time measurements time: ", duration)
+    end
 end
 
 

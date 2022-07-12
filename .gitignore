@@ -3,6 +3,7 @@ anim
 data
 plots
 plot_scripts
+sub_script
 .idea
 
 output*
