@@ -42,6 +42,7 @@ mutable struct MeasureParams
     plot_title::String
     verbose::Bool
     use_max_threads::Bool
+    cst_cells_per_process::Bool
 
     # > Time histogram
     time_histogram::Bool
@@ -151,7 +152,7 @@ sub_script_content(job_name, partition, nodes, processes, cores_per_process, com
 #MSUB -n $processes
 #MSUB -c $cores_per_process
 #MSUB -x
-cd ${BRIDGE_MSUB_PWD}
+cd \${BRIDGE_MSUB_PWD}
 module load $(join(required_modules, ' '))
 $(string(command)[2:end-1])
 $(!isnothing(next_script) ? "ccc_msub $next_script" : "echo 'All done.'")
@@ -191,6 +192,7 @@ function parse_measure_params(file_line_parser)
     plot_title = nothing
     verbose = false
     use_max_threads = false
+    cst_cells_per_process = false
 
     time_histogram = false
     flatten_time_dims = false
@@ -275,6 +277,8 @@ function parse_measure_params(file_line_parser)
             verbose = parse(Bool, value)
         elseif option == "use_max_threads"
             use_max_threads = parse(Bool, value)
+        elseif option == "cst_cells_per_process"
+            cst_cells_per_process = parse(Bool, value)
         elseif option == "time_hist"
             time_histogram = parse(Bool, value)
         elseif option == "flat_hist_dims"
@@ -317,7 +321,7 @@ function parse_measure_params(file_line_parser)
         plot_title = "You forgot to add a title"
     end
 
-    if !isnothing(process_grid_ratios) && dimension == 1
+    if !isnothing(process_grid_ratios) && any(dimension .== 1)
         error("'process_grid_ratio' is incompatible with 1D") 
     end
 
@@ -345,6 +349,7 @@ function parse_measure_params(file_line_parser)
         dimension, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
         name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, use_max_threads, 
+        cst_cells_per_process,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file)
 end
@@ -544,6 +549,24 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
         cells_list = measure.cells_list
     else
         cells_list = measure.domain_list
+    end
+
+    if measure.cst_cells_per_process
+        # Scale the cells by the number of processes
+        if params.dimension == 1
+            cells_list .*= inti_params.processes
+        else
+            # We need to distribute the factor along each axis, while keeping the divisibility of 
+            # the cells count, since it will be divided by the number of processes along each axis.
+            # Therefore we make the new values multiples of 64, but this is still not perfect.
+            scale_factor = inti_params.processes^(1/params.dimension)
+            cells_list .*= scale_factor
+            cells_list .-= [cells .% 64 for cells in cells_list]
+
+            if any(any(cells .≤ 0) for cells in cells_list)
+                error("Cannot scale the cell list by the number of process: $cells_list")
+            end
+        end
     end
 
     if params.dimension == 1
