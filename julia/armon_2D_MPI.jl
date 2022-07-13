@@ -280,7 +280,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - domain:     ", p.nx, "x", p.ny, " (", p.nghost, " ghosts)")
     println(" - nbcell:     ", p.nx * p.ny, " (", p.nbcell, " total)")
     println(" - global:     ", p.global_grid[1], "x", p.global_grid[2])
-    println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2], "($(p.reorder_grid ? "" : "not ")reordered)")
+    println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2], " ($(p.reorder_grid ? "" : "not ")reordered)")
     println(" - coords:     ", p.cart_coords[1], "x", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
     println(" - comms per axis: ", p.single_comm_per_axis_pass ? 1 : 2)
 end
@@ -731,54 +731,139 @@ end
 end
 
 
-@kernel function gpu_boundary_conditions_kernel!(index_start, idx_row, idx_col, nx, ny,
-        u_factor_left, u_factor_right, v_factor_bottom, v_factor_top,
+@kernel function gpu_boundary_conditions_left_kernel!(index_start, idx_row, idx_col, u_factor_left, 
+        rho, umat, vmat, pmat, cmat, gmat)
+    thread_i = @index(Global)
+    
+    idx = @i(1,thread_i)
+    idxm1 = @i(0,thread_i)
+    
+    rho[idxm1]  = rho[idx]
+    umat[idxm1] = umat[idx] * u_factor_left
+    vmat[idxm1] = vmat[idx]
+    pmat[idxm1] = pmat[idx]
+    cmat[idxm1] = cmat[idx]
+    gmat[idxm1] = gmat[idx]
+end
+
+
+@kernel function gpu_boundary_conditions_right_kernel!(index_start, idx_row, idx_col, nx, u_factor_right, 
+        rho, umat, vmat, pmat, cmat, gmat)
+    thread_i = @index(Global)
+    
+    idx = @i(nx,thread_i)
+    idxp1 = @i(nx+1,thread_i)
+
+    rho[idxp1] = rho[idx]
+    umat[idxp1] = umat[idx] * u_factor_right
+    vmat[idxp1] = vmat[idx]
+    pmat[idxp1] = pmat[idx]
+    cmat[idxp1] = cmat[idx]
+    gmat[idxp1] = gmat[idx]
+end
+
+
+@kernel function gpu_boundary_conditions_top_kernel!(index_start, idx_row, idx_col, ny, v_factor_top, 
         rho, umat, vmat, pmat, cmat, gmat)
     thread_i = @index(Global)
 
-    if thread_i ≤ ny
-        # Condition for the left border of the domain
-        idx = @i(1,thread_i)
-        idxm1 = @i(0,thread_i)
-        rho[idxm1]  = rho[idx]
-        umat[idxm1] = umat[idx] * u_factor_left
-        vmat[idxm1] = vmat[idx]
-        pmat[idxm1] = pmat[idx]
-        cmat[idxm1] = cmat[idx]
-        gmat[idxm1] = gmat[idx]
+    idx = @i(thread_i,ny)
+    idxp1 = @i(thread_i,ny+1)
 
-        # Condition for the right border of the domain
-        idx = @i(nx,thread_i)
-        idxp1 = @i(nx+1,thread_i)
-        rho[idxp1]  = rho[idx]
-        umat[idxp1] = umat[idx] * u_factor_right
-        vmat[idxp1] = vmat[idx]
-        pmat[idxp1] = pmat[idx]
-        cmat[idxp1] = cmat[idx]
-        gmat[idxp1] = gmat[idx]
-    end
+    rho[idxp1]  = rho[idx]
+    umat[idxp1] = umat[idx]
+    vmat[idxp1] = vmat[idx] * v_factor_top
+    pmat[idxp1] = pmat[idx]
+    cmat[idxp1] = cmat[idx]
+    gmat[idxp1] = gmat[idx]
+end
 
-    if thread_i ≤ nx
-        # Condition for the bottom border of the domain
-        idx = @i(thread_i,1)
-        idxm1 = @i(thread_i,0)
-        rho[idxm1]  = rho[idx]
-        umat[idxm1] = umat[idx]
-        vmat[idxm1] = vmat[idx] * v_factor_bottom
-        pmat[idxm1] = pmat[idx]
-        cmat[idxm1] = cmat[idx]
-        gmat[idxm1] = gmat[idx]
 
-        # Condition for the top border of the domain
-        idx = @i(thread_i,ny)
-        idxp1 = @i(thread_i,ny+1)
-        rho[idxp1]  = rho[idx]
-        umat[idxp1] = umat[idx]
-        vmat[idxp1] = vmat[idx] * v_factor_top
-        pmat[idxp1] = pmat[idx]
-        cmat[idxp1] = cmat[idx]
-        gmat[idxp1] = gmat[idx]
-    end
+@kernel function gpu_boundary_conditions_bottom_kernel!(index_start, idx_row, idx_col, v_factor_bottom, 
+        rho, umat, vmat, pmat, cmat, gmat)
+    thread_i = @index(Global)
+
+    idx = @i(thread_i,1)
+    idxm1 = @i(thread_i,0)
+
+    rho[idxm1]  = rho[idx]
+    umat[idxm1] = umat[idx]
+    vmat[idxm1] = vmat[idx] * v_factor_bottom
+    pmat[idxm1] = pmat[idx]
+    cmat[idxm1] = cmat[idx]
+    gmat[idxm1] = gmat[idx]
+end
+
+
+@kernel function gpu_read_border_array_X_kernel!(pos, nghost, nx, row_length,
+        value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
+    thread_i = @index(Global)
+
+    (i, i_g) = divrem(thread_i, nghost)
+    i_arr = (i_g * nx + i) * 7
+    idx = i_g * row_length + pos + i
+
+    value_array[i_arr+1] =  rho[idx]
+    value_array[i_arr+2] = umat[idx]
+    value_array[i_arr+3] = vmat[idx]
+    value_array[i_arr+4] = pmat[idx]
+    value_array[i_arr+5] = cmat[idx]
+    value_array[i_arr+6] = gmat[idx]
+    value_array[i_arr+7] = Emat[idx]
+end
+
+
+@kernel function gpu_read_border_array_Y_kernel!(pos, nghost, ny, row_length,
+        value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
+    thread_i = @index(Global) - 1
+
+    (i, i_g) = divrem(thread_i, nghost)
+    i_arr = (i_g * ny + i) * 7
+    idx = i * row_length + pos + i_g
+
+    value_array[i_arr+1] =  rho[idx]
+    value_array[i_arr+2] = umat[idx]
+    value_array[i_arr+3] = vmat[idx]
+    value_array[i_arr+4] = pmat[idx]
+    value_array[i_arr+5] = cmat[idx]
+    value_array[i_arr+6] = gmat[idx]
+    value_array[i_arr+7] = Emat[idx]
+end
+
+
+@kernel function gpu_write_border_array_X_kernel!(pos, nghost, nx, row_length,
+        value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
+    thread_i = @index(Global) - 1
+
+    (i, i_g) = divrem(thread_i, nghost)
+    i_arr = (i_g * nx + i) * 7
+    idx = i_g * row_length + pos + i
+
+     rho[idx] = value_array[i_arr+1]
+    umat[idx] = value_array[i_arr+2]
+    vmat[idx] = value_array[i_arr+3]
+    pmat[idx] = value_array[i_arr+4]
+    cmat[idx] = value_array[i_arr+5]
+    gmat[idx] = value_array[i_arr+6]
+    Emat[idx] = value_array[i_arr+7]
+end
+
+
+@kernel function gpu_write_border_array_Y_kernel!(pos, nghost, ny, row_length,
+        value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
+    thread_i = @index(Global) - 1
+
+    (i, i_g) = divrem(thread_i, nghost)
+    i_arr = (i_g * ny + i) * 7
+    idx = i * row_length + pos + i_g
+
+    value_array[i_arr+1] =  rho[idx]
+    value_array[i_arr+2] = umat[idx]
+    value_array[i_arr+3] = vmat[idx]
+    value_array[i_arr+4] = pmat[idx]
+    value_array[i_arr+5] = cmat[idx]
+    value_array[i_arr+6] = gmat[idx]
+    value_array[i_arr+7] = Emat[idx]
 end
 
 
@@ -870,7 +955,14 @@ gpu_acoustic! = gpu_acoustic_kernel!(device, block_size)
 gpu_acoustic_GAD_minmod! = gpu_acoustic_GAD_minmod_kernel!(device, block_size)
 gpu_update_perfect_gas_EOS! = gpu_update_perfect_gas_EOS_kernel!(device, block_size)
 gpu_update_bizarrium_EOS! = gpu_update_bizarrium_EOS_kernel!(device, block_size)
-gpu_boundary_conditions! = gpu_boundary_conditions_kernel!(device, block_size)
+gpu_boundary_conditions_left! = gpu_boundary_conditions_left_kernel!(device, block_size)
+gpu_boundary_conditions_right! = gpu_boundary_conditions_right_kernel!(device, block_size)
+gpu_boundary_conditions_top! = gpu_boundary_conditions_top_kernel!(device, block_size)
+gpu_boundary_conditions_bottom! = gpu_boundary_conditions_bottom_kernel!(device, block_size)
+gpu_read_border_array_X! = gpu_read_border_array_X_kernel!(device, block_size)
+gpu_read_border_array_Y! = gpu_read_border_array_Y_kernel!(device, block_size)
+gpu_write_border_array_X! = gpu_write_border_array_X_kernel!(device, block_size)
+gpu_write_border_array_Y! = gpu_write_border_array_Y_kernel!(device, block_size)
 gpu_dtCFL_reduction_euler! = gpu_dtCFL_reduction_euler_kernel!(device, block_size)
 gpu_dtCFL_reduction_lagrange! = gpu_dtCFL_reduction_lagrange_kernel!(device, block_size)
 gpu_cell_update! = gpu_cell_update_kernel!(device, block_size)
@@ -932,8 +1024,8 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        gpu_acoustic!(first_i - 1, s, ustar_1, pstar_1, 
-            rho, u, pmat, cmat, ndrange=length(first_i:last_i)) |> wait_d
+        gpu_acoustic!(first_i - s - 1, s, ustar_1, pstar_1, 
+            rho, u, pmat, cmat, ndrange=length(first_i-s:last_i+s)) |> wait_d
         gpu_acoustic_GAD_minmod!(first_i - 1, s, ustar, pstar, 
             rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx, ndrange=length(first_i:last_i)) |> wait_d
         return
@@ -1221,7 +1313,7 @@ end
 # Boundary conditions
 #
 
-function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractVector{T}}
+function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, ny) = params
     @indexing_vars(params)
@@ -1232,7 +1324,9 @@ function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 
     if params.use_gpu
-        error("GPU boundary conditions NYI")
+        gpu_boundary_conditions_left!(index_start, idx_row, idx_col, u_factor_left,
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait_d
+        return
     end
 
     @simd_threaded_loop for j in 1:ny
@@ -1248,7 +1342,7 @@ function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}
 end
 
 
-function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractVector{T}}
+function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, nx, ny) = params
     @indexing_vars(params)
@@ -1259,7 +1353,9 @@ function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V
     end
 
     if params.use_gpu
-        error("GPU boundary conditions NYI")
+        gpu_boundary_conditions_right!(index_start, idx_row, idx_col, nx, u_factor_right, 
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait_d
+        return
     end
 
     @simd_threaded_loop for j in 1:ny
@@ -1275,7 +1371,7 @@ function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V
 end
 
 
-function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractVector{T}}
+function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, nx, ny) = params
     @indexing_vars(params)
@@ -1286,7 +1382,9 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V})
     end
 
     if params.use_gpu
-        error("GPU boundary conditions NYI")
+        gpu_boundary_conditions_top!(index_start, idx_row, idx_col, ny, v_factor_top, 
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait_d
+        return
     end
 
     @simd_threaded_loop for i in 1:nx
@@ -1302,18 +1400,20 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V})
 end
 
 
-function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractVector{T}}
+function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, nx) = params
     @indexing_vars(params)
-    
+
     v_factor_bottom::T = 1.
     if test == :Sod_y || test == :Sod_circ
         v_factor_bottom = -1.
     end
 
     if params.use_gpu
-        error("GPU boundary conditions NYI")
+        gpu_boundary_conditions_bottom!(index_start, idx_row, idx_col, v_factor_bottom, 
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait_d
+        return
     end
 
     @simd_threaded_loop for i in 1:nx
@@ -1330,9 +1430,17 @@ end
 
 
 function read_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::V, pos::Int) where {T, V <: AbstractVector{T}}
+        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, nx) = params
-    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
+    (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
+
+    if params.use_gpu
+        gpu_read_border_array_X!(pos, nghost, nx, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait_d
+        copyto!(value_array, tmp_comm_array)
+        return
+    end
+
     for i_g in 0:nghost-1
         ghost_row = i_g * nx * 7
         row_pos = i_g * row_length + pos
@@ -1352,9 +1460,17 @@ end
 
 
 function read_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::V, pos::Int) where {T, V <: AbstractVector{T}}
+        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, ny) = params
-    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
+    (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
+    
+    if params.use_gpu
+        gpu_read_border_array_Y!(pos, nghost, ny, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait_d
+        copyto!(value_array, tmp_comm_array)
+        return
+    end
+
     for i_g in 0:nghost-1
         ghost_col = i_g * ny * 7
         @simd_threaded_loop for i in 0:ny-1
@@ -1373,9 +1489,17 @@ end
 
 
 function write_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::V, pos::Int) where {T, V <: AbstractVector{T}}
+        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, nx) = params
-    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
+    (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
+
+    if params.use_gpu
+        copyto!(tmp_comm_array, value_array)
+        gpu_write_border_array_X!(pos, nghost, nx, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait_d
+        return
+    end
+
     for i_g in 0:nghost-1
         ghost_row = i_g * nx * 7
         row_pos = i_g * row_length + pos
@@ -1395,9 +1519,17 @@ end
 
 
 function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::V, pos::Int) where {T, V <: AbstractVector{T}}
+        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, ny) = params
-    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
+    (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
+
+    if params.use_gpu
+        copyto!(tmp_comm_array, value_array)
+        gpu_write_border_array_Y!(pos, nghost, ny, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait_d
+        return
+    end
+
     for i_g in 0:nghost-1
         ghost_col = i_g * ny * 7
         @simd_threaded_loop for i in 0:ny-1
@@ -1415,14 +1547,21 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
 end
 
 
-function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V}, axis::Axis) where {T, V <: AbstractArray{T}}
+function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
+        host_array::W, axis::Axis) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nx, ny, nghost, neighbours, cart_comm, cart_coords) = params
     (; tmp_comm_array) = data
     @indexing_vars(params)
-    # TODO : use active RMA instead?
+    # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: https://www.open-mpi.org/faq/?category=runcuda
     # TODO : use CUDA/ROCM-aware MPI 
     # TODO : use 4 views for each side for each variable ? (2 will be contigous, 2 won't) <- pre-calculate them!
     # TODO : try to mix the comms: send to left and receive from right, then vice-versa. Maybe it can speed things up?
+
+    if params.use_gpu
+        comm_array = host_array
+    else
+        comm_array = tmp_comm_array
+    end
 
     # We only exchange the ghost domains along the current axis.
     # even x/y coordinate in the cartesian process grid:
@@ -1451,37 +1590,37 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
             if neighbours.left == -1
                 boundaryConditions_left!(params, data)
             else
-                read_border_array_Y!(params, data, tmp_comm_array, @i(1, 1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(tmp_comm_array, 
-                    neighbours.left, 0, tmp_comm_array, neighbours.left, 0, cart_comm)
-                write_border_array_Y!(params, data, tmp_comm_array, @i(1-nghost, 1))
+                read_border_array_Y!(params, data, comm_array, @i(1, 1))
+                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array, 
+                    neighbours.left, 0, comm_array, neighbours.left, 0, cart_comm)
+                write_border_array_Y!(params, data, comm_array, @i(1-nghost, 1))
             end
         elseif side == :right
             if neighbours.right == -1
                 boundaryConditions_right!(params, data)
             else
-                read_border_array_Y!(params, data, tmp_comm_array, @i(nx-nghost+1, 1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(tmp_comm_array, 
-                    neighbours.right, 0, tmp_comm_array, neighbours.right, 0, cart_comm)
-                write_border_array_Y!(params, data, tmp_comm_array, @i(nx+1, 1))
+                read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1))
+                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array, 
+                    neighbours.right, 0, comm_array, neighbours.right, 0, cart_comm)
+                write_border_array_Y!(params, data, comm_array, @i(nx+1, 1))
             end
         elseif side == :top
             if neighbours.top == -1
                 boundaryConditions_top!(params, data)
             else
-                read_border_array_X!(params, data, tmp_comm_array, @i(1, ny-nghost+1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(tmp_comm_array, 
-                    neighbours.top, 0, tmp_comm_array, neighbours.top, 0, cart_comm)
-                write_border_array_X!(params, data, tmp_comm_array, @i(1, ny+1))
+                read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1))
+                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array, 
+                    neighbours.top, 0, comm_array, neighbours.top, 0, cart_comm)
+                write_border_array_X!(params, data, comm_array, @i(1, ny+1))
             end
         else # side == :bottom
             if neighbours.bottom == -1
                 boundaryConditions_bottom!(params, data)
             else
-                read_border_array_X!(params, data, tmp_comm_array, @i(1, 1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(tmp_comm_array,
-                    neighbours.bottom, 0, tmp_comm_array, neighbours.bottom, 0, cart_comm)
-                write_border_array_X!(params, data, tmp_comm_array, @i(1, 1-nghost))
+                read_border_array_X!(params, data, comm_array, @i(1, 1))
+                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array,
+                    neighbours.bottom, 0, comm_array, neighbours.bottom, 0, cart_comm)
+                write_border_array_X!(params, data, comm_array, @i(1, 1-nghost))
             end
         end
     end
@@ -1862,6 +2001,13 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     t1 = time_ns()
     t_warmup = t1
 
+    if params.use_gpu
+        # Host version of temporary array used for MPI communications
+        host_array = Vector{T}(undef, length(data.tmp_comm_array))
+    else
+        host_array = Vector{T}()
+    end
+
     last_i::Int, x_::V, u::V = update_axis_parameters(params, data, params.current_axis)
 
     while t < maxtime && cycle < maxcycle
@@ -1874,13 +2020,13 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         for (axis, dt_factor) in split_axes(params, cycle)
             last_i, x_, u = update_axis_parameters(params, data, axis)
 
-            @time_pos boundaryConditions_MPI!(params, data, axis)
+            @time_pos boundaryConditions_MPI!(params, data, host_array, axis)
             @time_pos numericalFluxes!(params, data, dt * dt_factor, last_i, u)
             @time_pos cellUpdate!(params, data, dt * dt_factor, u, x_)
     
             if params.euler_projection
                 if !params.single_comm_per_axis_pass 
-                    @time_pos boundaryConditions_MPI!(params, data, axis) 
+                    @time_pos boundaryConditions_MPI!(params, data, host_array, axis) 
                 end
                 @time_pos first_order_euler_remap!(params, data, dt * dt_factor)
             end

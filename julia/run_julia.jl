@@ -257,6 +257,25 @@ end
 
 
 if use_MPI
+    if use_gpu
+        # We must select a GPU before initializing MPI
+        if get(ENV, "USE_ROCM_GPU", false)
+            error("ROCM is, for now, not MPI aware")
+        end
+
+        # If SLURM is used to dispatch jobs, we can use the local ID of the process to uniquely 
+        # assign the GPUs to each process.
+        gpu_index = get(ENV, "SLURM_LOCALID", -1)
+        if gpu_index == -1
+            @warn "SLURM_LOCALID is not defined. GPU device defaults to 0. All processes on the same node will use the same GPU." maxlog=1
+            gpu_index = 0
+        end
+
+        using CUDA
+        gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
+        CUDA.device!(gpu_index)
+    end
+
     using MPI
     MPI.Init()
 
@@ -306,7 +325,12 @@ if use_MPI
             cores_line_length = 10+512
             proc_offset = info_line_length + cores_line_length + 2
 
-            info_line = @sprintf("%4d: local %-2d/%2d in node %s", rank, local_rank+1, local_size, node_name)
+            if use_gpu
+                info_line = @sprintf("%4d: local %-2d/%2d (gpu %s) in node %s", rank, local_rank+1, local_size, string(CUDA.uuid(CUDA.device()))[1:8], node_name)
+            else
+                info_line = @sprintf("%4d: local %-2d/%2d in node %s", rank, local_rank+1, local_size, node_name)
+            end
+            
             cores_line = Vector{String}()
             push!(cores_line, " - cores: ")
             for tid in getcpuids()
@@ -326,7 +350,11 @@ if use_MPI
             # Print the debug info in order, one process at a time
             for i in 1:global_size
                 if i == rank+1
-                    @printf(" - %-4d: local %-2d/%2d in node %s\n", rank, local_rank+1, local_size, node_name)
+                    if use_gpu
+                        @printf(" - %-4d: local %-2d/%2d (gpu %s) in node %s\n", rank, local_rank+1, local_size, string(CUDA.uuid(CUDA.device()))[1:8], node_name)
+                    else
+                        @printf(" - %-4d: local %-2d/%2d in node %s\n", rank, local_rank+1, local_size, node_name)
+                    end
                     threadinfo(; color=false, blocksize=64)
                 end
                 MPI.Barrier(MPI.COMM_WORLD)
@@ -406,7 +434,7 @@ end
 
 
 if use_gpu && is_root
-    if getkey(ENV, "USE_ROCM_GPU", false)
+    if get(ENV, "USE_ROCM_GPU", false)
         println("Using ROCM GPU")
     else
         println("Using CUDA GPU")
