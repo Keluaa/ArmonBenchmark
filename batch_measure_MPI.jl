@@ -560,8 +560,9 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
             # the cells count, since it will be divided by the number of processes along each axis.
             # Therefore we make the new values multiples of 64, but this is still not perfect.
             scale_factor = inti_params.processes^(1/params.dimension)
-            cells_list .*= scale_factor
+            cells_list = cells_list .* scale_factor
             cells_list .-= [cells .% 64 for cells in cells_list]
+            cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
 
             if any(any(cells .≤ 0) for cells in cells_list)
                 error("Cannot scale the cell list by the number of process: $cells_list")

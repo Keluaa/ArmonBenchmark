@@ -13,6 +13,7 @@ maxtime = 0.0
 maxcycle = 500
 euler_projection = true
 cst_dt = false
+dt_on_even_cycles = false
 ieee_bits = 64
 silent = 2
 write_output = false
@@ -112,6 +113,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--cst-dt"
         global cst_dt = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--dt-even-cycles"
+        global dt_on_even_cycles = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--nghost"
         global nghost = parse(Int, ARGS[i+1])
@@ -336,7 +340,7 @@ if use_MPI
 
     if dimension == 1
         function build_params(test, cells; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
@@ -347,11 +351,11 @@ if use_MPI
         end
     else
         function build_params(test, domain; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
-            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
+            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
                 maxtime, maxcycle, silent, write_output, write_ghosts,
@@ -379,7 +383,7 @@ else
 
     if dimension == 1
         function build_params(test, cells; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
@@ -390,7 +394,7 @@ else
         end
     else
         function build_params(test, domain; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, euler_projection, transpose_dims, 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu,
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
@@ -452,7 +456,7 @@ end
 function do_measure(data_file_name, test, cells, transpose, splitting)
     params = build_params(test, cells; 
         ieee_bits, riemann, scheme, iterations, cfl, 
-        Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
+        Dt, cst_dt, dt_on_even_cycles=false, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
         use_MPI=false, px=0, py=0,
@@ -498,7 +502,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
 
     cells_per_sec, time_contrib = run_armon(build_params(test, cells; 
         ieee_bits, riemann, scheme, iterations, cfl, 
-        Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
+        Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
         use_MPI, px, py,
@@ -520,7 +524,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
     if is_root
         total_cells_per_sec = merged_time_contrib_vals[end]
 
-        @printf("%6.3f Giga cells/sec\n", total_cells_per_sec)
+        @printf("%6.3f Giga cells/sec", total_cells_per_sec)
         # Append the result to the data file
         open(data_file_name, "a") do data_file
             if dimension == 1
@@ -565,6 +569,11 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
                     println(data_file, cells[1] * cells[2], ", ", total_MPI_time, ", ", total_time)
                 end
             end
+
+            # TODO : add the total time (hh:mm:ss format)
+            @printf(", %5.1f%% of MPI time\n", total_MPI_time / total_time * 100)
+        else
+            print("\n")
         end
     end
 
@@ -598,7 +607,7 @@ end
 for test in tests, transpose in transpose_dims
     run_armon(build_params(test, dimension == 1 ? 10000 : (10, 10);
         ieee_bits, riemann, scheme, iterations, cfl, 
-        Dt, cst_dt, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
+        Dt, cst_dt, dt_on_even_cycles=false, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
         maxtime, maxcycle=1, silent=5, write_output=false, use_ccall, use_threading, use_simd, 
         interleaving, use_gpu, use_MPI=false, px=1, py=1, single_comm_per_axis_pass, reorder_grid=false))
 end

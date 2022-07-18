@@ -68,6 +68,7 @@ mutable struct ArmonParameters{Flt_T}
     cfl::Flt_T
     Dt::Flt_T
     cst_dt::Bool
+    dt_on_even_cycles::Bool 
     euler_projection::Bool
     axis_splitting::Symbol
 
@@ -124,7 +125,7 @@ function ArmonParameters(;
         ieee_bits = 64,
         test = :Sod, riemann = :acoustic, scheme = :GAD_minmod,
         nghost = 2, nx = 10, ny = 10, 
-        cfl = 0.6, Dt = 0., cst_dt = false,
+        cfl = 0.6, Dt = 0., cst_dt = false, dt_on_even_cycles = false,
         euler_projection = false, transpose_dims = false, axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
@@ -225,7 +226,7 @@ function ArmonParameters(;
     return ArmonParameters{flt_type}(
         test, riemann, scheme,
         nghost, nx, ny, dx,
-        cfl, Dt, cst_dt,
+        cfl, Dt, cst_dt, dt_on_even_cycles,
         euler_projection, axis_splitting,
         row_length, col_length, nbcell,
         ideb, ifin, index_start,
@@ -271,7 +272,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - scheme:     ", p.scheme)
     println(" - splitting:  ", p.axis_splitting)
     println(" - cfl:        ", p.cfl)
-    println(" - Dt:         ", p.Dt)
+    println(" - Dt:         ", p.Dt, p.dt_on_even_cycles ? ", updated only for even cycles" : "")
     println(" - euler proj: ", p.euler_projection)
     println(" - cst dt:     ", p.cst_dt)
     println(" - maxtime:    ", p.maxtime)
@@ -1852,7 +1853,7 @@ end
 # 
 
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; maxtime, maxcycle, nx, ny, silent, animation_step, is_root) = params
+    (; maxtime, maxcycle, nx, ny, silent, animation_step, is_root, dt_on_even_cycles) = params
     
     cycle  = 0
     t::T   = 0.
@@ -1865,7 +1866,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     last_i::Int, x_::V, u::V = update_axis_parameters(params, data, params.current_axis)
 
     while t < maxtime && cycle < maxcycle
-        @time_pos dt = dtCFL_MPI(params, data, dta)
+        if !dt_on_even_cycles || iseven(cycle)
+            @time_pos dt = dtCFL_MPI(params, data, dta)
+        end
 
         if is_root && (!isfinite(dt) || dt <= 0.)
             error("Invalid dt at cycle $cycle: $dt")
