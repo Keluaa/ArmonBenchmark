@@ -184,8 +184,8 @@ function ArmonParameters(;
         (cx, cy) = MPI.Cart_coords(C_COMM)
 
         neighbours = (
-            top    = MPI.Cart_shift(C_COMM, 1, -1)[2],
-            bottom = MPI.Cart_shift(C_COMM, 1,  1)[2],
+            top    = MPI.Cart_shift(C_COMM, 1,  1)[2],
+            bottom = MPI.Cart_shift(C_COMM, 1, -1)[2],
             left   = MPI.Cart_shift(C_COMM, 0, -1)[2],
             right  = MPI.Cart_shift(C_COMM, 0,  1)[2]
         )
@@ -734,7 +734,7 @@ end
 @kernel function gpu_boundary_conditions_left_kernel!(index_start, idx_row, idx_col, u_factor_left, 
         rho, umat, vmat, pmat, cmat, gmat)
     thread_i = @index(Global)
-    
+
     idx = @i(1,thread_i)
     idxm1 = @i(0,thread_i)
     
@@ -799,7 +799,7 @@ end
         value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
     thread_i = @index(Global)
 
-    (i, i_g) = divrem(thread_i, nghost)
+    (i, i_g) = divrem(thread_i - 1, nghost)
     i_arr = (i_g * nx + i) * 7
     idx = i_g * row_length + pos + i
 
@@ -815,9 +815,9 @@ end
 
 @kernel function gpu_read_border_array_Y_kernel!(pos, nghost, ny, row_length,
         value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
-    thread_i = @index(Global) - 1
+    thread_i = @index(Global)
 
-    (i, i_g) = divrem(thread_i, nghost)
+    (i, i_g) = divrem(thread_i - 1, nghost)
     i_arr = (i_g * ny + i) * 7
     idx = i * row_length + pos + i_g
 
@@ -833,9 +833,9 @@ end
 
 @kernel function gpu_write_border_array_X_kernel!(pos, nghost, nx, row_length,
         value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
-    thread_i = @index(Global) - 1
+    thread_i = @index(Global)
 
-    (i, i_g) = divrem(thread_i, nghost)
+    (i, i_g) = divrem(thread_i - 1, nghost)
     i_arr = (i_g * nx + i) * 7
     idx = i_g * row_length + pos + i
 
@@ -851,9 +851,9 @@ end
 
 @kernel function gpu_write_border_array_Y_kernel!(pos, nghost, ny, row_length,
         value_array, rho, umat, vmat, pmat, cmat, gmat, Emat)
-    thread_i = @index(Global) - 1
+    thread_i = @index(Global)
 
-    (i, i_g) = divrem(thread_i, nghost)
+    (i, i_g) = divrem(thread_i - 1, nghost)
     i_arr = (i_g * ny + i) * 7
     idx = i * row_length + pos + i_g
 
@@ -1325,7 +1325,7 @@ function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}
 
     if params.use_gpu
         gpu_boundary_conditions_left!(index_start, idx_row, idx_col, u_factor_left,
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait_d
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait
         return
     end
 
@@ -1354,7 +1354,7 @@ function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V
 
     if params.use_gpu
         gpu_boundary_conditions_right!(index_start, idx_row, idx_col, nx, u_factor_right, 
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait_d
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait
         return
     end
 
@@ -1383,7 +1383,7 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V})
 
     if params.use_gpu
         gpu_boundary_conditions_top!(index_start, idx_row, idx_col, ny, v_factor_top, 
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait_d
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait
         return
     end
 
@@ -1412,7 +1412,7 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
 
     if params.use_gpu
         gpu_boundary_conditions_bottom!(index_start, idx_row, idx_col, v_factor_bottom, 
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait_d
+            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait
         return
     end
 
@@ -1436,7 +1436,7 @@ function read_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
 
     if params.use_gpu
         gpu_read_border_array_X!(pos, nghost, nx, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait_d
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait
         copyto!(value_array, tmp_comm_array)
         return
     end
@@ -1466,7 +1466,7 @@ function read_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
     
     if params.use_gpu
         gpu_read_border_array_Y!(pos, nghost, ny, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait_d
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait
         copyto!(value_array, tmp_comm_array)
         return
     end
@@ -1496,7 +1496,7 @@ function write_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
     if params.use_gpu
         copyto!(tmp_comm_array, value_array)
         gpu_write_border_array_X!(pos, nghost, nx, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait_d
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait
         return
     end
 
@@ -1526,7 +1526,7 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
     if params.use_gpu
         copyto!(tmp_comm_array, value_array)
         gpu_write_border_array_Y!(pos, nghost, ny, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait_d
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait
         return
     end
 
