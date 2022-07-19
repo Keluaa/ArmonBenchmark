@@ -37,12 +37,19 @@ if use_ROCM
 else
     # CUDA automatically detects dependencies between kernels, therefore waiting after each kernel launch is not needed.
     # Furthermore, waiting actually greatly affects performance (~40%) for large numbers of cells.
-    wait_d(event) = nothing
+    # wait_d(event) = nothing
+    @warn "Forced wait after each CUDA kernel"
+    wait_d(event) = wait(event)
 end
 
 # MPI Init
 
-const COMM = MPI.COMM_WORLD
+COMM = MPI.COMM_WORLD
+
+function set_world_comm(comm::MPI.Comm)
+    # Allows to customize which processes will be part of the grid
+    global COMM = comm
+end
 
 #
 # Axis enum
