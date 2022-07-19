@@ -522,27 +522,65 @@ end
 # Execution Time Measurement
 #
 
-time_contrib = Dict{Axis, Dict{String, Float64}}()
-function build_incr_time_pos(label, expr)
+in_warmup_cycle = false
+function is_warming_up()
+    return in_warmup_cycle
+end
+
+
+axis_time_contrib = Dict{Axis, Dict{String, Float64}}()
+total_time_contrib = Dict{String, Float64}()
+
+
+function build_incr_time_pos_common(label, expr)
     return esc(quote
-        if params.measure_time
+        if params.measure_time && !is_warming_up()
             _t_start = time_ns()
             $(expr)
             _t_end = time_ns()
 
-            if !haskey(time_contrib, params.current_axis)
-                global time_contrib[params.current_axis] = Dict{String, Float64}()
+            if !haskey(total_time_contrib, $(label))
+                global total_time_contrib[$(label)] = 0.
             end
-
-            if !haskey(time_contrib, $(label))
-                global time_contrib[params.current_axis][$(label)] = 0.
-            end
-
-            global time_contrib[params.current_axis][$(label)] += _t_end - _t_start
+            
+            global total_time_contrib[$(label)] += _t_end - _t_start
         else
             $(expr)
         end
     end)
+end
+
+
+function build_incr_time_pos(label, expr)
+    return esc(quote
+        if params.measure_time && !is_warming_up()
+            _t_start = time_ns()
+            $(expr)
+            _t_end = time_ns()
+
+            if !haskey(axis_time_contrib, params.current_axis)
+                global axis_time_contrib[params.current_axis] = Dict{String, Float64}()
+            end
+
+            if !haskey(axis_time_contrib[params.current_axis], $(label))
+                global axis_time_contrib[params.current_axis][$(label)] = 0.
+            end
+
+            if !haskey(total_time_contrib, $(label))
+                global total_time_contrib[$(label)] = 0.
+            end
+
+            global axis_time_contrib[params.current_axis][$(label)] += _t_end - _t_start
+            global total_time_contrib[$(label)] += _t_end - _t_start
+        else
+            $(expr)
+        end
+    end)
+end
+
+
+macro time_pos_common(label, expr)
+    return build_incr_time_pos_common(label, expr)
 end
 
 
@@ -1731,7 +1769,7 @@ function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where
     end
 
     # Reduce all local_dts and broadcast the result to all processes
-    @time_pos_l "dt_Allreduce_MPI" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
+    @time_pos_common "dt_Allreduce_MPI" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
     return dt
 end
 
@@ -2026,7 +2064,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
     while t < maxtime && cycle < maxcycle
         if !dt_on_even_cycles || iseven(cycle)
-            @time_pos dt = dtCFL_MPI(params, data, dta)
+            @time_pos_common "dtCFL_MPI" dt = dtCFL_MPI(params, data, dta)
         end
 
         if is_root && (!isfinite(dt) || dt <= 0.)
@@ -2061,6 +2099,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     
             if cycle == 5
                 t_warmup = time_ns()
+                global in_warmup_cycle = false
             end
         end
         
@@ -2103,7 +2142,9 @@ function armon(params::ArmonParameters{T}) where T
     (; silent, is_root) = params
 
     if params.measure_time
-        empty!(time_contrib)
+        empty!(axis_time_contrib)
+        empty!(total_time_contrib)
+        global in_warmup_cycle = true
     end
 
     if is_root && silent < 3
@@ -2139,11 +2180,11 @@ function armon(params::ArmonParameters{T}) where T
         write_result(params, data, params.output_file)
     end
 
-    if is_root && params.measure_time && silent < 3 && !isempty(time_contrib)
+    if is_root && params.measure_time && silent < 3 && !isempty(axis_time_contrib)
         axis_time = Dict{Axis, Float64}()
 
         # Print the time of each step for each axis
-        for (axis, time_contrib_axis) in sort(collect(time_contrib); lt=(a, b)->(a[1] < b[1]))
+        for (axis, time_contrib_axis) in sort(collect(axis_time_contrib); lt=(a, b)->(a[1] < b[1]))
             isempty(time_contrib_axis) && continue
             
             total_time = mapreduce(x->x[2], +, collect(time_contrib_axis))
@@ -2157,7 +2198,7 @@ function armon(params::ArmonParameters{T}) where T
             @printf(" => %-24s %10.5f ms\n", "Total time:", total_time / 1e6)
         end
 
-        # Print the distribution of time between axis
+        # Print the distribution of time between axes
         if length(axis_time) > 1
             total_time = mapreduce(x->x[2], +, collect(axis_time))
 
@@ -2167,11 +2208,19 @@ function armon(params::ArmonParameters{T}) where T
                     SubString(string(axis), 1:1), time_ / 1e6, time_ / total_time * 100)
             end
         end
+
+        # Print the total distribution of time
+        total_time = mapreduce(x->x[2], +, collect(total_time_contrib))
+        println("\nTotal time repartition: ")
+        for (step_label, step_time) in sort(collect(total_time_contrib))
+            @printf(" - %-25s %10.5f ms (%5.2f%%)\n", 
+                    step_label, step_time / 1e6, step_time / total_time * 100)
+        end
     end
 
     sorted_time_contrib = []
-    for (_, axis_time_contrib) in time_contrib
-        push!(sorted_time_contrib, sort(collect(axis_time_contrib)))
+    for (_, time_contrib_axis) in axis_time_contrib
+        push!(sorted_time_contrib, sort(collect(time_contrib_axis)))
     end
 
     return dt, cycles, cells_per_sec, sorted_time_contrib
