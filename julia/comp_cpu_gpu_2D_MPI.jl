@@ -49,7 +49,7 @@ function diff_data(label::String, params::Armon.ArmonParameters{T},
     messages = []
 
     for name in fieldnames(Armon.ArmonData{V})
-        name in (:gmat, :domain_mask, :tmp_comm_array) && continue
+        name in (:gmat, :tmp_comm_array) && continue
 
         cpu_val = getfield(dd, name)
         gpu_val = getfield(dg, name)
@@ -90,8 +90,51 @@ end
 function diff_data_and_notify(label::String, params::Armon.ArmonParameters{T}, 
         dd::Armon.ArmonData{V}, dg::Armon.ArmonData{V}, gpu_twin_rank::Int) where {T, V <: AbstractArray{T}}
     different = diff_data(label, params, dd, dg)
-    MPI.Send(different, gpu_twin_rank, 0, MPI.COMM_WORLD)
+    MPI.Send(convert(Int, different), gpu_twin_rank, 0, MPI.COMM_WORLD)
     return different
+end
+
+
+function get_diff_result(params::Armon.ArmonParameters{T}, cpu_twin_rank::Int) where {T}
+    different, _ = MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)
+    different = convert(Bool, different)
+    return different 
+end
+
+
+function diff_dt_and_notify(c_dt, is_root, gpu_twin_rank)
+    if is_root
+        messages = []
+        T = typeof(c_dt)
+        g_dt, _ = MPI.Recv(T, gpu_twin_rank, 0, MPI.COMM_WORLD)
+        if !isfinite(c_dt) || c_dt <= 0.
+            push!(messages, "Invalid c_dt: $(c_dt)")
+        end
+        if !isfinite(g_dt) || g_dt <= 0.
+            push!(messages, "Invalid g_dt: $(g_dt)")
+        end
+        if !isapprox(c_dt, g_dt)
+            push!(messages, "dt too different: $c_dt != $g_dt")
+        end
+
+        different = !isempty(messages)
+        different = MPI.bcast(different, 0, MPI.COMM_WORLD)
+
+        foreach(println, messages)
+    else
+        different = MPI.bcast(false, 0, MPI.COMM_WORLD)
+    end
+
+    return different
+end
+
+
+function get_dt_diff_result(g_dt, cpu_twin_rank)
+    if cpu_twin_rank == 0
+        MPI.Send(g_dt, cpu_twin_rank, 0, MPI.COMM_WORLD)
+    end
+
+    return MPI.bcast(false, 0, MPI.COMM_WORLD)
 end
 
 
@@ -107,7 +150,7 @@ function send_data_to_cpu(g_data::Armon.ArmonData{V}, c_data::Armon.ArmonData{W}
         MPI.Isend(c_data.Emat, cpu_twin_rank, 5, MPI.COMM_WORLD),
         MPI.Isend(c_data.pmat, cpu_twin_rank, 6, MPI.COMM_WORLD),
         MPI.Isend(c_data.cmat, cpu_twin_rank, 7, MPI.COMM_WORLD),
-        # MPI.Isend(c_data.gmat, cpu_twin_rank, 8, MPI.COMM_WORLD),
+        MPI.Isend(c_data.gmat, cpu_twin_rank, 8, MPI.COMM_WORLD),
         MPI.Isend(c_data.ustar, cpu_twin_rank, 9, MPI.COMM_WORLD),
         MPI.Isend(c_data.pstar, cpu_twin_rank, 10, MPI.COMM_WORLD),
         MPI.Isend(c_data.ustar_1, cpu_twin_rank, 11, MPI.COMM_WORLD),
@@ -116,7 +159,7 @@ function send_data_to_cpu(g_data::Armon.ArmonData{V}, c_data::Armon.ArmonData{W}
         MPI.Isend(c_data.tmp_urho, cpu_twin_rank, 14, MPI.COMM_WORLD),
         MPI.Isend(c_data.tmp_vrho, cpu_twin_rank, 15, MPI.COMM_WORLD),
         MPI.Isend(c_data.tmp_Erho, cpu_twin_rank, 16, MPI.COMM_WORLD),
-        # MPI.Isend(c_data.domain_mask, cpu_twin_rank, 17, MPI.COMM_WORLD),
+        MPI.Isend(c_data.domain_mask, cpu_twin_rank, 17, MPI.COMM_WORLD),
         MPI.Isend(c_data.tmp_comm_array, cpu_twin_rank, 18, MPI.COMM_WORLD)
     ]
     MPI.Waitall!(requests)
@@ -133,7 +176,7 @@ function recv_data_from_gpu(g_data::Armon.ArmonData{V}, gpu_twin_rank::Int) wher
         MPI.Irecv!(g_data.Emat, gpu_twin_rank, 5, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.pmat, gpu_twin_rank, 6, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.cmat, gpu_twin_rank, 7, MPI.COMM_WORLD),
-        # MPI.Irecv!(g_data.gmat, gpu_twin_rank, 8, MPI.COMM_WORLD),
+        MPI.Irecv!(g_data.gmat, gpu_twin_rank, 8, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.ustar, gpu_twin_rank, 9, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.pstar, gpu_twin_rank, 10, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.ustar_1, gpu_twin_rank, 11, MPI.COMM_WORLD),
@@ -142,7 +185,7 @@ function recv_data_from_gpu(g_data::Armon.ArmonData{V}, gpu_twin_rank::Int) wher
         MPI.Irecv!(g_data.tmp_urho, gpu_twin_rank, 14, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.tmp_vrho, gpu_twin_rank, 15, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.tmp_Erho, gpu_twin_rank, 16, MPI.COMM_WORLD),
-        # MPI.Irecv!(g_data.domain_mask, gpu_twin_rank, 17, MPI.COMM_WORLD),
+        MPI.Irecv!(g_data.domain_mask, gpu_twin_rank, 17, MPI.COMM_WORLD),
         MPI.Irecv!(g_data.tmp_comm_array, gpu_twin_rank, 18, MPI.COMM_WORLD)
     ]
     MPI.Waitall!(requests)
@@ -167,23 +210,7 @@ function cpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
 
     while t < maxtime && cycle < maxcycle
         dt = Armon.dtCFL_MPI(params, data, dta)
-        if is_root
-            c_dt = dt
-            g_dt, _ = MPI.Recv(T, gpu_twin_rank, 0, MPI.COMM_WORLD)
-            if !isfinite(c_dt) || c_dt <= 0.
-                MPI.Send(1, gpu_twin_rank, 0, MPI.COMM_WORLD)
-                error("Invalid c_dt: $(c_dt)")
-            end
-            if !isfinite(g_dt) || g_dt <= 0.
-                MPI.Send(1, gpu_twin_rank, 0, MPI.COMM_WORLD)
-                error("Invalid g_dt: $(g_dt)")
-            end
-            if !isapprox(c_dt, g_dt)
-                MPI.Send(1, gpu_twin_rank, 0, MPI.COMM_WORLD)
-                error("dt too different: $c_dt != $g_dt")
-            end
-        end
-        MPI.Send(0, gpu_twin_rank, 0, MPI.COMM_WORLD)
+        diff_dt_and_notify(dt, is_root, gpu_twin_rank) && return cycle
 
         for (axis, dt_factor) in Armon.split_axes(params, cycle)
             last_i, x_, u = Armon.update_axis_parameters(params, data, axis)
@@ -192,7 +219,7 @@ function cpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
 
             Armon.boundaryConditions_MPI!(params, data, host_array, axis)
             recv_data_from_gpu(g_data, gpu_twin_rank)
-            diff_data_and_notify("boundaryConditions", params, data, g_data, gpu_twin_rank) && return cycle
+            diff_data_and_notify("boundaryConditions_axis", params, data, g_data, gpu_twin_rank) && return cycle
 
             Armon.numericalFluxes!(params, data, dt * dt_factor, last_i, u)
             recv_data_from_gpu(g_data, gpu_twin_rank)
@@ -206,7 +233,7 @@ function cpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
                 if !params.single_comm_per_axis_pass 
                     Armon.boundaryConditions_MPI!(params, data, host_array, axis)
                     recv_data_from_gpu(g_data, gpu_twin_rank)
-                    diff_data_and_notify("boundaryConditions", params, data, g_data, gpu_twin_rank) && return cycle
+                    diff_data_and_notify("boundaryConditions_euler", params, data, g_data, gpu_twin_rank) && return cycle
                 end
                 Armon.first_order_euler_remap!(params, data, dt * dt_factor)
                 recv_data_from_gpu(g_data, gpu_twin_rank)
@@ -240,8 +267,7 @@ function gpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
     dt::T  = 0.
 
     send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-    abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-    abort && return cycle
+    get_diff_result(params, cpu_twin_rank) && return cycle
 
     # Host version of temporary array used for MPI communications
     host_array = Vector{T}(undef, length(data.tmp_comm_array))
@@ -250,47 +276,37 @@ function gpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
 
     while t < maxtime && cycle < maxcycle
         dt = Armon.dtCFL_MPI(params, data, dta)
-        if cpu_twin_rank == 0
-            MPI.Send(dt, cpu_twin_rank, 0, MPI.COMM_WORLD)
-        end
-        abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-        abort && return cycle
+        get_dt_diff_result(dt, cpu_twin_rank) && return cycle
 
         for (axis, dt_factor) in Armon.split_axes(params, cycle)
             last_i, x_, u = Armon.update_axis_parameters(params, data, axis)
 
             Armon.boundaryConditions_MPI!(params, data, host_array, axis)
             send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-            abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-            abort && return cycle
+            get_diff_result(params, cpu_twin_rank) && return cycle
 
             Armon.numericalFluxes!(params, data, dt * dt_factor, last_i, u)
             send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-            abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-            abort && return cycle
+            get_diff_result(params, cpu_twin_rank) && return cycle
 
             Armon.cellUpdate!(params, data, dt * dt_factor, u, x_)
             send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-            abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-            abort && return cycle
-    
+            get_diff_result(params, cpu_twin_rank) && return cycle
+ 
             if params.euler_projection
                 if !params.single_comm_per_axis_pass 
                     Armon.boundaryConditions_MPI!(params, data, host_array, axis)
                     send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-                    abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-                    abort && return cycle
+                    get_diff_result(params, cpu_twin_rank) && return cycle
                 end
                 Armon.first_order_euler_remap!(params, data, dt * dt_factor)
                 send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-                abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-                abort && return cycle
+                get_diff_result(params, cpu_twin_rank) && return cycle
             end
 
             Armon.update_EOS!(params, data)
             send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-            abort = convert(Bool, MPI.Recv(Int, cpu_twin_rank, 0, MPI.COMM_WORLD)[1])
-            abort && return cycle
+            get_diff_result(params, cpu_twin_rank) && return cycle
         end
 
         dta = dt
@@ -302,9 +318,23 @@ function gpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
 end
 
 
-function init_MPI()
-    CUDA.device!(0)  # Use only one GPU
-
+function init_MPI(px, py)
+    expected_size = parse(Int, get(ENV, "SLURM_NTASKS", string(px * py * 2)))
+    expected_armon_procs = expected_size ÷ 2
+    slurm_ID = parse(Int, get(ENV, "SLURM_LOCALID", "-1"))
+    if expected_armon_procs ≤ slurm_ID
+        # GPU process
+        if slurm_ID == -1
+            @warn "Running on 1 GPU only" maxlog=1
+            CUDA.device!(0)  # Use only one GPU
+        elseif slurm_ID - expected_armon_procs < CUDA.ndevices()
+            CUDA.device!(slurm_ID - expected_armon_procs)
+        else
+            @warn "There will be more than one process per GPU" maxlog=1
+            CUDA.device!((slurm_ID - expected_armon_procs) % CUDA.ndevices())
+        end
+    end
+    
     MPI.Init()
 
     rank = MPI.Comm_rank(MPI.COMM_WORLD)
@@ -315,37 +345,50 @@ function init_MPI()
     end
 
     armon_procs = global_size ÷ 2
+
+    if expected_size ≠ global_size
+        error("Expected $expected_size processes, got $global_size")
+    end
+
     is_cpu = 0 ≤ rank < armon_procs
     color = is_cpu ? 1 : 2
 
     device_comm = MPI.Comm_split(MPI.COMM_WORLD, color, rank)
     Armon.set_world_comm(device_comm)
 
+    if !is_cpu
+        println("GPU process $rank is using GPU $(CUDA.device())")
+    end
+
     return armon_procs, is_cpu
 end
 
 
 function comp_cpu_gpu_mpi(px, py)
-    armon_procs, is_cpu = init_MPI()
+    armon_procs, is_cpu = init_MPI(px, py)
 
     if armon_procs ≠ px * py
         error("The number of processes must be 2 times px×py")
     end
 
+    test = :Sod
     scheme = :GAD_minmod
-    single_comm_per_axis_pass = true
-    nghost = 3
+    single_comm_per_axis_pass = false
+    nghost = 2
     nx = 40
     ny = 40
     maxcycle = 20
+    cst_dt = false
+    Dt = 0.
 
     if is_cpu
         params = Armon.ArmonParameters(; 
-            scheme, nghost, nx, ny,
+            test, scheme, nghost, nx, ny,
+            Dt, cst_dt,
             euler_projection = true, axis_splitting = :Sequential,
             maxcycle, silent = 5,
             output_file = "cpu_output",
-            write_output = true, write_ghosts = true,
+            write_output = true, write_ghosts = false,
             use_gpu = false, 
             use_MPI = true, px, py,
             single_comm_per_axis_pass,
@@ -378,11 +421,12 @@ function comp_cpu_gpu_mpi(px, py)
         params.is_root && println("Completed $cycles cycles on CPU")
     else
         params = Armon.ArmonParameters(;
-            scheme, nghost, nx, ny,
+            test, scheme, nghost, nx, ny,
+            Dt, cst_dt,
             euler_projection = true, axis_splitting = :Sequential,
             maxcycle, silent = 5,
             output_file = "gpu_output",
-            write_output = true, write_ghosts = true,
+            write_output = true, write_ghosts = false,
             use_gpu = true, 
             use_MPI = true, px, py,
             single_comm_per_axis_pass,
@@ -416,4 +460,4 @@ function comp_cpu_gpu_mpi(px, py)
 end
 
 
-comp_cpu_gpu_mpi(1, 2)
+comp_cpu_gpu_mpi(2, 2)

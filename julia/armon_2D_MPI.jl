@@ -202,7 +202,12 @@ function ArmonParameters(;
         proc_size = 1
         C_COMM = COMM
         (cx, cy) = (0, 0)
-        neighbours = (top = -1, bottom = -1, left = -1, right = -1)
+        neighbours = (
+            top    = MPI.MPI_PROC_NULL, 
+            bottom = MPI.MPI_PROC_NULL,
+            left   = MPI.MPI_PROC_NULL,
+            right  = MPI.MPI_PROC_NULL
+        )
     end
 
     root_rank = 0
@@ -865,13 +870,13 @@ end
     i_arr = (i_g * ny + i) * 7
     idx = i * row_length + pos + i_g
 
-    value_array[i_arr+1] =  rho[idx]
-    value_array[i_arr+2] = umat[idx]
-    value_array[i_arr+3] = vmat[idx]
-    value_array[i_arr+4] = pmat[idx]
-    value_array[i_arr+5] = cmat[idx]
-    value_array[i_arr+6] = gmat[idx]
-    value_array[i_arr+7] = Emat[idx]
+     rho[idx] = value_array[i_arr+1]
+    umat[idx] = value_array[i_arr+2]
+    vmat[idx] = value_array[i_arr+3]
+    pmat[idx] = value_array[i_arr+4]
+    cmat[idx] = value_array[i_arr+5]
+    gmat[idx] = value_array[i_arr+6]
+    Emat[idx] = value_array[i_arr+7]
 end
 
 
@@ -884,9 +889,9 @@ end
     v = vmat[i]
     mask = domain_mask[i]
 
-    out[i] = min(
-        dx / abs(max(abs(u + c), abs(u - c)) * mask),
-        dy / abs(max(abs(v + c), abs(v - c)) * mask)
+    out[i] = mask * min(
+        dx / abs(max(abs(u + c), abs(u - c))),
+        dy / abs(max(abs(v + c), abs(v - c)))
     )
 end
 
@@ -1595,7 +1600,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
 
     for side in order
         if side == :left
-            if neighbours.left == -1
+            if neighbours.left == MPI.MPI_PROC_NULL
                 boundaryConditions_left!(params, data)
             else
                 read_border_array_Y!(params, data, comm_array, @i(1, 1))
@@ -1604,7 +1609,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
                 write_border_array_Y!(params, data, comm_array, @i(1-nghost, 1))
             end
         elseif side == :right
-            if neighbours.right == -1
+            if neighbours.right == MPI.MPI_PROC_NULL
                 boundaryConditions_right!(params, data)
             else
                 read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1))
@@ -1613,7 +1618,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
                 write_border_array_Y!(params, data, comm_array, @i(nx+1, 1))
             end
         elseif side == :top
-            if neighbours.top == -1
+            if neighbours.top == MPI.MPI_PROC_NULL
                 boundaryConditions_top!(params, data)
             else
                 read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1))
@@ -1622,7 +1627,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
                 write_border_array_X!(params, data, comm_array, @i(1, ny+1))
             end
         else # side == :bottom
-            if neighbours.bottom == -1
+            if neighbours.bottom == MPI.MPI_PROC_NULL
                 boundaryConditions_bottom!(params, data)
             else
                 read_border_array_X!(params, data, comm_array, @i(1, 1))
@@ -1656,6 +1661,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
         # AMDGPU doesn't support ArrayProgramming, however its implementation of `reduce` is quite
         # fast. Therefore first we compute dt for all cells and store the result in a temporary
         # array, then we reduce this array.
+        # TODO : fix this
         if params.euler_projection
             gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask, 
                 ndrange=length(cmat)) |> wait_d
@@ -1672,14 +1678,14 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
             # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
             dt_x = @inbounds reduce(min, @views (dx ./ abs.(
                 max.(
-                    abs.(umat .+ cmat), 
-                    abs.(umat .- cmat)
-                ) .* domain_mask)))
+                    abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
+                    abs.(umat[ideb:ifin] .- cmat[ideb:ifin])
+                ) .* domain_mask[ideb:ifin])))
             dt_y = @inbounds reduce(min, @views (dy ./ abs.(
                 max.(
-                    abs.(vmat .+ cmat), 
-                    abs.(vmat .- cmat)
-                ) .* domain_mask)))
+                    abs.(vmat[ideb:ifin] .+ cmat[ideb:ifin]), 
+                    abs.(vmat[ideb:ifin] .- cmat[ideb:ifin])
+                ) .* domain_mask[ideb:ifin])))
             dt = min(dt_x, dt_y)
         else
             @batch threadlocal=typemax(T) for i in ideb:ifin
