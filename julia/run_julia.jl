@@ -269,7 +269,7 @@ if use_MPI
 
         # If SLURM is used to dispatch jobs, we can use the local ID of the process to uniquely 
         # assign the GPUs to each process.
-        gpu_index = get(ENV, "SLURM_LOCALID", -1)
+        gpu_index = parse(Int, get(ENV, "SLURM_LOCALID", "-1"))
         if gpu_index == -1
             @warn "SLURM_LOCALID is not defined. GPU device defaults to 0. All processes on the same node will use the same GPU." maxlog=1
             gpu_index = 0
@@ -470,14 +470,16 @@ end
 function run_armon(params::ArmonParameters)
     total_cells_per_sec = 0
     total_time_contrib = nothing
+    total_cycles = 0
 
     for _ in 1:repeats
-        _, cells_per_sec, time_contrib = armon(params)
+        _, cycles, cells_per_sec, time_contrib = armon(params)
         total_cells_per_sec += cells_per_sec
+        total_cycles += cycles
         total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
     end
     
-    return total_cells_per_sec / repeats, total_time_contrib
+    return total_cycles, total_cells_per_sec / repeats, total_time_contrib
 end
 
 
@@ -499,7 +501,7 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
             string(splitting), cells[1] * cells[2], cells[1], cells[2])
     end
 
-    cells_per_sec, time_contrib = run_armon(params)
+    cycles, cells_per_sec, time_contrib = run_armon(params)
 
     @printf("%6.3f Giga cells/sec\n", cells_per_sec)
 
@@ -528,7 +530,9 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         end
     end
 
-    cells_per_sec, time_contrib = run_armon(build_params(test, cells; 
+    time_start = time_ns()
+
+    cycles, cells_per_sec, time_contrib = run_armon(build_params(test, cells; 
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, write_output, use_ccall, use_threading, use_simd,
@@ -536,6 +540,9 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         use_MPI, px, py,
         single_comm_per_axis_pass, reorder_grid
     ))
+    
+    MPI.Barrier(MPI.COMM_WORLD)
+    time_end = time_ns()
 
     if dimension == 1
         time_contrib = [time_contrib]
@@ -550,15 +557,17 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
     merged_time_contrib_vals = MPI.Reduce(time_contrib_vals, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
 
     if is_root
-        total_cells_per_sec = merged_time_contrib_vals[end]
+        mean_cells_per_sec = merged_time_contrib_vals[end]
+        total_cells_per_sec = prod(cells) * cycles / (time_end - time_start)
 
-        @printf("%6.3f Giga cells/sec", total_cells_per_sec)
+        @printf("mean %6.3f Giga cells/sec", mean_cells_per_sec)
+        @printf(", total %6.3f Giga cells/sec", total_cells_per_sec)
         # Append the result to the data file
         open(data_file_name, "a") do data_file
             if dimension == 1
-                println(data_file, cells, ", ", total_cells_per_sec)
+                println(data_file, cells, ", ", mean_cells_per_sec)
             else
-                println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec)
+                println(data_file, cells[1] * cells[2], ", ", mean_cells_per_sec)
             end
         end
         

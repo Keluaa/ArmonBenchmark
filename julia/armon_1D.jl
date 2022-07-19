@@ -1265,7 +1265,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         println(" ")
     end
 
-    return dt, convert(T, 1 / grind_time)
+    return dt, cycle, convert(T, 1 / grind_time)
 end
 
 #
@@ -1322,17 +1322,17 @@ function armon(params::ArmonParameters{T}) where T
         silent <= 2 && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
         if silent <= 3
-            @time dt, cells_per_sec = time_loop(params, d_data)
+            @time dt, cycles, cells_per_sec = time_loop(params, d_data)
         else
-            dt, cells_per_sec = time_loop(params, d_data)
+            dt, cycles, cells_per_sec = time_loop(params, d_data)
         end
 
         data_from_gpu(data, d_data)
     else
         if silent <= 3
-            @time dt, cells_per_sec = time_loop(params, data)
+            @time dt, cycles, cells_per_sec = time_loop(params, data)
         else
-            dt, cells_per_sec = time_loop(params, data)
+            dt, cycles, cells_per_sec = time_loop(params, data)
         end
     end
 
@@ -1348,7 +1348,7 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    return dt, cells_per_sec, sort(collect(time_contrib))
+    return dt, cycles, cells_per_sec, sort(collect(time_contrib))
 end
 
 end
