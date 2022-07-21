@@ -15,6 +15,8 @@ mutable struct MeasureParams
     max_time::Int
     use_MPI::Bool
     create_sub_job_chain::Bool
+    add_reference_job::Bool
+    one_job_per_cell::Bool
 
     # Backend params
     threads::Vector{Int}
@@ -94,6 +96,7 @@ plot_scripts_dir = "./plot_scripts/"
 plots_dir = "./plots/"
 plots_update_file = plots_dir * "last_update"
 sub_scripts_dir = "./sub_scripts/"
+sub_scripts_output_dir = "./jobs_output/"
 
 
 base_gnuplot_script_commands(graph_file_name, title, log_scale, legend_pos) = """
@@ -142,11 +145,11 @@ gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$
 gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
 
 
-sub_script_content(job_name, partition, nodes, processes, cores_per_process, command, next_script) = """
+sub_script_content(job_name, index, partition, nodes, processes, cores_per_process, ref_command, commands, next_script) = """
 #!/bin/bash
-#MSUB -r $job_name
-#MSUB -o stdout_$job_name.txt
-#MSUB -e stderr_$job_name.txt
+#MSUB -r $(job_name)_$index
+#MSUB -o $(sub_scripts_output_dir)stdout_$(job_name)_$index.txt
+#MSUB -e $(sub_scripts_output_dir)stderr_$(job_name)_$index.txt
 #MSUB -q $partition
 #MSUB -N $nodes
 #MSUB -n $processes
@@ -154,7 +157,8 @@ sub_script_content(job_name, partition, nodes, processes, cores_per_process, com
 #MSUB -x
 cd \${BRIDGE_MSUB_PWD}
 module load $(join(required_modules, ' '))
-$(string(command)[2:end-1])
+$(isnothing(ref_command) ? "" : string(ref_command)[2:end-1])
+$(join([string(cmd)[2:end-1] for cmd in commands], "\n"))
 $(!isnothing(next_script) ? "ccc_msub $next_script" : "echo 'All done.'")
 """
 
@@ -167,6 +171,8 @@ function parse_measure_params(file_line_parser)
     node_count = [1]
     max_time = 3600  # 1h
     create_sub_job_chain = false
+    add_reference_job = false
+    one_job_per_cell = false
     threads = [4]
     use_simd = [true]
     jl_places = ["cores"]
@@ -233,6 +239,10 @@ function parse_measure_params(file_line_parser)
             max_time = parse(Int, value)
         elseif option == "create_sub_job_chain"
             create_sub_job_chain = parse(Bool, value)
+        elseif option == "add_reference_job"
+            add_reference_job = parse(Bool, value)
+        elseif option == "one_job_per_cell"
+            one_job_per_cell = parse(Bool, value)
         elseif option == "threads"
             threads = parse.(Int, split(value, ','))
         elseif option == "use_simd"
@@ -344,7 +354,7 @@ function parse_measure_params(file_line_parser)
     time_MPI_plot_file = plots_dir * name * "_MPI_time.pdf"
 
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
-        create_sub_job_chain,
+        create_sub_job_chain, add_reference_job, one_job_per_cell,
         threads, use_simd, jl_proc_bind, jl_places, 
         dimension, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
@@ -565,7 +575,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
             cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
 
             if any(any(cells .≤ 0) for cells in cells_list)
-                error("Cannot scale the cell list by the number of process: $cells_list")
+                error("Cannot scale the cell list by the number of processes: $cells_list")
             end
         end
     end
@@ -603,6 +613,72 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
             "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
             "--flat-dims", measure.flatten_time_dims
+        ])
+
+        if isnothing(measure.process_grid_ratios)
+            push!(armon_options, "--proc-grid", join([
+                join(string.(process_grid), ',') 
+                for process_grid in measure.process_grids
+            ], ';'))
+        else
+            push!(armon_options, "--proc-grid-ratio", join([
+                join(string.(ratio), ',')
+                for ratio in measure.process_grid_ratios
+                if check_ratio_for_grid(inti_params.processes, ratio)
+            ], ';'))
+        end
+    end
+
+    return armon_options
+end
+
+
+function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti_params::IntiParams)
+    armon_options = [
+        "julia", "-t", params.threads
+    ]
+    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
+    push!(armon_options, julia_script_path)
+
+    if measure.device == CUDA
+        append!(armon_options, ["--gpu", "CUDA"])
+    elseif measure.device == ROCM
+        append!(armon_options, ["--gpu", "ROCM"])
+    else
+        # no option needed for CPU
+    end
+
+    if params.dimension == 1
+        cells_list = [1000]
+        cells_list_str = join(cells_list, ',')
+    else
+        cells_list = params.dimension == 2 ? [[360,360]] : [[60,60,60]]
+        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
+    end
+
+    append!(armon_options, armon_base_options)
+    append!(armon_options, measure.common_armon_params)
+    append!(armon_options, [
+        "--dim", params.dimension,
+        "--block-size", 256,
+        "--use-simd", params.use_simd,
+        "--ieee", 64,
+        "--cycle", 1,
+        "--tests", measure.tests_list[1],
+        "--cells-list", cells_list_str,
+        "--threads-places", params.jl_places,
+        "--threads-proc-bind", params.jl_proc_bind,
+        "--repeats", 1,
+        "--verbose", 5,
+        "--time-histogram", false,
+        "--time-MPI-graph", false,
+        "--use-mpi", measure.use_MPI
+    ])
+
+    if params.dimension > 1
+        append!(armon_options, [
+            "--transpose", measure.transpose_dims[1],
+            "--splitting", measure.axis_splitting[1]
         ])
 
         if isnothing(measure.process_grid_ratios)
@@ -848,15 +924,53 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
  - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
 """)
 
-    if isempty(measure.node)
-        cmd = no_inti_cmd(armon_options, inti_params.processes)
-    else
-        inti_options = build_inti_options(measure, inti_params, julia_params.threads)
-        cmd = inti_cmd(armon_options, inti_options)
-    end
-
     if measure.create_sub_job_chain
-        return cmd
+        ref_cmd = nothing
+        if measure.add_reference_job
+            ref_armon_options = run_backend_reference(measure, julia_params, inti_params)
+            if isempty(measure.node)
+                ref_cmd = no_inti_cmd(ref_armon_options, inti_params.processes)
+            else
+                inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+                ref_cmd = inti_cmd(ref_armon_options, inti_options)
+            end
+        end
+        
+        if measure.one_job_per_cell
+            # Split '--cells-list' into their own commands
+            i = findfirst(v -> v == "--cells-list", armon_options)
+            cells_list = split(armon_options[i+1], julia_params.dimension == 1 ? "," : ";")
+            
+            cmds = Cmd[]
+            for cells in cells_list
+                armon_options[i+1] = cells
+                if isempty(measure.node)
+                    cmd = no_inti_cmd(armon_options, inti_params.processes)
+                else
+                    inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+                    cmd = inti_cmd(armon_options, inti_options)
+                end
+                push!(cmds, cmd)
+            end
+        else
+            if isempty(measure.node)
+                cmd = no_inti_cmd(armon_options, inti_params.processes)
+            else
+                inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+                cmd = inti_cmd(armon_options, inti_options)
+            end
+
+            cmds = [cmd]
+        end
+
+        return cmds, ref_cmd
+    else
+        if isempty(measure.node)
+            cmd = no_inti_cmd(armon_options, inti_params.processes)
+        else
+            inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+            cmd = inti_cmd(armon_options, inti_options)
+        end
     end
 
     try
@@ -865,7 +979,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
         if isa(e, InterruptException)
             # The user pressed Crtl-C
             println("Interrupted at measure n°$(i)")
-            return
+            return nothing, nothing
         else
             rethrow(e)
         end
@@ -873,28 +987,33 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
 end
 
 
-function make_submission_scripts(commands::Vector{Tuple{MeasureParams, IntiParams, JuliaParams, Cmd}})
+job_command_type = Tuple{MeasureParams, IntiParams, JuliaParams, Vector{Cmd}, Union{Nothing, Cmd}}
+
+
+function make_submission_scripts(job_commands::Vector{job_command_type})
     # Remove all previous scripts (if any)
     rm_sub_scripts_files = "rm -f $(sub_scripts_dir)sub_*.sh"
     run(`bash -c $rm_sub_scripts_files`)
 
     # Save each command to a submission script, which will launch the next command after the job
     # completes.
-    for (i, (measure, inti_params, julia_params, command)) in enumerate(commands)
+    for (i, (measure, inti_params, julia_params, commands, ref_command)) in enumerate(job_commands)
         sub_script_name = sub_scripts_dir * measure.name * "_$i.sh"
         open(sub_script_name, "w") do sub_script_file
-            if i < length(commands)
-                next_job_name = commands[i+1][1].name
+            if i < length(job_commands)
+                next_job_name = job_commands[i+1][1].name
                 next_job_file_name = sub_scripts_dir * next_job_name * "_$(i+1).sh"
             else
                 next_job_file_name = nothing
             end
 
             print(sub_script_file, 
-                sub_script_content("JOB_ARMON_$i", measure.node, 
-                    inti_params.node_count, inti_params.processes, julia_params.threads, command,
+                sub_script_content(measure.name, i, measure.node, 
+                    inti_params.node_count, inti_params.processes, julia_params.threads, 
+                    ref_command, commands,
                     next_job_file_name))
         end
+        println("Created job submission script $sub_script_name")
     end
 end
 
@@ -905,6 +1024,7 @@ function setup_env()
     mkpath(plot_scripts_dir)
     mkpath(plots_dir)
     mkpath(sub_scripts_dir)
+    mkpath(sub_scripts_output_dir)
 
     # Clear the plots update file
     run(`truncate -s 0 $plots_update_file`)
@@ -939,7 +1059,7 @@ function main()
     
     start_time = Dates.now()
 
-    commands = Tuple{MeasureParams, IntiParams, JuliaParams, Cmd}[]
+    job_commands = job_command_type[]
 
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
@@ -962,17 +1082,17 @@ function main()
                     continue
                 end
 
-                command = run_measure(measure, julia_params, inti_params, i)
+                commands, ref_command = run_measure(measure, julia_params, inti_params, i)
 
-                if measure.create_sub_job_chain && !isnothing(command)
-                    push!(commands, (measure, inti_params, julia_params, command))
+                if measure.create_sub_job_chain && !isnothing(commands)
+                    push!(job_commands, (measure, inti_params, julia_params, commands, ref_command))
                 end
             end
         end
     end
 
-    if !isempty(commands)
-        make_submission_scripts(commands)
+    if !isempty(job_commands)
+        make_submission_scripts(job_commands)
     else
         end_time = Dates.now()
         duration = Dates.canonicalize(round(end_time - start_time, Dates.Second))

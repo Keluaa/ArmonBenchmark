@@ -263,7 +263,7 @@ end
 if use_MPI
     if use_gpu
         # We must select a GPU before initializing MPI
-        if get(ENV, "USE_ROCM_GPU", false)
+        if parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
             error("ROCM is, for now, not MPI aware")
         end
 
@@ -288,7 +288,6 @@ if use_MPI
     is_root = rank == 0
     if is_root
         println("Using MPI with $global_size processes")
-        println("Loading...")
         loading_start_time = time_ns()
     end
 
@@ -392,7 +391,6 @@ if use_MPI
         end
     end
 else
-    println("Loading...")
     loading_start_time = time_ns()
     
     if dimension == 1
@@ -438,7 +436,7 @@ end
 
 
 if use_gpu && is_root
-    if get(ENV, "USE_ROCM_GPU", false)
+    if parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
         println("Using ROCM GPU")
     else
         println("Using CUDA GPU")
@@ -459,11 +457,7 @@ function merge_time_contribution(time_contrib_1, time_contrib_2)
         return time_contrib_1
     end
 
-    if dimension == 1
-        return map((e, f) -> (e.first => (e.second + f.second)), time_contrib_1, time_contrib_2)
-    else
-        return map.((e, f) -> (e.first => (e.second + f.second)), time_contrib_1, time_contrib_2)
-    end
+    return map((e, f) -> (e.first => (e.second + f.second)), time_contrib_1, time_contrib_2)
 end
 
 
@@ -494,9 +488,9 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
     )
 
     if dimension == 1
-        @printf(" - %s, %10g cells: ", test, cells)
+        @printf(" - %s, %11g cells: ", test, cells)
     else
-        @printf(" - %-4s %-14s %10g cells (%5gx%-5g): ", 
+        @printf(" - %-4s %-14s %11g cells (%5gx%-5g): ", 
             string(test) * (transpose ? "ᵀ" : ""),
             string(splitting), cells[1] * cells[2], cells[1], cells[2])
     end
@@ -506,11 +500,13 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
     @printf("%6.3f Giga cells/sec\n", cells_per_sec)
 
     # Append the result to the data file
-    open(data_file_name, "a") do data_file
-        if dimension == 1
-            println(data_file, cells, ", ", cells_per_sec)
-        else
-            println(data_file, cells[1] * cells[2], ", ", cells_per_sec)
+    if !isempty(data_file_name)
+        open(data_file_name, "a") do data_file
+            if dimension == 1
+                println(data_file, cells, ", ", cells_per_sec)
+            else
+                println(data_file, cells[1] * cells[2], ", ", cells_per_sec)
+            end
         end
     end
 
@@ -521,9 +517,9 @@ end
 function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, splitting, px, py)
     if is_root
         if dimension == 1
-            @printf(" - %s, %10g cells: ", test, cells)
+            @printf(" - %s, %11g cells: ", test, cells)
         else
-            @printf(" - (%2dx%-2d) %-4s %-14s %10g cells (%5gx%-5g): ", 
+            @printf(" - (%2dx%-2d) %-4s %-14s %11g cells (%5gx%-5g): ", 
                 px, py,
                 string(test) * (transpose ? "ᵀ" : ""),
                 string(splitting), cells[1] * cells[2], cells[1], cells[2])
@@ -544,66 +540,65 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
 
-    if dimension == 1
-        time_contrib = [time_contrib]
-    end
-    
-    # Merge the cells throughput and the time distribution of all processes in one reduction
+    # Merge the cells throughput and the time distribution of all processes in one reduction.
     # Since 'time_contrib' is an array of pairs, it is not a bits type. We first convert the values
     # to an array of floats, and then rebuild the array of pairs using the one of the root process.
-    time_contrib_vals = Vector{Float64}(undef, (isempty(time_contrib) ? 0 : sum(length.(time_contrib))) + 1)
-    time_contrib_vals[1:end-1] .= last.(Iterators.flatten(time_contrib))
+    time_contrib_vals = Vector{Float64}(undef, length(time_contrib) + 1)
+    time_contrib_vals[1:end-1] .= last.(time_contrib)
     time_contrib_vals[end] = cells_per_sec
     merged_time_contrib_vals = MPI.Reduce(time_contrib_vals, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
-
+ 
     if is_root
-        mean_cells_per_sec = merged_time_contrib_vals[end]
-        total_cells_per_sec = prod(cells) * cycles / (time_end - time_start)
+        if cycles <= 5
+            println("not enough cycles ($cycles), cannot get an accurate measurement")
+            return time_contrib
+        end
 
-        @printf("mean %6.3f Giga cells/sec", mean_cells_per_sec)
-        @printf(", total %6.3f Giga cells/sec", total_cells_per_sec)
+        total_cells_per_sec = merged_time_contrib_vals[end]
+
+        @printf("%6.3f Giga cells/sec", total_cells_per_sec)
+
         # Append the result to the data file
-        open(data_file_name, "a") do data_file
-            if dimension == 1
-                println(data_file, cells, ", ", mean_cells_per_sec)
-            else
-                println(data_file, cells[1] * cells[2], ", ", mean_cells_per_sec)
+        if !isempty(data_file_name)
+            open(data_file_name, "a") do data_file
+                if dimension == 1
+                    println(data_file, cells, ", ", total_cells_per_sec)
+                else
+                    println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec)
+                end
             end
         end
         
-        # Unflatten the values
-        j = 1
-        for axis_time_contrib in time_contrib
-            for (i, key_val_pair) in enumerate(axis_time_contrib)
-                axis_time_contrib[i] = key_val_pair.first => key_val_pair.second + merged_time_contrib_vals[j]
-                j += 1
-            end
+        # Rebuild the time contribution array
+        for (i, (step_label, _)) in enumerate(time_contrib)
+            time_contrib[i] = step_label => merged_time_contrib_vals[i]
         end
 
         if time_MPI_graph
             # Sum the time of each MPI communications. Time positions with a label ending with '_MPI'
-            # count as time spent in MPI.
+            # count as time spent in MPI, and this time is part of a step not ending with MPI.
             total_time = 0.
             total_MPI_time = 0.
-            for axis_time_contrib in time_contrib
-                for (key, key_time) in axis_time_contrib
-                    total_time += key_time
-                    if endswith(key, "_MPI")
-                        total_MPI_time += key_time
-                    end
+            for (step_label, step_time) in time_contrib
+                if endswith(step_label, "_MPI")
+                    total_MPI_time += step_time
+                else
+                    total_time += step_time
                 end
             end
-
+            
             # ns to sec
             total_time /= 1e9
             total_MPI_time /= 1e9
 
             # Append the result to the data file
-            open(comm_file_name, "a") do data_file
-                if dimension == 1
-                    println(data_file, cells, ", ", total_MPI_time, ", ", total_time)
-                else
-                    println(data_file, cells[1] * cells[2], ", ", total_MPI_time, ", ", total_time)
+            if !isempty(comm_file_name)
+                open(comm_file_name, "a") do data_file
+                    if dimension == 1
+                        println(data_file, cells, ", ", total_MPI_time, ", ", total_time)
+                    else
+                        println(data_file, cells[1] * cells[2], ", ", total_MPI_time, ", ", total_time)
+                    end
                 end
             end
 
@@ -651,12 +646,16 @@ end
 
 if is_root
     compile_end_time = time_ns()
-    @printf("Compile time: %3.1f sec\n", (compile_end_time - compile_start_time) / 1e9)
+    @printf(" (time: %3.1f sec)\n", (compile_end_time - compile_start_time) / 1e9)
 end
 
 
 for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px, py) in proc_domains
-    if dimension == 1
+    if isempty(base_file_name)
+        data_file_name = ""
+        hist_file_name = ""
+        comm_file_name = ""
+    elseif dimension == 1
         data_file_name = base_file_name * string(test) * ".csv"
         hist_file_name = base_file_name * string(test) * "_hist.csv"
         comm_file_name = base_file_name * string(test) * "_MPI_time.csv"
@@ -690,7 +689,7 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px
         end
 
         if is_root
-            total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
+            # total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
 
             if !isempty(gnuplot_script)
                 # We redirect the output of gnuplot to null so that there is no warning messages displayed
@@ -704,7 +703,7 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px
         end
     end
 
-    if time_histogram && is_root
+    if time_histogram && is_root && !isempty(hist_file_name)
         if flatten_time_dims
             flat_time_contrib = nothing
             for axis_time_contrib in total_time_contrib

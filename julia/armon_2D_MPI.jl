@@ -1598,7 +1598,7 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
 end
 
 
-function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
+function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
         host_array::W, axis::Axis) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nx, ny, nghost, neighbours, cart_comm, cart_coords) = params
     (; tmp_comm_array) = data
@@ -1642,7 +1642,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
                 boundaryConditions_left!(params, data)
             else
                 read_border_array_Y!(params, data, comm_array, @i(1, 1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array, 
+                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array, 
                     neighbours.left, 0, comm_array, neighbours.left, 0, cart_comm)
                 write_border_array_Y!(params, data, comm_array, @i(1-nghost, 1))
             end
@@ -1651,7 +1651,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
                 boundaryConditions_right!(params, data)
             else
                 read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array, 
+                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array, 
                     neighbours.right, 0, comm_array, neighbours.right, 0, cart_comm)
                 write_border_array_Y!(params, data, comm_array, @i(nx+1, 1))
             end
@@ -1660,7 +1660,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
                 boundaryConditions_top!(params, data)
             else
                 read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array, 
+                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array, 
                     neighbours.top, 0, comm_array, neighbours.top, 0, cart_comm)
                 write_border_array_X!(params, data, comm_array, @i(1, ny+1))
             end
@@ -1669,7 +1669,7 @@ function boundaryConditions_MPI!(params::ArmonParameters{T}, data::ArmonData{V},
                 boundaryConditions_bottom!(params, data)
             else
                 read_border_array_X!(params, data, comm_array, @i(1, 1))
-                @time_pos_l "boundaryConditions_MPI!" MPI.Sendrecv!(comm_array,
+                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array,
                     neighbours.bottom, 0, comm_array, neighbours.bottom, 0, cart_comm)
                 write_border_array_X!(params, data, comm_array, @i(1, 1-nghost))
             end
@@ -2064,7 +2064,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
     while t < maxtime && cycle < maxcycle
         if !dt_on_even_cycles || iseven(cycle)
-            @time_pos_common "dtCFL_MPI" dt = dtCFL_MPI(params, data, dta)
+            @time_pos_common "dtCFL" dt = dtCFL_MPI(params, data, dta)
         end
 
         if is_root && (!isfinite(dt) || dt <= 0.)
@@ -2074,13 +2074,13 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         for (axis, dt_factor) in split_axes(params, cycle)
             last_i, x_, u = update_axis_parameters(params, data, axis)
 
-            @time_pos boundaryConditions_MPI!(params, data, host_array, axis)
+            @time_pos boundaryConditions!(params, data, host_array, axis)
             @time_pos numericalFluxes!(params, data, dt * dt_factor, last_i, u)
             @time_pos cellUpdate!(params, data, dt * dt_factor, u, x_)
     
             if params.euler_projection
                 if !params.single_comm_per_axis_pass 
-                    @time_pos boundaryConditions_MPI!(params, data, host_array, axis) 
+                    @time_pos boundaryConditions!(params, data, host_array, axis) 
                 end
                 @time_pos first_order_euler_remap!(params, data, dt * dt_factor)
             end
@@ -2096,11 +2096,11 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             if silent <= 1
                 @printf("Cycle %4d: dt = %.18f, t = %.18f\n", cycle, dt, t)
             end
-    
-            if cycle == 5
-                t_warmup = time_ns()
-                global in_warmup_cycle = false
-            end
+        end
+
+        if cycle == 5
+            t_warmup = time_ns()
+            global in_warmup_cycle = false
         end
         
         if animation_step != 0 && (cycle - 1) % animation_step == 0
@@ -2218,10 +2218,7 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    sorted_time_contrib = []
-    for (_, time_contrib_axis) in axis_time_contrib
-        push!(sorted_time_contrib, sort(collect(time_contrib_axis)))
-    end
+    sorted_time_contrib = sort(collect(total_time_contrib))
 
     return dt, cycles, cells_per_sec, sorted_time_contrib
 end

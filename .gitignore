@@ -3,7 +3,9 @@ anim
 data
 plots
 plot_scripts
-sub_script
+sub_scripts
+jobs_output
+comp_cpu_gpu/out
 .idea
 
 output*
