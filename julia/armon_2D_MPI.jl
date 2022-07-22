@@ -31,23 +31,12 @@ end
 
 const device = use_ROCM ? ROCDevice() : CUDADevice()
 
-if use_ROCM
-    # Wait for the kernel to complete after its launch.
-    wait_d(event) = wait(event)
-else
-    # CUDA automatically detects dependencies between kernels, therefore waiting after each kernel launch is not needed.
-    # Furthermore, waiting actually greatly affects performance (~40%) for large numbers of cells.
-    # wait_d(event) = nothing
-    @warn "Forced wait after each CUDA kernel"
-    wait_d(event) = wait(event)
-end
-
 # MPI Init
 
 COMM = MPI.COMM_WORLD
 
 function set_world_comm(comm::MPI.Comm)
-    # Allows to customize which processes will be part of the grid
+    # Allows to customize which processes will be part of the grid
     global COMM = comm
 end
 
@@ -89,13 +78,13 @@ mutable struct ArmonParameters{Flt_T}
     idx_row::Int
     idx_col::Int
     current_axis::Axis
-    s::Int  # Stride
+    s::Int  # Stride
 
-    # Bounds
+    # Bounds
     maxtime::Flt_T
     maxcycle::Int
     
-    # Output
+    # Output
     silent::Int
     output_dir::String
     output_file::String
@@ -119,8 +108,8 @@ mutable struct ArmonParameters{Flt_T}
     proc_size::Int
     proc_dims::NTuple{2, Int}
     cart_comm::MPI.Comm
-    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid
-    neighbours::NamedTuple{(:top, :bottom, :left, :right), NTuple{4, Int}}  # Ranks of the neighbours of this process
+    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid
+    neighbours::NamedTuple{(:top, :bottom, :left, :right), NTuple{4, Int}}  # Ranks of the neighbours of this process
     global_grid::NTuple{2, Int}  # Dimensions (nx, ny) of the global grid
     single_comm_per_axis_pass::Bool
     reorder_grid::Bool
@@ -147,7 +136,7 @@ function ArmonParameters(;
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
 
-    # Make sure that all floating point types are the same
+    # Make sure that all floating point types are the same
     cfl = flt_type(cfl)
     Dt = flt_type(Dt)
     maxtime = flt_type(maxtime)
@@ -181,13 +170,13 @@ function ArmonParameters(;
         error("The dimensions of the global domain ($nx x $ny) are not divisible by the number of processors ($px x $py)")
     end
 
-    # MPI
+    # MPI
     if use_MPI
         rank = MPI.Comm_rank(COMM)
         proc_size = MPI.Comm_size(COMM)
 
         # Create a cartesian grid communicator of px × py processes. reorder=true can be very
-        # important for performance since it will optimize the layout of the processes.
+        # important for performance since it will optimize the layout of the processes.
         C_COMM = MPI.Cart_create(COMM, [Int32(px), Int32(py)], [Int32(0), Int32(0)], reorder_grid)
         (cx, cy) = MPI.Cart_coords(C_COMM)
 
@@ -213,7 +202,7 @@ function ArmonParameters(;
     root_rank = 0
     is_root = rank == root_rank
 
-    # Dimensions of the global domain
+    # Dimensions of the global domain
     g_nx = nx
     g_ny = ny
 
@@ -229,7 +218,7 @@ function ArmonParameters(;
     # First and last index of the real domain of an array
     ideb = row_length * nghost + nghost + 1
     ifin = row_length * (ny - 1 + nghost) + nghost + nx
-    index_start = ideb - row_length - 1  # Used only by the `@i` macro
+    index_start = ideb - row_length - 1  # Used only by the `@i` macro
 
     # Used only for indexing with the `@i` macro
     idx_row = row_length
@@ -299,7 +288,7 @@ function print_parameters(p::ArmonParameters{T}) where T
 end
 
 
-# Default copy method
+# Default copy method
 function Base.copy(p::ArmonParameters{T}) where T
     return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
 end
@@ -408,7 +397,7 @@ end
 #
 
 """
-Controls which multi-threading librairy to use.
+Controls which multi-threading library to use.
 """
 macro threads(expr)
     if use_std_lib_threads
@@ -471,8 +460,8 @@ macro simd_threaded_loop(expr)
         throw(ArgumentError("Expected a valid for loop"))
     end
 
-    # Only in for the case of a threaded loop with SIMD:
-    # Extract the range of the loop and replace it with the new variables
+    # Only in for the case of a threaded loop with SIMD:
+    # Extract the range of the loop and replace it with the new variables
     modified_loop_expr = copy(expr)
     range_expr = modified_loop_expr.args[1]
 
@@ -495,7 +484,7 @@ macro simd_threaded_loop(expr)
                 __loop_range = $(loop_range)
                 __total_iter = length(__loop_range)
                 __num_threads = Threads.nthreads()
-                # Equivalent to __total_iter ÷ __num_threads
+                # Equivalent to __total_iter ÷ __num_threads
                 __batch = convert(Int, cld(__total_iter, __num_threads))::Int
                 __first_i = first(__loop_range)
                 __last_i = last(__loop_range)
@@ -542,7 +531,7 @@ function build_incr_time_pos_common(label, expr)
             if !haskey(total_time_contrib, $(label))
                 global total_time_contrib[$(label)] = 0.
             end
-            
+
             global total_time_contrib[$(label)] += _t_end - _t_start
         else
             $(expr)
@@ -616,7 +605,7 @@ macro time_expr(expr)
 
     return esc(quote
         if params.is_root && params.silent <= 3
-            # Same structure as `@time` (see `@macroexpand @time`), using some undocumented functions.
+            # Same structure as `@time` (see `@macroexpand @time`), using some undocumented functions.
             gc_info_before = Base.gc_num()
             time_before = Base.time_ns()
             compile_time_before = Base.cumulative_compile_time_ns_before()
@@ -1026,7 +1015,7 @@ gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, b
 # 
 
 function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        last_i::Int, u::V) where {T, V <: AbstractArray{T}}
+        last_i::Int, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat) = data
     (; ideb, s) = params
 
@@ -1041,9 +1030,9 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     if params.use_gpu
-        gpu_acoustic!(first_i - 1, s, ustar, pstar, rho, u, pmat, cmat, 
-            ndrange=length(first_i:last_i)) |> wait_d
-        return
+        event = gpu_acoustic!(first_i - 1, s, ustar, pstar, rho, u, pmat, cmat;
+            ndrange=length(first_i:last_i), dependencies)
+        return event
     end
 
     @simd_threaded_loop for i in first_i:last_i
@@ -1052,11 +1041,14 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
         ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
         pstar[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
     end
+
+    return NoneEvent()
 end
 
 
 function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, last_i::Int, u::V) where {T, V <: AbstractArray{T}}
+        dt::T, last_i::Int, u::V;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat, ustar_1, pstar_1) = data
     (; scheme, dx, ideb, s) = params
 
@@ -1075,11 +1067,13 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        gpu_acoustic!(first_i - s - 1, s, ustar_1, pstar_1, 
-            rho, u, pmat, cmat, ndrange=length(first_i-s:last_i+s)) |> wait_d
-        gpu_acoustic_GAD_minmod!(first_i - 1, s, ustar, pstar, 
-            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx, ndrange=length(first_i:last_i)) |> wait_d
-        return
+        first_kernel = gpu_acoustic!(first_i - s - 1, s, ustar_1, pstar_1,
+            rho, u, pmat, cmat;
+            ndrange=length(first_i-s:last_i+s), dependencies)
+        second_kernel = gpu_acoustic_GAD_minmod!(first_i - 1, s, ustar, pstar,
+            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
+            ndrange=length(first_i:last_i), dependencies=first_kernel)
+        return second_kernel
     end
 
     # First order
@@ -1157,17 +1151,17 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
         error("The choice of the scheme for the acoustic solver is not recognized: ", scheme)
     end
 
-    return
+    return NoneEvent()
 end
 
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-    dt::T, last_i::Int, u::V) where {T, V <: AbstractArray{T}}
+    dt::T, last_i::Int, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            acoustic!(params, data, last_i, u)
+            return acoustic!(params, data, last_i, u; dependencies)
         else
-            acoustic_GAD!(params, data, dt, last_i, u)
+            return acoustic_GAD!(params, data, dt, last_i, u; dependencies)
         end
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
@@ -1224,31 +1218,38 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
 end
 
 
-function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V};
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
     (; ideb, ifin, test) = params
 
     if test == :Sod || test == :Sod_y || test == :Sod_circ
         gamma::T = 7/5
         if params.use_gpu
-            gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait_d
+            event = gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat,
+                umat, vmat, pmat, cmat, gmat;
+                ndrange=length(ideb:ifin), dependencies)
+            return event
         else
             perfectGasEOS!(params, data, gamma)
+            return NoneEvent()
         end
     elseif test == :Bizarrium
         if params.use_gpu
-            gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat, 
-                umat, vmat, pmat, cmat, gmat, ndrange=length(ideb:ifin)) |> wait_d
+            event = gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat,
+                umat, vmat, pmat, cmat, gmat;
+                ndrange=length(ideb:ifin), dependencies)
+            return event
         else
             BizarriumEOS!(params, data)
+            return NoneEvent()
         end
     end
 end
 
 #
 # Test initialisation
-# 
+#
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, y, rho, umat, vmat, pmat, cmat, Emat, 
@@ -1364,7 +1365,8 @@ end
 # Boundary conditions
 #
 
-function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V};
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, ny) = params
     @indexing_vars(params)
@@ -1375,9 +1377,10 @@ function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 
     if params.use_gpu
-        gpu_boundary_conditions_left!(index_start, idx_row, idx_col, u_factor_left,
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait
-        return
+        bc_event = gpu_boundary_conditions_left!(index_start, idx_row, idx_col, u_factor_left,
+            rho, umat, vmat, pmat, cmat, gmat;
+            ndrange=ny, dependencies)
+        return bc_event
     end
 
     @simd_threaded_loop for j in 1:ny
@@ -1390,10 +1393,13 @@ function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}
         cmat[idxm1] = cmat[idx]
         gmat[idxm1] = gmat[idx]
     end
+
+    return NoneEvent()
 end
 
 
-function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V};
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, nx, ny) = params
     @indexing_vars(params)
@@ -1404,9 +1410,10 @@ function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V
     end
 
     if params.use_gpu
-        gpu_boundary_conditions_right!(index_start, idx_row, idx_col, nx, u_factor_right, 
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=ny) |> wait
-        return
+        bc_event = gpu_boundary_conditions_right!(index_start, idx_row, idx_col, nx, u_factor_right,
+            rho, umat, vmat, pmat, cmat, gmat;
+            ndrange=ny, dependencies)
+        return bc_event
     end
 
     @simd_threaded_loop for j in 1:ny
@@ -1419,10 +1426,13 @@ function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V
         cmat[idxp1] = cmat[idx]
         gmat[idxp1] = gmat[idx]
     end
+
+    return NoneEvent()
 end
 
 
-function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V};
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, nx, ny) = params
     @indexing_vars(params)
@@ -1433,9 +1443,10 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V})
     end
 
     if params.use_gpu
-        gpu_boundary_conditions_top!(index_start, idx_row, idx_col, ny, v_factor_top, 
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait
-        return
+        bc_event = gpu_boundary_conditions_top!(index_start, idx_row, idx_col, ny, v_factor_top,
+            rho, umat, vmat, pmat, cmat, gmat;
+            ndrange=nx, dependencies)
+        return bc_event
     end
 
     @simd_threaded_loop for i in 1:nx
@@ -1448,10 +1459,13 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V})
         cmat[idxp1] = cmat[idx]
         gmat[idxp1] = gmat[idx]
     end
+
+    return NoneEvent()
 end
 
 
-function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{V};
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
     (; test, nx) = params
     @indexing_vars(params)
@@ -1462,9 +1476,10 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
     end
 
     if params.use_gpu
-        gpu_boundary_conditions_bottom!(index_start, idx_row, idx_col, v_factor_bottom, 
-            rho, umat, vmat, pmat, cmat, gmat, ndrange=nx) |> wait
-        return
+        bc_event = gpu_boundary_conditions_bottom!(index_start, idx_row, idx_col, v_factor_bottom,
+            rho, umat, vmat, pmat, cmat, gmat;
+            ndrange=nx, dependencies)
+        return bc_event
     end
 
     @simd_threaded_loop for i in 1:nx
@@ -1477,19 +1492,22 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
         cmat[idxm1] = cmat[idx]
         gmat[idxm1] = gmat[idx]
     end
+
+    return NoneEvent()
 end
 
 
 function read_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        value_array::W, pos::Int; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, nx) = params
     (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
 
     if params.use_gpu
-        gpu_read_border_array_X!(pos, nghost, nx, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait
-        copyto!(value_array, tmp_comm_array)
-        return
+        read_event = gpu_read_border_array_X!(pos, nghost, nx, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat;
+            ndrange=nx*nghost, dependencies)
+        copy_event = async_copy!(device, value_array, tmp_comm_array; dependencies=read_event)
+        return copy_event
     end
 
     for i_g in 0:nghost-1
@@ -1507,19 +1525,22 @@ function read_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
             value_array[i_arr+7] = Emat[idx]
         end
     end
+
+    return NoneEvent()
 end
 
 
 function read_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        value_array::W, pos::Int; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, ny) = params
     (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
     
     if params.use_gpu
-        gpu_read_border_array_Y!(pos, nghost, ny, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait
-        copyto!(value_array, tmp_comm_array)
-        return
+        read_event = gpu_read_border_array_Y!(pos, nghost, ny, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat;
+            ndrange=ny*nghost, dependencies)
+        copy_event = async_copy!(device, value_array, tmp_comm_array; dependencies=read_event)
+        return copy_event
     end
 
     for i_g in 0:nghost-1
@@ -1536,19 +1557,22 @@ function read_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
             value_array[i_arr+7] = Emat[idx]
         end
     end
+
+    return NoneEvent()
 end
 
 
 function write_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        value_array::W, pos::Int; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, nx) = params
     (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
 
     if params.use_gpu
-        copyto!(tmp_comm_array, value_array)
-        gpu_write_border_array_X!(pos, nghost, nx, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=nx*nghost) |> wait
-        return
+        copy_event = async_copy!(device, tmp_comm_array, value_array; dependencies)
+        write_event = gpu_write_border_array_X!(pos, nghost, nx, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat;
+            ndrange=nx*nghost, dependencies=copy_event)
+        return write_event
     end
 
     for i_g in 0:nghost-1
@@ -1566,19 +1590,22 @@ function write_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
             Emat[idx] = value_array[i_arr+7]
         end
     end
+
+    return NoneEvent()
 end
 
 
 function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        value_array::W, pos::Int) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        value_array::W, pos::Int; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, ny) = params
     (; rho, umat, vmat, pmat, cmat, gmat, Emat, tmp_comm_array) = data
 
     if params.use_gpu
-        copyto!(tmp_comm_array, value_array)
-        gpu_write_border_array_Y!(pos, nghost, ny, row_length,
-            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat, ndrange=ny*nghost) |> wait
-        return
+        copy_event = async_copy!(device, tmp_comm_array, value_array; dependencies)
+        write_event = gpu_write_border_array_Y!(pos, nghost, ny, row_length,
+            tmp_comm_array, rho, umat, vmat, pmat, cmat, gmat, Emat;
+            ndrange=ny*nghost, dependencies=copy_event)
+        return write_event
     end
 
     for i_g in 0:nghost-1
@@ -1595,17 +1622,25 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
             Emat[idx] = value_array[i_arr+7]
         end
     end
+
+    return NoneEvent()
+end
+
+
+function exchange_with_neighbour(params::ArmonParameters{T}, array::V, neighbour_rank::Int,
+        cart_comm::MPI.Comm) where {T, V <: AbstractArray{T}}
+    @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(array, neighbour_rank, 0, array, neighbour_rank, 0, cart_comm)
 end
 
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
-        host_array::W, axis::Axis) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        host_array::W, axis::Axis; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nx, ny, nghost, neighbours, cart_comm, cart_coords) = params
     (; tmp_comm_array) = data
     @indexing_vars(params)
     # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: https://www.open-mpi.org/faq/?category=runcuda
-    # TODO : use CUDA/ROCM-aware MPI 
-    # TODO : use 4 views for each side for each variable ? (2 will be contigous, 2 won't) <- pre-calculate them!
+    # TODO : use CUDA/ROCM-aware MPI
+    # TODO : use 4 views for each side for each variable ? (2 will be contigous, 2 won't) <- pre-calculate them!
     # TODO : try to mix the comms: send to left and receive from right, then vice-versa. Maybe it can speed things up?
 
     if params.use_gpu
@@ -1614,7 +1649,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
         comm_array = tmp_comm_array
     end
 
-    # We only exchange the ghost domains along the current axis.
+    # We only exchange the ghost domains along the current axis.
     # even x/y coordinate in the cartesian process grid:
     #   - send+receive left  or top
     #   - send+receive right or bottom
@@ -1636,52 +1671,61 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
         end
     end
 
+    prev_event = dependencies
+
     for side in order
         if side == :left
             if neighbours.left == MPI.MPI_PROC_NULL
-                boundaryConditions_left!(params, data)
+                prev_event = boundaryConditions_left!(params, data; dependencies=prev_event)
             else
-                read_border_array_Y!(params, data, comm_array, @i(1, 1))
-                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array, 
-                    neighbours.left, 0, comm_array, neighbours.left, 0, cart_comm)
-                write_border_array_Y!(params, data, comm_array, @i(1-nghost, 1))
+                read_event = read_border_array_Y!(params, data, comm_array, @i(1, 1);
+                    dependencies=prev_event)
+                Event(exchange_with_neighbour, params, comm_array, neighbours.left, cart_comm;
+                    dependencies=read_event) |> wait
+                prev_event = write_border_array_Y!(params, data, comm_array, @i(1-nghost, 1))
             end
         elseif side == :right
             if neighbours.right == MPI.MPI_PROC_NULL
-                boundaryConditions_right!(params, data)
+                prev_event = boundaryConditions_right!(params, data; dependencies=prev_event)
             else
-                read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1))
-                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array, 
-                    neighbours.right, 0, comm_array, neighbours.right, 0, cart_comm)
-                write_border_array_Y!(params, data, comm_array, @i(nx+1, 1))
+                read_event = read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1);
+                    dependencies=prev_event)
+                Event(exchange_with_neighbour, params, comm_array, neighbours.right, cart_comm;
+                    dependencies=read_event) |> wait
+                prev_event = write_border_array_Y!(params, data, comm_array, @i(nx+1, 1))
             end
         elseif side == :top
             if neighbours.top == MPI.MPI_PROC_NULL
-                boundaryConditions_top!(params, data)
+                prev_event = boundaryConditions_top!(params, data; dependencies=prev_event)
             else
-                read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1))
-                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array, 
-                    neighbours.top, 0, comm_array, neighbours.top, 0, cart_comm)
-                write_border_array_X!(params, data, comm_array, @i(1, ny+1))
+                read_event = read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1);
+                    dependencies=prev_event)
+                Event(exchange_with_neighbour, params, comm_array, neighbours.top, cart_comm;
+                    dependencies=read_event) |> wait
+                prev_event = write_border_array_X!(params, data, comm_array, @i(1, ny+1))
             end
-        else # side == :bottom
+        else # side == :bottom
             if neighbours.bottom == MPI.MPI_PROC_NULL
-                boundaryConditions_bottom!(params, data)
+                prev_event = boundaryConditions_bottom!(params, data; dependencies=prev_event)
             else
-                read_border_array_X!(params, data, comm_array, @i(1, 1))
-                @time_pos_l "boundaryConditions!_MPI" MPI.Sendrecv!(comm_array,
-                    neighbours.bottom, 0, comm_array, neighbours.bottom, 0, cart_comm)
-                write_border_array_X!(params, data, comm_array, @i(1, 1-nghost))
+                read_event = read_border_array_X!(params, data, comm_array, @i(1, 1);
+                    dependencies=prev_event)
+                Event(exchange_with_neighbour, params, comm_array, neighbours.bottom, cart_comm;
+                    dependencies=read_event) |> wait
+                prev_event = write_border_array_X!(params, data, comm_array, @i(1, 1-nghost))
             end
         end
     end
+
+    return prev_event
 end
 
 #
 # Time step computation
 #
 
-function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
+function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; cmat, umat, vmat, domain_mask, tmp_rho) = data
     (; cfl, Dt, ideb, ifin, global_grid) = params
     @indexing_vars(params)
@@ -1701,17 +1745,19 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
         # array, then we reduce this array.
         # TODO : fix this
         if params.euler_projection
-            gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask, 
-                ndrange=length(cmat)) |> wait_d
+            gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask;
+                ndrange=length(cmat), dependencies) |> wait
             dt = reduce(min, tmp_rho)
         else
-            gpu_dtCFL_reduction_lagrange!(tmp_rho, cmat, domain_mask, ndrange=length(cmat)) |> wait_d
+            gpu_dtCFL_reduction_lagrange!(tmp_rho, cmat, domain_mask;
+                ndrange=length(cmat), dependencies) |> wait
             dt = reduce(min, tmp_rho) * min(dx, dy)
         end
     elseif params.euler_projection
         if params.use_gpu
-            # We need the absolute value of the divisor since the result of the max can be negative, 
-            # because of some IEEE 754 non-compliance since fast math is enabled when compiling this 
+            wait(dependencies)
+            # We need the absolute value of the divisor since the result of the max can be negative,
+            # because of some IEEE 754 non-compliance since fast math is enabled when compiling this
             # code for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
             # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
             dt_x = @inbounds reduce(min, @views (dx ./ abs.(
@@ -1746,7 +1792,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
     end
 
     if !isfinite(dt) || dt ≤ 0
-        return dt  # Let it crash
+        return dt  # Let it crash
     elseif dta == 0  # First cycle
         if Dt != 0
             return Dt
@@ -1760,9 +1806,10 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T,
 end
 
 
-function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T) where {T, V <: AbstractArray{T}}
+function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; cst_dt) = params
-    local_dt::T = dtCFL(params, data, dta)
+    local_dt::T = dtCFL(params, data, dta; dependencies)
 
     if cst_dt
         return local_dt
@@ -1778,7 +1825,7 @@ end
 # 
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
-        u::V, x::V) where {T, V <: AbstractArray{T}}
+        u::V, x::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, Emat, domain_mask) = data
     (; dx, ideb, ifin, s) = params
 
@@ -1793,13 +1840,13 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
     end
 
     if params.use_gpu
-        gpu_cell_update!(first_i - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask,
-            ndrange=length(first_i:last_i)) |> wait_d
+        event = gpu_cell_update!(first_i - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask;
+            ndrange=length(first_i:last_i), dependencies)
         if !params.euler_projection
-            gpu_cell_update_lagrange!(first_i - 1, last_i, dt, s, x, ustar, 
-                ndrange=length(first_i:last_i)) |> wait_d
+            event = gpu_cell_update_lagrange!(first_i - 1, last_i, dt, s, x, ustar;
+                ndrange=length(first_i:last_i), dependencies=event)
         end
-        return
+        return event
     end
 
     @simd_threaded_loop for i in first_i:last_i
@@ -1815,27 +1862,29 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
             x[i] += dt * ustar[i]
         end
     end
+
+    return NoneEvent()
 end
 
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T) where {T, V <: AbstractArray{T}}
+        dt::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask) = data
     (; dx, ideb, ifin, s) = params
     @indexing_vars(params)
 
     if params.use_gpu
-        gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, s, 
+        event = gpu_first_order_euler_remap_1!(ideb - 1, dx, dt, s,
             ustar, rho, umat, vmat, Emat, 
-            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask, 
-            ndrange=length(ideb:ifin)) |> wait_d
-        gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat, 
-            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, 
-            ndrange=length(ideb:ifin)) |> wait_d
-        return
+            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask;
+            ndrange=length(ideb:ifin), dependencies)
+        event = gpu_first_order_euler_remap_2!(ideb - 1, rho, umat, vmat, Emat,
+            tmp_rho, tmp_urho, tmp_vrho, tmp_Erho;
+            ndrange=length(ideb:ifin), dependencies=event)
+        return event
     end
 
-    # Projection of the conservative variables
+    # Projection of the conservative variables
     @simd_threaded_loop for i in ideb:ifin
         dX = dx + dt * (ustar[i+s] - ustar[i])
         L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
@@ -1856,16 +1905,18 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                      + L₃ * rho[i+s] * Emat[i+s]) / dX
     end
 
-    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
     @simd_threaded_loop for i in ideb:ifin
         rho[i]  = tmp_rho[i]
         umat[i] = tmp_urho[i] / tmp_rho[i]
         vmat[i] = tmp_vrho[i] / tmp_rho[i]
         Emat[i] = tmp_Erho[i] / tmp_rho[i]
     end
+
+    return NoneEvent()
 end
 
-# 
+#
 # Transposition parameters
 #
 
@@ -1941,14 +1992,14 @@ function write_result_single_file(params::ArmonParameters{T}, data::ArmonData{V}
         @warn "The output is written in an uniform matrix format, which is incompatible with an non uniform grid." maxlog=1
     end
 
-    MPI.Barrier(cart_comm)  # To make sure that no process opens the file before the output dir is created
+    MPI.Barrier(cart_comm)  # To make sure that no process opens the file before the output dir is created
 
     # Type of the view to the real array of this sub-domain (so by excluding the ghost cells)
     local_subarray_type = MPI.Types.create_subarray((row_length, col_length), (nx, ny), (nghost, nghost), 
         MPI.Datatype(T); rowmajor=true)
     MPI.Types.commit!(local_subarray_type)
 
-    # A buffer for one view to the array we want to write
+    # A buffer for one view to the array we want to write
     data_buffer = MPI.Buffer(data.rho, 1, local_subarray_type)
 
     # Type of the view of this process to the global domain array 
@@ -1957,7 +2008,7 @@ function write_result_single_file(params::ArmonParameters{T}, data::ArmonData{V}
         MPI.Datatype(T); rowmajor=true)
     MPI.Types.commit!(subarray_type)
 
-    # Open/Create the global file, then write our view to it
+    # Open/Create the global file, then write our view to it
     output_file_path = joinpath(output_dir, file_name)
     f = MPI.File.open(cart_comm, output_file_path; write=true, create=true)
 
@@ -2062,9 +2113,12 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
     last_i::Int, x_::V, u::V = update_axis_parameters(params, data, params.current_axis)
 
+    prev_event = NoneEvent()
+
     while t < maxtime && cycle < maxcycle
         if !dt_on_even_cycles || iseven(cycle)
-            @time_pos_common "dtCFL" dt = dtCFL_MPI(params, data, dta)
+            @time_pos_common "dtCFL" dt = dtCFL_MPI(params, data, dta; dependencies=prev_event)
+            prev_event = NoneEvent()
         end
 
         if is_root && (!isfinite(dt) || dt <= 0.)
@@ -2074,18 +2128,18 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         for (axis, dt_factor) in split_axes(params, cycle)
             last_i, x_, u = update_axis_parameters(params, data, axis)
 
-            @time_pos boundaryConditions!(params, data, host_array, axis)
-            @time_pos numericalFluxes!(params, data, dt * dt_factor, last_i, u)
-            @time_pos cellUpdate!(params, data, dt * dt_factor, u, x_)
+            @time_pos event = boundaryConditions!(params, data, host_array, axis; dependencies=prev_event)
+            @time_pos event = numericalFluxes!(params, data, dt * dt_factor, last_i, u; dependencies=event)
+            @time_pos event = cellUpdate!(params, data, dt * dt_factor, u, x_; dependencies=event)
     
             if params.euler_projection
                 if !params.single_comm_per_axis_pass 
-                    @time_pos boundaryConditions!(params, data, host_array, axis) 
+                    @time_pos event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
                 end
-                @time_pos first_order_euler_remap!(params, data, dt * dt_factor)
+                @time_pos event = first_order_euler_remap!(params, data, dt * dt_factor; dependencies=event)
             end
 
-            @time_pos update_EOS!(params, data)
+            @time_pos prev_event = update_EOS!(params, data; dependencies=event)
         end
 
         dta = dt
@@ -2183,7 +2237,7 @@ function armon(params::ArmonParameters{T}) where T
     if is_root && params.measure_time && silent < 3 && !isempty(axis_time_contrib)
         axis_time = Dict{Axis, Float64}()
 
-        # Print the time of each step for each axis
+        # Print the time of each step for each axis
         for (axis, time_contrib_axis) in sort(collect(axis_time_contrib); lt=(a, b)->(a[1] < b[1]))
             isempty(time_contrib_axis) && continue
             
@@ -2198,7 +2252,7 @@ function armon(params::ArmonParameters{T}) where T
             @printf(" => %-24s %10.5f ms\n", "Total time:", total_time / 1e6)
         end
 
-        # Print the distribution of time between axes
+        # Print the distribution of time between axes
         if length(axis_time) > 1
             total_time = mapreduce(x->x[2], +, collect(axis_time))
 
@@ -2213,7 +2267,7 @@ function armon(params::ArmonParameters{T}) where T
         total_time = mapreduce(x->x[2], +, collect(total_time_contrib))
         println("\nTotal time repartition: ")
         for (step_label, step_time) in sort(collect(total_time_contrib))
-            @printf(" - %-25s %10.5f ms (%5.2f%%)\n", 
+            @printf(" - %-25s %10.5f ms (%5.2f%%)\n",
                     step_label, step_time / 1e6, step_time / total_time * 100)
         end
     end
