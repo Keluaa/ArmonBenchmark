@@ -21,6 +21,8 @@ gpu_output_suffix = ARGS[3]
 output_data_file_prefix = ARGS[4]
 title = ARGS[5]
 
+endswith(output_dir, '/') && (output_dir = output_dir[1:end-1])
+
 cpu_stdout_file_name = "$output_dir/stdout_$cpu_output_suffix.txt"
 gpu_stdout_file_name = "$output_dir/stdout_$gpu_output_suffix.txt"
 cpu_stderr_file_name = "$output_dir/stderr_$cpu_output_suffix.txt"
@@ -41,7 +43,7 @@ gnuplot_cmd(plot_script_file) = `gnuplot -c $plot_script_file`
 gnuplot_script(data_file) = """
 set terminal pdfcairo color size 10in, 6in
 set output '$output_plot_file_name'
-set multiplot layout 2,2 rowsfirst title "2D Eulerian 2nd-order hydrodynamics: $title"
+set multiplot layout 2,2 rowsfirst title "2D Eulerian mono-fluid hydrocode: $title"
 
 # Throughput plot
 set xlabel 'Cells'
@@ -55,8 +57,9 @@ set y2range [0:20]
 set y2label 'Speedup GPU vs CPU'
 set key left top
 set logscale x
-plot "$data_file" using 1:2 axis x1y1 w lp title "GPU", "$data_file" using 1:3 axis x1y1 w lp title "CPU", "$data_file" using 1:4 axis x1y2 w lp title "ratio GPU/CPU"
+plot "$data_file" using 1:2 axis x1y1 w lp title "GPU", "$data_file" using 1:3 axis x1y1 w lp title "CPU", "$data_file" using 1:4 axis x1y2 w lp dt 4 title "ratio GPU/CPU"
 
+set ytics mirror
 unset y2tics
 unset my2tics
 unset y2label
@@ -72,15 +75,15 @@ plot "$data_file" using 1:5 w lp title "GPU", "$data_file" using 1:6 w lp title 
 
 # Energy plot
 set xlabel 'Cells'
-set ylabel 'Energy consumption GPUs vs. CPU-only'
+set ylabel 'Energy consumption factor GPUs vs. CPU-only'
 set yrange [0:]
 set logscale x
 plot "$data_file" using 1:7 w lp notitle
 
 # Energy efficiency plot
 set xlabel 'Cells'
-set ylabel 'Energy consumption [mJ/cell/cycle]'
-set yrange [0.0001:]
+set ylabel 'Energy consumption [µJ/cell/cycle]'
+set yrange [0.1:]
 set logscale xy
 plot "$data_file" using 1:8 w lp title "GPU", "$data_file" using 1:9 w lp title "CPU"
 
@@ -106,18 +109,24 @@ function get_power_consumption_of_job_steps(job_ID)
     raw_job_accounting = read(slurm_accounting_cmd(job_ID), String)
     job_accounting = split(raw_job_accounting)
 
-    ref_job_step_pos = findfirst(v -> v == "$job_ID.0", job_accounting)
-    isnothing(ref_job_step_pos) && error("Could not get the reference job step line position")
-
-    ref_elapsed_time = time_str_to_sec(job_accounting[ref_job_step_pos+1])
-    ref_joules = parse(Float64, job_accounting[ref_job_step_pos+2])
-
+    first_step_pos = findfirst(v -> contains(v, ".ext"), job_accounting) + 3
     steps_elapsed_time = Float64[]
     steps_joules = Float64[]
-    for i in ref_job_step_pos+3:3:length(job_accounting)
-        push!(steps_elapsed_time, time_str_to_sec(job_accounting[i+1]))
-        push!(steps_joules, parse(Float64, job_accounting[i+2]))
+    for i in first_step_pos:3:length(job_accounting)-3
+        step_elapsed_time = time_str_to_sec(job_accounting[i+1])
+        step_joules = parse(Float64, job_accounting[i+2])
+        if step_joules > 3600*1000_000
+            @warn "The energy counter of step $(length(steps_elapsed_time)) overflowed. Its energy amount will be estimated using the energy amount of the previous step."
+            isempty(steps_joules) && error("There is no previous step.")
+            step_joules = step_elapsed_time / last(steps_elapsed_time) * last(steps_joules)
+        end
+        push!(steps_elapsed_time, step_elapsed_time)
+        push!(steps_joules, step_joules)
     end
+
+    ref_job_step_pos = length(job_accounting)-2
+    ref_elapsed_time = time_str_to_sec(job_accounting[ref_job_step_pos+1])
+    ref_joules = parse(Float64, job_accounting[ref_job_step_pos+2])
 
     return ref_elapsed_time, ref_joules, steps_elapsed_time, steps_joules
 end
@@ -178,14 +187,13 @@ function extract_infos_of_job(job_stdout_file_name, job_stderr_file_name)
     ref_elapsed_time, ref_joules, steps_elapsed_time, steps_joules = get_power_consumption_of_job_steps(job_ID)
 
     info = JobInfo[]
-    step_i = 1
     line_end = 1
     stderr_line_end = 1
-    while (line_pos = findnext(" - ", job_stdout, line_end)) |> !isnothing
+    for step_i in 1:length(steps_elapsed_time)
+        line_pos = findnext(" - ", job_stdout, line_end)
         cells, throughput, MPI_time, line_end = extract_info_of_job_step(job_stdout, last(line_pos))
         cycles, stderr_line_end = get_cycles_count_of_job_step(job_stderr, stderr_line_end)
         push!(info, JobInfo(steps_elapsed_time[step_i], steps_joules[step_i], cells, throughput, MPI_time, cycles, ref_elapsed_time, ref_joules))
-        step_i += 1
     end
 
     return info
@@ -215,8 +223,8 @@ function build_graph(data_file_name, plot_script_file_name)
                 gpu_info.MPI_time * 100,
                 cpu_info.MPI_time * 100,
                 gpu_joules / cpu_joules,
-                gpu_joules / gpu_info.cells / gpu_info.cycles * 1000,
-                cpu_joules / cpu_info.cells / cpu_info.cycles * 1000,
+                gpu_joules / gpu_info.cells / gpu_info.cycles * 1_000_000,
+                cpu_joules / cpu_info.cells / cpu_info.cycles * 1_000_000,
             )
         end
     end
@@ -227,3 +235,4 @@ end
 
 build_graph(output_data_file_name, output_plot_script_file_name)
 run(gnuplot_cmd(output_plot_script_file_name))
+println("Created plot $output_plot_file_name")

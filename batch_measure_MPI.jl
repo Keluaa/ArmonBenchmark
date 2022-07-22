@@ -145,7 +145,7 @@ gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$
 gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
 
 
-sub_script_content(job_name, index, partition, nodes, processes, cores_per_process, ref_command, commands, next_script) = """
+sub_script_content(job_name, index, partition, nodes, processes, cores_per_process, max_time, ref_command, commands, next_script) = """
 #!/bin/bash
 #MSUB -r $(job_name)_$index
 #MSUB -o $(sub_scripts_output_dir)stdout_$(job_name)_$index.txt
@@ -154,11 +154,12 @@ sub_script_content(job_name, index, partition, nodes, processes, cores_per_proce
 #MSUB -N $nodes
 #MSUB -n $processes
 #MSUB -c $cores_per_process
+#MSUB -T $max_time
 #MSUB -x
 cd \${BRIDGE_MSUB_PWD}
 module load $(join(required_modules, ' '))
-$(isnothing(ref_command) ? "" : string(ref_command)[2:end-1])
 $(join([string(cmd)[2:end-1] for cmd in commands], "\n"))
+$(isnothing(ref_command) ? "" : string(ref_command)[2:end-1])
 $(!isnothing(next_script) ? "ccc_msub $next_script" : "echo 'All done.'")
 """
 
@@ -1009,7 +1010,7 @@ function make_submission_scripts(job_commands::Vector{job_command_type})
 
             print(sub_script_file, 
                 sub_script_content(measure.name, i, measure.node, 
-                    inti_params.node_count, inti_params.processes, julia_params.threads, 
+                    inti_params.node_count, inti_params.processes, julia_params.threads, measure.max_time,
                     ref_command, commands,
                     next_job_file_name))
         end
