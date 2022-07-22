@@ -904,12 +904,12 @@ end
 function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_params::IntiParams, i::Int)
     if julia_params.threads * inti_params.processes > max_inti_cores * inti_params.node_count
         println("Skipping running $(inti_params.processes) Julia processes with $(julia_params.threads) threads on $(inti_params.node_count) nodes.")
-        return
+        return nothing, nothing
     end
 
     if !any(map(Base.Fix1(check_ratio_for_grid, inti_params.processes), measure.process_grid_ratios))
         println("Skipping running $(inti_params.processes) Julia processes since none of the given grid ratios can entirely divide $(inti_params.processes)")
-        return
+        return nothing, nothing
     end
 
     base_file_name, _ = build_data_file_base_name(measure, 
@@ -980,11 +980,12 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
         if isa(e, InterruptException)
             # The user pressed Crtl-C
             println("Interrupted at measure n°$(i)")
-            return nothing, nothing
         else
             rethrow(e)
         end
     end
+
+    return nothing, nothing
 end
 
 
