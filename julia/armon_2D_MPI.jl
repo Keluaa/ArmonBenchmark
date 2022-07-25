@@ -446,7 +446,7 @@ Each batch has a size of `params.simd_batch` iterations, meaning that the inner 
 fixed number of iterations, while the outer threaded loop will have `N ÷ params.simd_batch`
 iterations.
 
-The loop range must have a step of 1, i.e. this is forbidden: 1:4:450
+The loop range is assumed to be increasing, i.e. this is correct: 1:2:100, this is not: 100:-2:1
 The inner `@simd` loop assumes there is no dependencies between each iteration.
 
 ```julia
@@ -469,11 +469,11 @@ macro simd_threaded_loop(expr)
         # Compound range expression: "j in 1:3, i in 4:6"
         # Use the first range as the threaded loop range
         loop_range = range_expr.args[1].args[2]
-        range_expr.args[1].args[2] = :(__ideb:__ifin)
+        range_expr.args[1].args[2] = :(__ideb:__step:__ifin)
     elseif range_expr.head == Symbol("=")
         # Single range expression: "j in 1:3"
         loop_range = range_expr.args[2]
-        range_expr.args[2] = :(__ideb:__ifin)
+        range_expr.args[2] = :(__ideb:__step:__ifin)
     else
         error("Expected range expression")
     end
@@ -488,9 +488,10 @@ macro simd_threaded_loop(expr)
                 __batch = convert(Int, cld(__total_iter, __num_threads))::Int
                 __first_i = first(__loop_range)
                 __last_i = last(__loop_range)
+                __step = step(__loop_range)
                 @threads for __i_thread = 1:__num_threads
-                    __ideb = __first_i + (__i_thread - 1) * __batch
-                    __ifin = min(__ideb + __batch - 1, __last_i)
+                    __ideb = __first_i + (__i_thread - 1) * __batch * __step
+                    __ifin = min(__ideb + (__batch - 1) * __step, __last_i)
                     @fastmath @inbounds @simd ivdep $(modified_loop_expr)
                 end
             else
