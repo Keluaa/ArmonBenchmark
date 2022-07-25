@@ -112,7 +112,7 @@ function ArgParse.parse_item(::Vector{NTuple{2, Int}}, x::AbstractString)
 end
 
 
-function parse_all_arguments()
+function parse_all_arguments(raw_arguments::Vector{String})
     settings = ArgParseSettings("""Main Julia Armon runner."""; prog="Armon", autofix_names=true)
 
     add_arg_group(settings, "Solver options")
@@ -335,7 +335,7 @@ function parse_all_arguments()
     end
 
 
-    parsed_args = parse_args(ARGS, settings; as_symbols=true)
+    parsed_args = parse_args(raw_arguments, settings; as_symbols=true)
     print(parsed_args)
 
     # Handle special cases
@@ -855,8 +855,16 @@ function run_measurements(args::RunArguments, is_root::Bool)
 end
 
 
-if !isinteractive()
-    args = parse_all_arguments()
+if isinteractive()
+    println("""
+    Usage:
+     - build arguments:       args = parse_all_arguments(raw_args)
+     - setup the environment: is_root = setup_run_armon(args)
+     - (optional) precompile: precompile_armon(args, is_root)
+     - run:                   run_measurements(args, is_root)
+    """)
+else
+    args = parse_all_arguments(ARGS)
     is_root = setup_run_armon(args)
     precompile_armon(args, is_root)
     run_measurements(args, is_root)
