@@ -39,6 +39,7 @@ proc_domains = [(1, 1)]
 proc_grid_ratios = nothing
 single_comm_per_axis_pass = false
 reorder_grid = true
+async_comms = false
 
 base_file_name = ""
 gnuplot_script = ""
@@ -199,6 +200,9 @@ while i <= length(ARGS)
     elseif arg == "--reorder-grid"
         global reorder_grid = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--async-comms"
+        global async_comms = parse(Bool, ARGS[i+1])
+        global i += 1
 
     # Additionnal params
     elseif arg == "--gpu"
@@ -294,7 +298,12 @@ if use_MPI
     if dimension == 1
         include("armon_1D_MPI.jl")
     else
-        include("armon_2D_MPI.jl")
+        if async_comms
+            printl("Using async comms")
+            include("armon_2D_MPI_async.jl")
+        else
+            include("armon_2D_MPI.jl")
+        end
     end
     using .Armon
 
