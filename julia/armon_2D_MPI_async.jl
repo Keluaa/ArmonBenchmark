@@ -529,7 +529,7 @@ The inner `@simd` loop assumes there is no dependencies between each iteration.
     end
 ```
 """
-macro @simd_threaded_iter(range, expr)
+macro simd_threaded_iter(range, expr)
     if !Meta.isexpr(expr, :for, 2)
         throw(ArgumentError("Expected a valid for loop"))
     end
@@ -1091,7 +1091,7 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
         #     ndrange=length(first_i:last_i), dependencies)
         return event
     end
-
+ 
     @simd_threaded_iter main_range for i in inner_range
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
@@ -1104,25 +1104,17 @@ end
 
 
 function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, last_i::Int, u::V;
+        dt::T, u::V, main_range::OrdinalRange{Int, Int}, inner_range::OrdinalRange{Int, Int};
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat, ustar_1, pstar_1) = data
     (; scheme, dx, ideb, s) = params
-
-    if params.single_comm_per_axis_pass
-        (; nx, ny, ifin) = params
-        @indexing_vars(params)
-        first_i = @i(0, 0)
-        last_i = @i(nx+1, ny+1) + last_i - ifin
-    else
-        first_i = ideb
-        last_i = last_i
-    end
 
     if params.use_gpu
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
+        
+        error("async GPU NYI")
 
         first_kernel = gpu_acoustic!(first_i - s - 1, s, ustar_1, pstar_1,
             rho, u, pmat, cmat;
@@ -1134,7 +1126,8 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     # First order
-    @simd_threaded_loop for i in first_i-s:last_i+s
+    inner_range_1st_order = first(inner_range)-s:step(inner_range):last(inner_range)+s
+    @simd_threaded_iter main_range for i in inner_range_1st_order
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
         ustar_1[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -1143,7 +1136,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
 
     # Second order, for each flux limiter
     if scheme == :GAD_minmod
-        @simd_threaded_loop for i in first_i:last_i
+        @simd_threaded_iter main_range for i in inner_range
             r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
             r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
             r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
@@ -1167,7 +1160,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
                                                      r_p_m * (pstar_1[i] -  pmat[i-s]))
         end
     elseif scheme == :GAD_superbee
-        @simd_threaded_loop for i in first_i:last_i
+        @simd_threaded_iter main_range for i in inner_range
             r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
             r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
             r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
@@ -1191,7 +1184,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
                                                      r_p_m * (pstar_1[i] -  pmat[i-s]))
         end
     elseif scheme == :GAD_no_limiter
-        @simd_threaded_loop for i in first_i:last_i
+        @simd_threaded_iter main_range for i in inner_range
             dm_l = rho[i-s] * dx
             dm_r = rho[i]   * dx
             rc_l = rho[i-s] * cmat[i-s]
@@ -1219,7 +1212,7 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
         if params.scheme == :Godunov
             return acoustic!(params, data, u, main_range, inner_range; dependencies)
         else
-            return acoustic_GAD!(params, data, dt, last_i, u; dependencies)
+            return acoustic_GAD!(params, data, dt, u, main_range, inner_range; dependencies)
         end
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
@@ -1229,20 +1222,23 @@ end
 
 function numericalFluxes_inner!(params::ArmonParameters{T}, data::ArmonData{V}, 
         dt::T, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; nx, ny, nghost, row_length) = params
+    (; nx, ny, nghost, row_length, s) = params
     @indexing_vars(params)
+
+    # Add one more ring of cells to compute on the sides if needed
+    o = convert(Int, params.single_comm_per_axis_pass)
 
     # In both cases, we also include one more cell/row on the left/top of the inner domain to have 
     # the fluxes at the left/bottom and right/top of every cell in the inner domain. 
 
     if params.current_axis == X_axis
         # Compute the fluxes row by row, excluding 'nghost' columns at the left and right
-        main_range  = @i(1,1):row_length:@i(1,ny)
+        main_range  = @i(1,1-o):row_length:@i(1,ny+o)
         inner_range = nghost+1:nx+1-nghost
     else
         # Compute the fluxes column by column, excluding 'nghost' rows at the top and bottom
-        main_range  = @i(1,1):@i(nx,1)
-        inner_range = nghost+1:row_length:(ny+1-nghost)*row_length
+        main_range  = @i(1-o,1):@i(nx+o,1)
+        inner_range = (row_length*nghost+1):row_length:((ny+1-nghost)*row_length)
     end
 
     return numericalFluxes!(params, data, dt, u, main_range, inner_range; dependencies)
@@ -1254,11 +1250,8 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
     (; nx, ny, nghost, row_length, s) = params
     @indexing_vars(params)
 
-    if params.single_comm_per_axis_pass
-        o = 1  # Add one more ring of cells to compute
-    else
-        o = 0
-    end
+    # Add one more ring of cells to compute on the sides if needed
+    o = convert(Int, params.single_comm_per_axis_pass)
 
     if params.current_axis == X_axis
         # Compute the fluxes row by row, for the first 'nghost+o' columns on the left
@@ -1274,18 +1267,18 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
 
     if params.current_axis == X_axis
         # Compute the fluxes row by row, for the last 'nghost+o' columns on the right
-        main_range  = @i(1-o,1-o):row_length:@i(1-o,ny+o)
-        inner_range = nx-nghost+1:nx+1+o
+        main_range  = @i(1,1-o):row_length:@i(1+o,ny+o)
+        inner_range = nx-nghost+1:nx+o
     else
         # Compute the fluxes column by column, for the last 'nghost+o' rows at the top
         main_range  = @i(1-o,1-o):@i(nx+o,1-o)
-        inner_range = ny-nghost+1:row_length:(ny+o)*row_length
+        inner_range = (ny-nghost+o+1)*row_length:row_length:(ny+2*o)*row_length
     end
 
     # Shift the computation to the right/top by one column/row since the flux at index 'i' is the 
     # flux between the cells 'i-s' and 'i', but we also need the fluxes on the other side, between
     # the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed later.
-    inner_range .+= s
+    inner_range = inner_range .+ 1
 
     return numericalFluxes!(params, data, dt, u, main_range, inner_range; dependencies=event)
 end
@@ -1930,10 +1923,9 @@ end
 
 function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; cst_dt) = params
     local_dt::T = dtCFL(params, data, dta; dependencies)
 
-    if cst_dt
+    if params.cst_dt || !params.use_MPI
         return local_dt
     end
 
@@ -2169,25 +2161,36 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     # Wait for the root command to complete
-    MPI.Barrier(cart_comm)
+    params.use_MPI && MPI.Barrier(cart_comm)
 
     (cx, cy) = cart_coords
+
     f = open("$(output_file_path)_$(cx)x$(cy)", "w")
-    
+   
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
+
     if write_ghosts
         for j in 1-nghost:ny+nghost
             for i in 1-nghost:nx+nghost
-                print(f, data.x[@i(i, j)], ", ", data.y[@i(i, j)], ", ", data.rho[@i(i, j)], "\n")
+                @printf(f, "%9.6f", vars_to_write[1][@i(i, j)])
+                for var in vars_to_write[2:end]
+                    @printf(f, ", %9.6f", var[@i(i,j)])
+                end
+                print(f, "\n")
             end
         end
     else
         for j in 1:ny
             for i in 1:nx
-                print(f, data.x[@i(i, j)], ", ", data.y[@i(i, j)], ", ", data.rho[@i(i, j)], "\n")
+                @printf(f, "%9.6f", vars_to_write[1][@i(i, j)])
+                for var in vars_to_write[2:end]
+                    @printf(f, ", %9.6f", var[@i(i,j)])
+                end
+                print(f, "\n")
             end
-            print(f, "\n")
         end
     end
+
     close(f)
 
     if is_root && silent < 2

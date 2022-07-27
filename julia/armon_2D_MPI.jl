@@ -2052,21 +2052,31 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
 
     (cx, cy) = cart_coords
     f = open("$(output_file_path)_$(cx)x$(cy)", "w")
-    
+
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
+
     if write_ghosts
         for j in 1-nghost:ny+nghost
             for i in 1-nghost:nx+nghost
-                print(f, data.x[@i(i, j)], ", ", data.y[@i(i, j)], ", ", data.rho[@i(i, j)], "\n")
+                @printf(f, "%9.6f", vars_to_write[1][@i(i, j)])
+                for var in vars_to_write[2:end]
+                    @printf(f, ", %9.6f", var[@i(i,j)])
+                end
+                print(f, "\n")
             end
         end
     else
         for j in 1:ny
             for i in 1:nx
-                print(f, data.x[@i(i, j)], ", ", data.y[@i(i, j)], ", ", data.rho[@i(i, j)], "\n")
+                @printf(f, "%9.6f", vars_to_write[1][@i(i, j)])
+                for var in vars_to_write[2:end]
+                    @printf(f, ", %9.6f", var[@i(i,j)])
+                end
+                print(f, "\n")
             end
-            print(f, "\n")
         end
     end
+
     close(f)
 
     if is_root && silent < 2
