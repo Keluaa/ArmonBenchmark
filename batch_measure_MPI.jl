@@ -24,6 +24,7 @@ mutable struct MeasureParams
     jl_proc_bind::Vector{String}
     jl_places::Vector{String}
     dimension::Vector{Int}
+    async_comms::Vector{Bool}
 
     # Armon params
     cells_list::Vector{Int}
@@ -72,6 +73,7 @@ struct JuliaParams
     threads::Int
     use_simd::Int
     dimension::Int
+    async_comms::Bool
 end
 
 
@@ -118,6 +120,7 @@ set ylabel 'Total loop time (%)'
 set title "$title"
 set key left top
 set style fill solid 1.00 border 0
+set xtics rotate by 90 right
 `echo "$graph_file_name" >> $plots_update_file`
 plot """
 
@@ -179,6 +182,7 @@ function parse_measure_params(file_line_parser)
     jl_places = ["cores"]
     jl_proc_bind = ["close"]
     dimension = [1]
+    async_comms = [false]
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     process_grids = ["1,1"]
@@ -254,6 +258,8 @@ function parse_measure_params(file_line_parser)
             jl_proc_bind = split(value, ',')
         elseif option == "dim"
             dimension = parse.(Int, split(value, ','))
+        elseif option == "async_comms"
+            async_comms = parse.(Bool, split(value, ','))
         elseif option == "cells"
             cells_list = value
         elseif option == "domains"
@@ -357,7 +363,7 @@ function parse_measure_params(file_line_parser)
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         create_sub_job_chain, add_reference_job, one_job_per_cell,
         threads, use_simd, jl_proc_bind, jl_places, 
-        dimension, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
+        dimension, async_comms, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
         name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, use_max_threads, 
         cst_cells_per_process,
@@ -450,7 +456,8 @@ function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
                 measure.jl_proc_bind,
                 [threads_per_process],
                 measure.use_simd,
-                measure.dimension
+                measure.dimension,
+                measure.async_comms
             )
         )
     else
@@ -461,7 +468,8 @@ function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
                 measure.jl_proc_bind,
                 measure.threads,
                 measure.use_simd,
-                measure.dimension
+                measure.dimension,
+                measure.async_comms
             )
         )
     end
@@ -611,6 +619,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
 
     if params.dimension > 1
         append!(armon_options, [
+            "--async-comms", params.async_comms,
             "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
             "--flat-dims", measure.flatten_time_dims
@@ -678,6 +687,7 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
 
     if params.dimension > 1
         append!(armon_options, [
+            "--async-comms", params.async_comms,
             "--transpose", measure.transpose_dims[1],
             "--splitting", measure.axis_splitting[1]
         ])
@@ -783,6 +793,12 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
     if length(measure.jl_places) > 1
         name *= "_$(params.jl_places)"
         legend *= ", places: $(params.jl_places)"
+    end
+
+    if length(measure.async_comms) > 1
+        async_str = params.async_comms ? "async" : "sync"
+        name *= "_$async_str"
+        legend *= ", $async_str"
     end
     
     return name * "_", legend
@@ -921,6 +937,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
  - threads binding: $(julia_params.jl_proc_bind), places: $(julia_params.jl_places)
  - $(julia_params.use_simd == 1 ? "with" : "without") SIMD
  - $(julia_params.dimension)D
+ - $(julia_params.async_comms ? "a" : "")synchronous communications
  - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
  - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
 """)

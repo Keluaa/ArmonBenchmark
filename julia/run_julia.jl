@@ -302,12 +302,7 @@ if use_MPI
     if dimension == 1
         include("armon_1D_MPI.jl")
     else
-        if async_comms
-            println("Using async comms")
-            include("armon_2D_MPI_async.jl")
-        else
-            include("armon_2D_MPI.jl")
-        end
+        include("armon_2D_MPI_async.jl")
     end
     using .Armon
 
@@ -383,7 +378,7 @@ if use_MPI
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
                 test=test, nbcell=cells,
                 euler_projection, maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
@@ -394,13 +389,13 @@ if use_MPI
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
                 maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
-                single_comm_per_axis_pass, reorder_grid)
+                single_comm_per_axis_pass, reorder_grid, async_comms)
         end
     end
 else
@@ -425,7 +420,7 @@ else
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
                 test=test, nbcell=cells,
                 euler_projection, maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
@@ -436,7 +431,7 @@ else
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu,
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid)
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
@@ -497,7 +492,7 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
         maxtime, maxcycle, silent, output_file, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
         use_MPI=false, px=0, py=0,
-        single_comm_per_axis_pass=false, reorder_grid=false
+        single_comm_per_axis_pass=false, reorder_grid=false, async_comms=false
     )
 
     if dimension == 1
@@ -547,7 +542,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         maxtime, maxcycle, silent, output_file, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
         use_MPI, px, py,
-        single_comm_per_axis_pass, reorder_grid
+        single_comm_per_axis_pass, reorder_grid, async_comms
     ))
     
     MPI.Barrier(MPI.COMM_WORLD)
@@ -595,9 +590,8 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
             for (step_label, step_time) in time_contrib
                 if endswith(step_label, "_MPI")
                     total_MPI_time += step_time
-                else
-                    total_time += step_time
                 end
+                total_time += step_time
             end
             
             # ns to sec
@@ -650,11 +644,19 @@ if is_root
 end
 
 for test in tests, transpose in transpose_dims
-    run_armon(build_params(test, dimension == 1 ? 10000 : (10, 10);
-        ieee_bits, riemann, scheme, iterations, cfl, 
-        Dt, cst_dt, dt_on_even_cycles=false, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
-        maxtime, maxcycle=1, silent=5, output_file, write_output=false, use_ccall, use_threading, use_simd, 
-        interleaving, use_gpu, use_MPI=false, px=1, py=1, single_comm_per_axis_pass, reorder_grid=false))
+    # We redirect stdout so that in case 'silent < 5', output functions are pre-compiled and so they 
+    # don't influence the timing results.
+    # 'devnull' is not used here since 'println' and others will not go through their normal code paths.
+    dummy_pipe = Pipe()
+    redirect_stdout(dummy_pipe) do
+        run_armon(build_params(test, dimension == 1 ? 10000 : (60, 60);
+            ieee_bits, riemann, scheme, iterations, cfl, 
+            Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
+            maxtime, maxcycle=10, silent, output_file, write_output=false, use_ccall, use_threading, use_simd, 
+            interleaving, use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
+            single_comm_per_axis_pass, reorder_grid, async_comms
+        ))
+    end
 end
 
 if is_root
@@ -702,7 +704,7 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px
         end
 
         if is_root
-            # total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
+            total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
 
             if !isempty(gnuplot_script)
                 # We redirect the output of gnuplot to null so that there is no warning messages displayed
@@ -717,24 +719,6 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px
     end
 
     if time_histogram && is_root && !isempty(hist_file_name)
-        if flatten_time_dims
-            flat_time_contrib = nothing
-            for axis_time_contrib in total_time_contrib
-                flat_time_contrib = merge_time_contribution(flat_time_contrib, axis_time_contrib)
-            end
-            total_time_contrib = flat_time_contrib
-        elseif dimension == 2
-            # Append the axis name at the beginning of each label and merge into a single list
-            axes = ["X ", "Y "]
-            merged_time_contrib = []
-            for (axis, axis_time_contrib) in enumerate(total_time_contrib)
-                axis_time_contrib = collect(axis_time_contrib)
-                map!((e) -> (axes[axis] * e.first => e.second), axis_time_contrib, axis_time_contrib)
-                append!(merged_time_contrib, axis_time_contrib)
-            end
-            total_time_contrib = sort(merged_time_contrib)
-        end
-
         open(hist_file_name, "a") do data_file
             for (label, time) in total_time_contrib
                 label = replace(label, '_' => "\\\\_", '!' => "")
