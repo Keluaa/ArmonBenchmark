@@ -2,6 +2,8 @@
 using Printf
 
 include("omp_simili.jl")
+include("vtune_lib.jl")
+using .VTune
 
 scheme = :GAD_minmod
 riemann = :acoustic
@@ -423,7 +425,7 @@ else
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
                 test=test, nbcell=cells,
-                euler_projection, maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
+                euler_projection, maxtime, maxcycle, silent, output_file, write_output,
                 use_ccall, use_threading, use_simd, interleaving, use_gpu)
         end
     else
@@ -469,13 +471,15 @@ function merge_time_contribution(time_contrib_1, time_contrib_2)
 end
 
 
-function run_armon(params::ArmonParameters)
+function run_armon(params::ArmonParameters, with_profiling::Bool)
     total_cells_per_sec = 0
     total_time_contrib = nothing
     total_cycles = 0
 
     for _ in 1:repeats
+        with_profiling && @resume_profiling()
         _, cycles, cells_per_sec, time_contrib = armon(params)
+        with_profiling && @pause_profiling()
         total_cells_per_sec += cells_per_sec
         total_cycles += cycles
         total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
@@ -503,7 +507,7 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
             string(splitting), cells[1] * cells[2], cells[1], cells[2])
     end
 
-    cycles, cells_per_sec, time_contrib = run_armon(params)
+    cycles, cells_per_sec, time_contrib = run_armon(params, true)
 
     @printf("%6.3f Giga cells/sec\n", cells_per_sec)
 
@@ -543,7 +547,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         interleaving, use_gpu,
         use_MPI, px, py,
         single_comm_per_axis_pass, reorder_grid, async_comms
-    ))
+    ), true)
     
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
@@ -655,7 +659,7 @@ for test in tests, transpose in transpose_dims
             maxtime, maxcycle=10, silent, output_file, write_output=false, use_ccall, use_threading, use_simd, 
             interleaving, use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
             single_comm_per_axis_pass, reorder_grid, async_comms
-        ))
+        ), false)
     end
 end
 

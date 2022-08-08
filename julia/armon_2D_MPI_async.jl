@@ -41,6 +41,11 @@ function set_world_comm(comm::MPI.Comm)
     global COMM = comm
 end
 
+# VTune performance analysis
+
+include("vtune_lib.jl")
+using .VTune
+
 #
 # Axis enum
 #
@@ -114,6 +119,8 @@ mutable struct ArmonParameters{Flt_T}
     global_grid::NTuple{2, Int}  # Dimensions (nx, ny) of the global grid
     single_comm_per_axis_pass::Bool
     reorder_grid::Bool
+
+    # Asynchronicity
     async_comms::Bool
 end
 
@@ -133,7 +140,8 @@ function ArmonParameters(;
         use_simd = true, interleaving = false,
         use_gpu = false,
         use_MPI = true, px = 1, py = 1,
-        single_comm_per_axis_pass = false, reorder_grid = true, async_comms = true
+        single_comm_per_axis_pass = false, reorder_grid = true, 
+        async_comms = true
     )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
@@ -242,7 +250,8 @@ function ArmonParameters(;
         use_ccall, use_threading, use_simd, use_gpu,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
-        single_comm_per_axis_pass, reorder_grid, async_comms
+        single_comm_per_axis_pass, reorder_grid, 
+        async_comms 
     )
 end
 
@@ -609,7 +618,7 @@ total_time_contrib = Dict{String, Float64}()
 const time_contrib_lock = ReentrantLock()
 
 
-function add_commmon_time(label, time)
+function add_common_time(label, time)
     if !haskey(total_time_contrib, label)
         global total_time_contrib[label] = 0.
     end
@@ -626,17 +635,14 @@ function add_axis_time(axis, label, time)
         global axis_time_contrib[axis][label] = 0.
     end
     global axis_time_contrib[axis][label] += time
-    return add_commmon_time(label, time)
+    return
 end
 
 
-function add_time_contrib(label, time; axis=nothing)
+function add_time_contrib(label, time; axis=nothing, exclude_from_total=false)
     lock(time_contrib_lock) do
-        if isnothing(axis)
-            add_commmon_time(label, time)
-        else
-            add_axis_time(axis, label, time)
-        end
+        !exclude_from_total && add_common_time(label, time)
+        !isnothing(axis) && add_axis_time(axis, label, time)
     end
 end
 
@@ -755,11 +761,11 @@ macro cpu_tic(label)
 end
 
 
-function cpu_tac(label; axis=nothing)
+function cpu_tac(label; axis=nothing, exclude_from_total=false)
     return esc(quote
         if params.measure_time && !is_warming_up()
             var"tac_$(label)" = time_ns()
-            add_time_contrib($(label), var"tac_$(label)" - var"tic_$(label)"; axis=$(axis))
+            add_time_contrib($(label), var"tac_$(label)" - var"tic_$(label)"; axis=$(axis), exclude_from_total=$(exclude_from_total))
         end
     end)
 end
@@ -775,9 +781,16 @@ macro cpu_tac(label, axis)
 end
 
 
+macro cpu_tac(label, axis, exclude_from_total)
+    return cpu_tac(label; axis, exclude_from_total)
+end
+
+
 macro gpu_tic(label, dependencies)
     @static if use_ROCM
-        error("ROCM kernel timing NYI")
+        return esc(quote 
+            error("ROCM kernel timing NYI")
+        end)
     else
         return esc(quote
             if params.measure_time && !is_warming_up()
@@ -793,9 +806,11 @@ macro gpu_tic(label, dependencies)
 end
 
 
-function gpu_tac(label, kernel_event; axis=nothing)
+function gpu_tac(label, kernel_event; axis=nothing, exclude_from_total=false)
     @static if use_ROCM
-        error("ROCM kernel timing NYI")
+        return esc(quote 
+            error("ROCM kernel timing NYI")
+        end)
     else
         return esc(quote
             if params.measure_time && !is_warming_up()
@@ -803,7 +818,7 @@ function gpu_tac(label, kernel_event; axis=nothing)
                     var"kernel_cuevent_$(label)" = $(kernel_event).event
                     CUDA.synchronize(var"kernel_cuevent_$(label)")
                     var"kernel_time_$(label)" = CUDA.elapsed(var"start_cuevent_$(label)", var"kernel_cuevent_$(label)")
-                    add_time_contrib($(label), var"kernel_time_$(label)"; axis=$(axis))
+                    add_time_contrib($(label), var"kernel_time_$(label)"; axis=$(axis), exclude_from_total=$(exclude_from_total))
                 end
             end
         end)
@@ -818,6 +833,11 @@ end
 
 macro gpu_tac(label, kernel_event, axis)
     return gpu_tac(label, kernel_event; axis)
+end
+
+
+macro gpu_tac(label, kernel_event, axis, exclude_from_total)
+    return gpu_tac(label, kernel_event; axis, exclude_from_total)
 end
 
 # 
@@ -1217,7 +1237,7 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
         pstar[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
     end
 
-    @cpu_tac(step_label, params.current_axis)
+    @cpu_tac(step_label, params.current_axis, true)
     
     return NoneEvent()
 end
@@ -1258,6 +1278,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     # First order
     @cpu_tic(step_label_1st)
 
+    first_idx = first(inner_range) + first(main_range) - 1
     inner_range_1st_order = first(inner_range)-s:step(inner_range):last(inner_range)+s
     @simd_threaded_iter main_range for i in inner_range_1st_order
         rc_l = rho[i-s] * cmat[i-s]
@@ -1266,7 +1287,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
         pstar_1[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
     end
 
-    @cpu_tac(step_label_1st, params.current_axis)
+    @cpu_tac(step_label_1st, params.current_axis, true)
 
     # Second order, for each flux limiter
     @cpu_tic(step_label_2nd)
@@ -1337,7 +1358,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
         error("The choice of the scheme for the acoustic solver is not recognized: ", scheme)
     end
 
-    @cpu_tac(step_label_2nd, params.current_axis)
+    @cpu_tac(step_label_2nd, params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1359,8 +1380,8 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
 end
 
 
-function numericalFluxes_inner!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function numericalFluxes_inner!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, u::V;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; nx, ny, nghost, row_length, s) = params
     @indexing_vars(params)
 
@@ -1380,7 +1401,8 @@ function numericalFluxes_inner!(params::ArmonParameters{T}, data::ArmonData{V},
         inner_range = (row_length*nghost+1):row_length:((ny+1-nghost)*row_length)
     end
 
-    return numericalFluxes!(params, data, dt, u, main_range, inner_range, false; dependencies)
+    @perf_task "loop" "fluxes_inner" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, false; dependencies)
+    return event
 end
 
 
@@ -1402,7 +1424,7 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
         inner_range = 1:row_length:(nghost+o)*row_length
     end
 
-    event = numericalFluxes!(params, data, dt, u, main_range, inner_range, true; dependencies)
+    @perf_task "comms" "fluxes_outer_1" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, true; dependencies)
 
     if params.current_axis == X_axis
         # Compute the fluxes row by row, for the last 'nghost+o' columns on the right
@@ -1419,7 +1441,8 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
     # the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed later.
     inner_range = inner_range .+ 1
 
-    return numericalFluxes!(params, data, dt, u, main_range, inner_range, true; dependencies=event)
+    @perf_task "comms" "fluxes_outer_2" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, true; dependencies=event)
+    return event
 end
 
 #
@@ -1649,7 +1672,7 @@ function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}
 
     @cpu_tic("boundaryConditions")
 
-    @simd_threaded_loop for j in 1:ny
+    @simd_loop for j in 1:ny
         idx = @i(1,j)
         idxm1 = @i(0,j)
         rho[idxm1]  = rho[idx]
@@ -1660,7 +1683,7 @@ function boundaryConditions_left!(params::ArmonParameters{T}, data::ArmonData{V}
         gmat[idxm1] = gmat[idx]
     end
 
-    @cpu_tac("boundaryConditions", params.current_axis)
+    @cpu_tac("boundaryConditions", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1688,7 +1711,7 @@ function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V
 
     @cpu_tic("boundaryConditions")
 
-    @simd_threaded_loop for j in 1:ny
+    @simd_loop for j in 1:ny
         idx = @i(nx,j)
         idxp1 = @i(nx+1,j)
         rho[idxp1] = rho[idx]
@@ -1699,7 +1722,7 @@ function boundaryConditions_right!(params::ArmonParameters{T}, data::ArmonData{V
         gmat[idxp1] = gmat[idx]
     end
 
-    @cpu_tac("boundaryConditions", params.current_axis)
+    @cpu_tac("boundaryConditions", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1727,7 +1750,7 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V};
     
     @cpu_tic("boundaryConditions")
 
-    @simd_threaded_loop for i in 1:nx
+    @simd_loop for i in 1:nx
         idx = @i(i,ny)
         idxp1 = @i(i,ny+1)
         rho[idxp1]  = rho[idx]
@@ -1738,7 +1761,7 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V};
         gmat[idxp1] = gmat[idx]
     end
 
-    @cpu_tac("boundaryConditions", params.current_axis)
+    @cpu_tac("boundaryConditions", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1766,7 +1789,7 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
 
     @cpu_tic("boundaryConditions")
 
-    @simd_threaded_loop for i in 1:nx
+    @simd_loop for i in 1:nx
         idx = @i(i,1)
         idxm1 = @i(i,0)
         rho[idxm1]  = rho[idx]
@@ -1777,7 +1800,7 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
         gmat[idxm1] = gmat[idx]
     end
 
-    @cpu_tac("boundaryConditions", params.current_axis)
+    @cpu_tac("boundaryConditions", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1802,10 +1825,10 @@ function read_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
 
     @cpu_tic("read_array")
 
-    for i_g in 0:nghost-1
+    @perf_task "comms" "read_X" for i_g in 0:nghost-1
         ghost_row = i_g * nx * 7
         row_pos = i_g * row_length + pos
-        @simd_threaded_loop for i in 0:nx-1
+        @simd_loop for i in 0:nx-1
             i_arr = ghost_row + i * 7
             idx = row_pos + i
             value_array[i_arr+1] =  rho[idx]
@@ -1818,7 +1841,7 @@ function read_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
         end
     end
 
-    @cpu_tac("read_array", params.current_axis)
+    @cpu_tac("read_array", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1843,9 +1866,9 @@ function read_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
 
     @cpu_tic("read_array")
 
-    for i_g in 0:nghost-1
+    @perf_task "comms" "read_Y" for i_g in 0:nghost-1
         ghost_col = i_g * ny * 7
-        @simd_threaded_loop for i in 0:ny-1
+        @simd_loop for i in 0:ny-1
             i_arr = ghost_col + i * 7
             idx = pos + row_length * i + i_g
             value_array[i_arr+1] =  rho[idx]
@@ -1858,7 +1881,7 @@ function read_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
         end
     end
 
-    @cpu_tac("read_array", params.current_axis)
+    @cpu_tac("read_array", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1883,10 +1906,10 @@ function write_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
 
     @cpu_tic("write_array")
 
-    for i_g in 0:nghost-1
+    @perf_task "comms" "write_X" for i_g in 0:nghost-1
         ghost_row = i_g * nx * 7
         row_pos = i_g * row_length + pos
-        @simd_threaded_loop for i in 0:nx-1
+        @simd_loop for i in 0:nx-1
             i_arr = ghost_row + i * 7
             idx = row_pos + i
              rho[idx] = value_array[i_arr+1]
@@ -1899,7 +1922,7 @@ function write_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V},
         end
     end
 
-    @cpu_tac("write_array", params.current_axis)
+    @cpu_tac("write_array", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1924,9 +1947,9 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
 
     @cpu_tic("write_array")
 
-    for i_g in 0:nghost-1
+    @perf_task "comms" "write_Y" for i_g in 0:nghost-1
         ghost_col = i_g * ny * 7
-        @simd_threaded_loop for i in 0:ny-1
+        @simd_loop for i in 0:ny-1
             i_arr = ghost_col + i * 7
             idx = pos + row_length * i + i_g
              rho[idx] = value_array[i_arr+1]
@@ -1939,7 +1962,7 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
         end
     end
 
-    @cpu_tac("write_array", params.current_axis)
+    @cpu_tac("write_array", params.current_axis, true)
 
     return NoneEvent()
 end
@@ -1948,13 +1971,13 @@ end
 function exchange_with_neighbour(params::ArmonParameters{T}, array::V, neighbour_rank::Int,
         cart_comm::MPI.Comm) where {T, V <: AbstractArray{T}}
     @cpu_tic("boundaryConditions!_MPI")
-    MPI.Sendrecv!(array, neighbour_rank, 0, array, neighbour_rank, 0, cart_comm)
-    @cpu_tac("boundaryConditions!_MPI", params.current_axis)
+    @perf_task "comms" "MPI_sendrecv" MPI.Sendrecv!(array, neighbour_rank, 0, array, neighbour_rank, 0, cart_comm)
+    @cpu_tac("boundaryConditions!_MPI", params.current_axis, true)
 end
 
 
-function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
-        host_array::W, axis::Axis; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::W, axis::Axis; 
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nx, ny, nghost, neighbours, cart_comm, cart_coords) = params
     (; tmp_comm_array) = data
     @indexing_vars(params)
@@ -1996,7 +2019,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
     for side in order
         if side == :left
             if neighbours.left == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_left!(params, data; dependencies=prev_event)
+                @perf_task "loop" "BC_left" prev_event = boundaryConditions_left!(params, data; dependencies=prev_event)
             else
                 read_event = read_border_array_Y!(params, data, comm_array, @i(1, 1);
                     dependencies=prev_event)
@@ -2006,7 +2029,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
             end
         elseif side == :right
             if neighbours.right == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_right!(params, data; dependencies=prev_event)
+                @perf_task "loop" "BC_right" prev_event = boundaryConditions_right!(params, data; dependencies=prev_event)
             else
                 read_event = read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1);
                     dependencies=prev_event)
@@ -2016,7 +2039,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
             end
         elseif side == :top
             if neighbours.top == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_top!(params, data; dependencies=prev_event)
+                @perf_task "loop" "BC_top" prev_event = boundaryConditions_top!(params, data; dependencies=prev_event)
             else
                 read_event = read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1);
                     dependencies=prev_event)
@@ -2026,7 +2049,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
             end
         else # side == :bottom
             if neighbours.bottom == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_bottom!(params, data; dependencies=prev_event)
+                @perf_task "loop" "BC_bottom" prev_event = boundaryConditions_bottom!(params, data; dependencies=prev_event)
             else
                 read_event = read_border_array_X!(params, data, comm_array, @i(1, 1);
                     dependencies=prev_event)
@@ -2129,7 +2152,7 @@ end
 function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     @cpu_tic("dtCFL")
-    local_dt::T = dtCFL(params, data, dta; dependencies)
+    @perf_task "loop" "dtCFL" local_dt::T = dtCFL(params, data, dta; dependencies)
     @cpu_tac("dtCFL")
 
     if params.cst_dt || !params.use_MPI
@@ -2138,7 +2161,7 @@ function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
 
     # Reduce all local_dts and broadcast the result to all processes
     @cpu_tic("dt_Allreduce_MPI")
-    dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
+    @perf_task "comms" "MPI_dt" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
     @cpu_tac("dt_Allreduce_MPI")
     return dt
 end
@@ -2477,17 +2500,20 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         for (axis, dt_factor) in split_axes(params, cycle)
             last_i, x_, u = update_axis_parameters(params, data, axis)
            
-            if params.async_comms 
+            @cpu_tic("comms+fluxes")
+            @perf_task "loop" "comms+fluxes" if params.async_comms 
                 @sync begin
-                    @async begin
-                        event_1 = boundaryConditions!(params, data, host_array, axis; dependencies=prev_event)
-                        event_1 = numericalFluxes_outer!(params, data, dt * dt_factor, u; dependencies=event_1)
-                        wait(event_1)
-                    end
-    
                     @async begin
                         event_2 = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=prev_event)
                         wait(event_2)
+                    end
+
+                    bc_params = copy(params)
+                    bc_params.use_threading = false
+                    @async begin
+                        event_1 = boundaryConditions!(bc_params, data, host_array, axis; dependencies=prev_event)
+                        event_1 = numericalFluxes_outer!(bc_params, data, dt * dt_factor, u; dependencies=event_1)
+                        wait(event_1)
                     end
                 end
 
@@ -2497,17 +2523,18 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 event = numericalFluxes_outer!(params, data, dt * dt_factor, u; dependencies=event)
                 event = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=event)
             end
+            @cpu_tac("comms+fluxes", axis)
 
-            event = cellUpdate!(params, data, dt * dt_factor, u, x_; dependencies=event)
+            @perf_task "loop" "cellUpdate" event = cellUpdate!(params, data, dt * dt_factor, u, x_; dependencies=event)
     
             if params.euler_projection
                 if !params.single_comm_per_axis_pass 
                     event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
                 end
-                event = first_order_euler_remap!(params, data, dt * dt_factor; dependencies=event)
+                @perf_task "loop" "euler_proj" event = first_order_euler_remap!(params, data, dt * dt_factor; dependencies=event)
             end
 
-            prev_event = update_EOS!(params, data; dependencies=event)
+            @perf_task "loop" "EOS" prev_event = update_EOS!(params, data; dependencies=event)
         end
 
         if !is_warming_up()
@@ -2603,9 +2630,9 @@ function armon(params::ArmonParameters{T}) where T
     
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
-    data = ArmonData(T, params.nbcell, max(params.nx, params.ny) * params.nghost * 7)
+    @perf_task "init" "alloc" data = ArmonData(T, params.nbcell, max(params.nx, params.ny) * params.nghost * 7)
 
-    @time_expr init_test(params, data)
+    @perf_task "init" "init_test" @time_expr init_test(params, data)
 
     if params.use_gpu
         copy_time = @elapsed d_data = data_to_gpu(data)
@@ -2630,31 +2657,6 @@ function armon(params::ArmonParameters{T}) where T
             isempty(time_contrib_axis) && continue
             
             axis_total_time = mapreduce(x->x[2], +, collect(time_contrib_axis))
-            
-            if params.async_comms
-                # Two tasks ran at the same time but added their time to the same counter.
-                # We correct the value of the counter by keeping the time of the longest task.
-                task_1_step_names = [
-                    "outer_acoustic!", 
-                    "outer_acoustic_GAD!", 
-                    "boundaryConditions!_MPI", 
-                    "write_array", 
-                    "write_array_copy", 
-                    "read_array", 
-                    "read_array_copy", 
-                    "boundaryConditions"
-                ]
-                task_2_step_names = [
-                    "inner_acoustic!", 
-                    "inner_acoustic_GAD!"
-                ]
-
-                task_1_time = sum(get(time_contrib_axis, step_name, 0.) for step_name in task_1_step_names)
-                task_2_time = sum(get(time_contrib_axis, step_name, 0.) for step_name in task_2_step_names)
-
-                axis_total_time -= min(task_1_time, task_2_time)
-            end
-
             axis_time[axis] = axis_total_time
 
             println("\nTime for each step of the $axis:          ( axis%,  total%)")

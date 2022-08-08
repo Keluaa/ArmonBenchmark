@@ -51,6 +51,7 @@ mutable struct ArmonParameters{Flt_T}
     # Output
     silent::Int
     write_output::Bool
+    output_file::String
     measure_time::Bool
 
     # Performance
@@ -69,7 +70,9 @@ function ArmonParameters(; ieee_bits = 64,
                            nghost = 2, nbcell = 100, cfl = 0.6, Dt = 0., 
                            euler_projection = false, cst_dt = false,
                            maxtime = 0, maxcycle = 500_000,
-                           silent = 0, write_output = true, measure_time = true,
+                           silent = 0, 
+                           output_file = "output", write_output = true,
+                           measure_time = true,
                            use_ccall = false, use_threading = true, 
                            use_simd = true, interleaving = false,
                            use_gpu = false)
@@ -96,7 +99,7 @@ function ArmonParameters(; ieee_bits = 64,
                                      nghost, nbcell, cfl, Dt, ideb, ifin, 
                                      euler_projection, cst_dt,
                                      maxtime, maxcycle,
-                                     silent, write_output, measure_time,
+                                     silent, write_output, output_file, measure_time,
                                      use_ccall, use_threading,
                                      use_simd, interleaving,
                                      use_gpu)
@@ -255,7 +258,7 @@ macro threads(expr)
         end)
     else
         return esc(quote
-            @batch $(expr)
+            @batch per=thread $(expr)
         end)
     end
 end
@@ -1276,7 +1279,7 @@ function write_result(params::ArmonParameters{T}, data::ArmonData{V}) where {T, 
     (; x, rho, umat, vmat, pmat, emat, cmat, gmat, ustar, pstar) = data
     (; ideb, ifin, silent) = params
 
-    f = open("output", "w")
+    f = open(params.output_file, "w")
 
     for i in ideb:ifin
         print(f, 0.5*(x[i]+x[i+1]), ", ", 
