@@ -25,7 +25,7 @@ mutable struct MeasureParams
     jl_places::Vector{String}
     dimension::Vector{Int}
     async_comms::Vector{Bool}
-    use_sync_mpi::Bool
+    jl_mpi_impl::Vector{String}
 
     # Armon params
     cells_list::Vector{Int}
@@ -76,6 +76,7 @@ struct JuliaParams
     use_simd::Int
     dimension::Int
     async_comms::Bool
+    jl_mpi_impl::String
 end
 
 
@@ -186,7 +187,7 @@ function parse_measure_params(file_line_parser)
     jl_proc_bind = ["close"]
     dimension = [1]
     async_comms = [false]
-    use_sync_mpi = false
+    jl_mpi_impl = ["async"]
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     process_grids = ["1,1"]
@@ -265,8 +266,8 @@ function parse_measure_params(file_line_parser)
             dimension = parse.(Int, split(value, ','))
         elseif option == "async_comms"
             async_comms = parse.(Bool, split(value, ','))
-        elseif option == "use_sync_mpi"
-            use_sync_mpi = parse(Bool, value)
+        elseif option == "jl_mpi_impl"
+            jl_mpi_impl = split(value, ',')
         elseif option == "cells"
             cells_list = value
         elseif option == "domains"
@@ -359,10 +360,6 @@ function parse_measure_params(file_line_parser)
         error("Cannot make an MPI communications time graph without using MPI")
     end
 
-    if any(async_comms) && use_sync_mpi
-        error("'async_comms' must be false since 'use_sync_mpi' is true")
-    end
-
     mkpath(data_dir * name)
     gnuplot_script = plot_scripts_dir * gnuplot_script
     plot_file = plots_dir * plot_file
@@ -376,7 +373,7 @@ function parse_measure_params(file_line_parser)
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         create_sub_job_chain, add_reference_job, one_job_per_cell,
         threads, use_simd, jl_proc_bind, jl_places, 
-        dimension, async_comms, use_sync_mpi, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
+        dimension, async_comms, jl_mpi_impl, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
         name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, use_max_threads, 
         cst_cells_per_process, limit_to_max_mem,
@@ -470,7 +467,8 @@ function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
                 [threads_per_process],
                 measure.use_simd,
                 measure.dimension,
-                measure.async_comms
+                measure.async_comms,
+                measure.jl_mpi_impl
             )
         )
     else
@@ -482,7 +480,8 @@ function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
                 measure.threads,
                 measure.use_simd,
                 measure.dimension,
-                measure.async_comms
+                measure.async_comms,
+                measure.jl_mpi_impl
             )
         )
     end
@@ -635,7 +634,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
     if params.dimension > 1
         append!(armon_options, [
             "--async-comms", params.async_comms,
-            "--use-sync-mpi", measure.use_sync_mpi,
+            "--mpi-impl", params.jl_mpi_impl,
             "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
             "--flat-dims", measure.flatten_time_dims
@@ -704,7 +703,7 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
     if params.dimension > 1
         append!(armon_options, [
             "--async-comms", params.async_comms,
-            "--use-sync-mpi", measure.use_sync_mpi,
+            "--mpi-impl", params.jl_mpi_impl,
             "--transpose", measure.transpose_dims[1],
             "--splitting", measure.axis_splitting[1]
         ])
@@ -816,6 +815,11 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         async_str = params.async_comms ? "async" : "sync"
         name *= "_$async_str"
         legend *= ", $async_str"
+    end
+
+    if length(measure.jl_mpi_impl) > 1
+        name *= "_$(params.jl_mpi_impl)"
+        legend *= ", MPI $(params.jl_mpi_impl)"
     end
     
     return name * "_", legend
@@ -955,6 +959,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
  - $(julia_params.use_simd == 1 ? "with" : "without") SIMD
  - $(julia_params.dimension)D
  - $(julia_params.async_comms ? "a" : "")synchronous communications
+ - MPI $(julia_params.jl_mpi_impl) implementation
  - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
  - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
 """)

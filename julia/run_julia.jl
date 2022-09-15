@@ -45,7 +45,7 @@ proc_grid_ratios = nothing
 single_comm_per_axis_pass = false
 reorder_grid = true
 async_comms = false
-use_sync_mpi = false
+mpi_impl = :async  # :sync, :async, :transpose
 
 base_file_name = ""
 gnuplot_script = ""
@@ -212,8 +212,8 @@ while i <= length(ARGS)
     elseif arg == "--async-comms"
         global async_comms = parse(Bool, ARGS[i+1])
         global i += 1
-    elseif arg == "--use-sync-mpi"
-        global use_sync_mpi = parse(Bool, ARGS[i+1])
+    elseif arg == "--mpi-impl"
+        global mpi_impl = Symbol(ARGS[i+1])
         global i += 1
 
     # Additionnal params
@@ -312,11 +312,14 @@ if use_MPI
 
     if dimension == 1
         include("armon_1D_MPI.jl")
-    elseif use_sync_mpi
-        is_root && @info "Using non-async MPI" maxlog=1
+    elseif mpi_impl == :sync
         include("armon_2D_MPI.jl")
-    else
+    elseif mpi_impl == :async
         include("armon_2D_MPI_async.jl")
+    elseif mpi_impl == :transpose
+        include("armon_2D_MPI_transposition.jl")
+    else
+        error("Unknown Julia 2D MPI implementation: $mpi_impl")
     end
     using .Armon
 
@@ -397,7 +400,7 @@ if use_MPI
                 cst_dt, maxtime, maxcycle, silent, write_output,
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, use_MPI)
         end
-    elseif !use_sync_mpi
+    elseif mpi_impl == :async || mpi_impl == :transpose
         function build_params(test, domain; 
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
@@ -410,7 +413,7 @@ if use_MPI
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms)
         end
-    else
+    elseif mpi_impl == :sync
         function build_params(test, domain; 
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims,
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output,
