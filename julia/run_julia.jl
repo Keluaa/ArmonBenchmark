@@ -35,6 +35,8 @@ axis_splitting = []
 tests = []
 cells_list = []
 
+limit_to_max_mem = false
+
 use_MPI = false
 verbose_MPI = false
 file_MPI_dump = ""
@@ -43,6 +45,7 @@ proc_grid_ratios = nothing
 single_comm_per_axis_pass = false
 reorder_grid = true
 async_comms = false
+use_sync_mpi = false
 
 base_file_name = ""
 gnuplot_script = ""
@@ -209,6 +212,9 @@ while i <= length(ARGS)
     elseif arg == "--async-comms"
         global async_comms = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--use-sync-mpi"
+        global use_sync_mpi = parse(Bool, ARGS[i+1])
+        global i += 1
 
     # Additionnal params
     elseif arg == "--gpu"
@@ -227,6 +233,9 @@ while i <= length(ARGS)
         block_size = parse(Int, ARGS[i+1])
         global i += 1
         ENV["GPU_BLOCK_SIZE"] = block_size
+    elseif arg == "--limit-to-mem"
+        global limit_to_max_mem = parse(Bool, ARGS[i+1])
+        global i += 1
     elseif arg == "--repeats"
         global repeats = parse(Int, ARGS[i+1])
         global i += 1
@@ -272,7 +281,7 @@ end
 
 if use_MPI
     if use_gpu
-        # We must select a GPU before initializing MPI
+        # We must select a GPU before initializing MPI
         if parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
             error("ROCM is, for now, not MPI aware")
         end
@@ -286,7 +295,7 @@ if use_MPI
         end
 
         using CUDA
-        gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
+        gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
         CUDA.device!(gpu_index)
     end
 
@@ -303,6 +312,9 @@ if use_MPI
 
     if dimension == 1
         include("armon_1D_MPI.jl")
+    elseif use_sync_mpi
+        is_root && @info "Using non-async MPI" maxlog=1
+        include("armon_2D_MPI.jl")
     else
         include("armon_2D_MPI_async.jl")
     end
@@ -311,27 +323,27 @@ if use_MPI
     # Create a communicator for each node of the MPI world
     node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.MPI_COMM_TYPE_SHARED, rank)
 
-    # Get the rank and the number of processes running on the same node
+    # Get the rank and the number of processes running on the same node
     local_rank = MPI.Comm_rank(node_local_comm)
     local_size = MPI.Comm_size(node_local_comm)
 
-    # Pin the threads on the node with no overlap with the other processes running on the same node
+    # Pin the threads on the node with no overlap with the other processes running on the same node
     thread_offset = local_rank * Threads.nthreads()
     omp_bind_threads(thread_offset, threads_places, threads_proc_bind)
 
     if verbose_MPI || !isempty(file_MPI_dump)
-        # Call 'MPI_Get_processor_name', which is not exposed by MPI.jl, in order to get the name of
-        # the node on which the current process is running.
+        # Call 'MPI_Get_processor_name', which is not exposed by MPI.jl, in order to get the name of
+        # the node on which the current process is running.
         raw_node_name = Vector{UInt8}(undef, 256)  # MPI_MAX_PROCESSOR_NAME == 256
         len = Ref{Cint}()
         #= MPI.@mpichk =# ccall((:MPI_Get_processor_name, MPI.libmpi), Cint, (Ptr{Cuchar}, Ptr{Cint}), raw_node_name, len)
         node_name = unsafe_string(pointer(raw_node_name), len[])
 
-        using ThreadPinning  # To use threadinfo() and getcpuids()
+        using ThreadPinning  # To use threadinfo() and getcpuids()
         
         if !isempty(file_MPI_dump)
             is_root && println("Writing MPI process info to $file_MPI_dump...")
-            # Write the debug info to the file, ordered by process rank
+            # Write the debug info to the file, ordered by process rank
             mpi_info_file = MPI.File.open(MPI.COMM_WORLD, file_MPI_dump; write=true)
 
             info_line_length = 300
@@ -360,7 +372,7 @@ if use_MPI
 
         if verbose_MPI
             is_root && println("Processes info:")
-            # Print the debug info in order, one process at a time
+            # Print the debug info in order, one process at a time
             for i in 1:global_size
                 if i == rank+1
                     if use_gpu
@@ -381,12 +393,11 @@ if use_MPI
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
-                test=test, nbcell=cells,
-                euler_projection, maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
+            return ArmonParameters(; ieee_bits, test, riemann, scheme, iterations, nghost, nbcell=cells, cfl, Dt, euler_projection,
+                cst_dt, maxtime, maxcycle, silent, write_output,
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, use_MPI)
         end
-    else
+    elseif !use_sync_mpi
         function build_params(test, domain; 
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
@@ -398,6 +409,19 @@ if use_MPI
                 maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms)
+        end
+    else
+        function build_params(test, domain; 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims,
+                axis_splitting, maxtime, maxcycle, silent, output_file, write_output,
+                use_ccall, use_threading, use_simd, interleaving, use_gpu,
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
+            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
+                test=test, nx=domain[1], ny=domain[2],
+                euler_projection, transpose_dims, axis_splitting,
+                maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
+                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py,
+                single_comm_per_axis_pass, reorder_grid)
         end
     end
 else
@@ -467,8 +491,42 @@ function merge_time_contribution(time_contrib_1, time_contrib_2)
         return time_contrib_1
     end
 
+    is_root && @warn "Time contrib merge is disabled" maxlog=1
+    return time_contrib_1
+
     return map((e, f) -> (e.first => (e.second + f.second)), time_contrib_1, time_contrib_2)
 end
+
+
+function reduce_time_contribution(time_contrib_1, time_contrib_2)
+    if isnothing(time_contrib_1)
+        return time_contrib_2
+    elseif isnothing(time_contrib_2)
+        return time_contrib_1
+    end
+
+    return map((e, f) -> (e.first => (min(e.second, f.second))), time_contrib_1, time_contrib_2)
+end
+
+
+MIN_TIME_CONTRIB = parse(Bool, get(ENV, "GET_MIN_TIME", "false"))
+if MIN_TIME_CONTRIB
+    is_root && @info "Time contribution will be the minimum of all repeats" logmax=1
+end
+
+
+function get_gpu_max_mem()
+    if parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
+        is_root && @warn "AMDGPU.jl doesn't know how much memory there is. Using the a default value of 32GB" maxlog=1
+        return 32*10^9
+    else
+        total_mem = CUDA.Mem.info()[2]
+        return total_mem
+    end
+end
+
+
+get_cpu_max_mem() = Int(Sys.total_memory())
 
 
 function run_armon(params::ArmonParameters, with_profiling::Bool)
@@ -482,7 +540,12 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
         with_profiling && @pause_profiling()
         total_cells_per_sec += cells_per_sec
         total_cycles += cycles
-        total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
+        
+        if MIN_TIME_CONTRIB
+            total_time_contrib = reduce_time_contribution(total_time_contrib, time_contrib)
+        else
+            total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
+        end
     end
     
     return total_cycles, total_cells_per_sec / repeats, total_time_contrib
@@ -505,6 +568,19 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
         @printf(" - %-4s %-14s %11g cells (%5gx%-5g): ", 
             string(test) * (transpose ? "ᵀ" : ""),
             string(splitting), cells[1] * cells[2], cells[1], cells[2])
+    end
+
+    if limit_to_max_mem
+        max_mem = params.use_gpu ? get_gpu_max_mem() : get_cpu_max_mem()
+        max_mem *= 0.95  # Leave 5% of memory available to account for the Julia runtime, OS, etc...
+
+        variables_count = fieldcount(Armon.ArmonData)
+        data_size = variables_count * params.nbcell * sizeof(typeof(params.Dt))
+
+        if data_size > max_mem
+            @printf("skipped because of memory: %.1f > %.1f GB\n", data_size / 10^9, max_mem / 10^9)
+            return nothing
+        end
     end
 
     cycles, cells_per_sec, time_contrib = run_armon(params, true)
@@ -538,16 +614,33 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
         end
     end
 
-    time_start = time_ns()
-
-    cycles, cells_per_sec, time_contrib = run_armon(build_params(test, cells; 
+    params = build_params(test, cells; 
         ieee_bits, riemann, scheme, iterations, cfl, 
         Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
         maxtime, maxcycle, silent, output_file, write_output, use_ccall, use_threading, use_simd,
         interleaving, use_gpu,
         use_MPI, px, py,
         single_comm_per_axis_pass, reorder_grid, async_comms
-    ), true)
+    )
+
+    if limit_to_max_mem
+        max_mem = params.use_gpu ? get_gpu_max_mem() : get_cpu_max_mem()
+        max_mem *= 0.95  # Leave 5% of memory available to account for the Julia runtime, MPI, OS, etc...
+
+        variables_count = fieldcount(Armon.ArmonData)
+        data_size = variables_count * params.nbcell * sizeof(typeof(params.Dt))
+
+        # TODO : Account for ressource usage overlap, for GPUs and multi-socket nodes
+        
+        if data_size > max_mem
+            is_root && @printf("skipped because of memory: %.1f > %.1f GB\n", data_size / 10^9 * params.proc_size, max_mem / 10^9 * params.proc_size)
+            return nothing
+        end
+    end
+
+    time_start = time_ns()
+
+    cycles, cells_per_sec, time_contrib = run_armon(params, true)
     
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
@@ -635,7 +728,7 @@ end
 
 
 if !isnothing(proc_grid_ratios)
-    # Convert the ratios to process grids
+    # Convert the ratios to process grids
     proc_domains = map(Base.Fix1(process_ratio_to_grid, global_size), proc_grid_ratios)
 end
 
@@ -653,7 +746,7 @@ for test in tests, transpose in transpose_dims
     # 'devnull' is not used here since 'println' and others will not go through their normal code paths.
     dummy_pipe = Pipe()
     redirect_stdout(dummy_pipe) do
-        run_armon(build_params(test, dimension == 1 ? 10000 : (60, 60);
+        run_armon(build_params(test, dimension == 1 ? 10000 : (240*proc_domains[1][1], 240*proc_domains[1][2]);
             ieee_bits, riemann, scheme, iterations, cfl, 
             Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
             maxtime, maxcycle=10, silent, output_file, write_output=false, use_ccall, use_threading, use_simd, 
