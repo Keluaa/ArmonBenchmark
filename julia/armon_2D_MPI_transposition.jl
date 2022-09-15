@@ -110,8 +110,8 @@ mutable struct ArmonParameters{Flt_T}
     idx_col::Int
     current_axis::Axis
     s::Int  # Stride
-    domain_range::OrdinalRange{Int, Int}
-    row_range::OrdinalRange{Int, Int}
+    domain_range::StepRange{Int, Int}
+    row_range::StepRange{Int, Int}
 
     # Bounds
     maxtime::Flt_T
@@ -1588,7 +1588,7 @@ end
 #
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}, 
-        side_ghost_range_1::OrdinalRange{Int, Int}, side_ghost_range_2::OrdinalRange{Int, Int}, 
+        side_ghost_range_1::StepRange{Int, Int}, side_ghost_range_2::StepRange{Int, Int}, 
         transposed::Bool) where {T, V <: AbstractArray{T}}
     (; x, y, rho, umat, vmat, pmat, cmat, Emat, 
        ustar, pstar, ustar_1, pstar_1, domain_mask) = data
@@ -2338,12 +2338,11 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, u::V, dta::T;
 end
 
 
-function dtCFL_MPI(params::ArmonParameters{T},  data::ArmonData{V}, u::V,
-                   paramsᵀ::ArmonParameters{T}, dataᵀ::ArmonData{V}, v::V, 
-                   dta::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, 
+        dta::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     @cpu_tic("dtCFL")
-    @perf_task "loop" "dtCFL_x" local_dt_x = dtCFL(params, data, u, dta; dependencies)
-    @perf_task "loop" "dtCFL_y" local_dt_y = dtCFL(paramsᵀ, params.use_transposition ? dataᵀ : data, v, dta; dependencies)
+    @perf_task "loop" "dtCFL_x" local_dt_x = dtCFL(params, data, data.u, dta; dependencies)
+    @perf_task "loop" "dtCFL_y" local_dt_y = dtCFL(params, data, data.v, dta; dependencies)
     local_dt = min(local_dt_x, local_dt_y)
     @cpu_tac("dtCFL")
     
@@ -2461,6 +2460,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
             tmp_v   = (L₁ * rho[i-1] * vmat[i-1] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+1] * vmat[i+1]) / dX / tmp_rho
             tmp_E   = (L₁ * rho[i-1] * Emat[i-1] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+1] * Emat[i+1]) / dX / tmp_rho
 
+            # TODO : enlever les variables temporaires
             iᵀ = @iᵀ(i)
             rhoᵀ[iᵀ]  = tmp_rho
             umatᵀ[iᵀ] = tmp_u
@@ -2488,6 +2488,8 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                 L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
                 L₃ = -min(0, ustar[i+s]) * dt * domain_mask[i]
                 L₂ = dX - L₁ - L₃
+
+                # 1 2 3 4 5 6
 
                 tmp_rho_ = (L₁ * rho[i-s]             + L₂ * rho[i]           + L₃ * rho[i+s]            ) / dX
                 tmp_u_   = (L₁ * rho[i-s] * umat[i-s] + L₂ * rho[i] * umat[i] + L₃ * rho[i+s] * umat[i+s]) / dX / tmp_rho_
@@ -2816,7 +2818,7 @@ function time_loop(params::ArmonParameters{T},  data::ArmonData{V},
         cycle_time = time_ns()
         
         if !dt_on_even_cycles || iseven(cycle)
-            dt = dtCFL_MPI(params, data, u, paramsᵀ, dataᵀ, v, dta; dependencies=prev_event)
+            dt = dtCFL_MPI(params_1, data_1, dta; dependencies=prev_event)
             prev_event = NoneEvent()
         end
 
@@ -2830,7 +2832,7 @@ function time_loop(params::ArmonParameters{T},  data::ArmonData{V},
             if !params.use_transposition && params_1.current_axis != axis
                 # This pass is along the other axis
                 params_1, params_2 = params_2, params_1
-                data_1, data_2 = data_2, data_1
+                # data_1, data_2 = data_2, data_1
                 x, y = y, x
                 u, v = v, u
                 
