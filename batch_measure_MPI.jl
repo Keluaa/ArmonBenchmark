@@ -43,6 +43,7 @@ mutable struct MeasureParams
     gnuplot_script::String
     plot_file::String
     log_scale::Bool
+    error_bars::Bool
     plot_title::String
     verbose::Bool
     use_max_threads::Bool
@@ -146,6 +147,7 @@ $(log_scale ? "set logscale x" : "")
 plot """
 
 gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
+gnuplot_plot_command_errorbars(data_file, legend_title, pt_index) = gnuplot_plot_command(data_file, legend_title, pt_index) * " w yerr"
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
 gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:2 axis x1y1 w lp lc $(color_index) pt $(pt_index) title '$(legend_title)'"
 gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
@@ -205,6 +207,7 @@ function parse_measure_params(file_line_parser)
     gnuplot_script = nothing
     plot_file = nothing
     log_scale = true
+    error_bars = false
     plot_title = nothing
     verbose = false
     use_max_threads = false
@@ -298,6 +301,8 @@ function parse_measure_params(file_line_parser)
             plot_title = value
         elseif option == "log_scale"
             log_scale = parse(Bool, value)
+        elseif option == "error_bars"
+            error_bars = parse(Bool, value)
         elseif option == "verbose"
             verbose = parse(Bool, value)
         elseif option == "use_max_threads"
@@ -375,7 +380,7 @@ function parse_measure_params(file_line_parser)
         threads, use_simd, jl_proc_bind, jl_places, 
         dimension, async_comms, jl_mpi_impl, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
-        name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, use_max_threads, 
+        name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose, use_max_threads, 
         cst_cells_per_process, limit_to_max_mem,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file)
@@ -884,7 +889,11 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
                 
                 data_file_name = data_file_name_base * ".csv"
                 erase_files && (open(data_file_name, "w") do _ end)  # Create/Clear the file
-                plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
+                if measure.error_bars
+                    plot_cmd = gnuplot_plot_command_errorbars(data_file_name, legend, point_type)
+                else
+                    plot_cmd = gnuplot_plot_command(data_file_name, legend, point_type)
+                end
                 push!(plot_commands, plot_cmd)
 
                 if measure.time_histogram

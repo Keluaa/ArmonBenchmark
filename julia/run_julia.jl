@@ -1,5 +1,6 @@
 
 using Printf
+using Statistics
 
 include("omp_simili.jl")
 include("vtune_lib.jl")
@@ -533,15 +534,15 @@ get_cpu_max_mem() = Int(Sys.total_memory())
 
 
 function run_armon(params::ArmonParameters, with_profiling::Bool)
-    total_cells_per_sec = 0
+    vals_cells_per_sec = Vector{Float64}(undef, repeats)
     total_time_contrib = nothing
     total_cycles = 0
 
-    for _ in 1:repeats
+    for i in 1:repeats
         with_profiling && @resume_profiling()
         _, cycles, cells_per_sec, time_contrib = armon(params)
         with_profiling && @pause_profiling()
-        total_cells_per_sec += cells_per_sec
+        vals_cells_per_sec[i] = cells_per_sec
         total_cycles += cycles
         
         if MIN_TIME_CONTRIB
@@ -551,7 +552,7 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
         end
     end
     
-    return total_cycles, total_cells_per_sec / repeats, total_time_contrib
+    return total_cycles, vals_cells_per_sec, total_time_contrib
 end
 
 
@@ -586,17 +587,20 @@ function do_measure(data_file_name, test, cells, transpose, splitting)
         end
     end
 
-    cycles, cells_per_sec, time_contrib = run_armon(params, true)
+    cycles, vals_cells_per_sec, time_contrib = run_armon(params, true)
 
-    @printf("%6.3f Giga cells/sec\n", cells_per_sec)
+    mean_cells_per_sec = mean(vals_cells_per_sec)
+    std_cells_per_sec = std(vals_cells_per_sec; corrected=true, mean=mean_cells_per_sec)
+
+    @printf("%6.3f±%3.1f Giga cells/sec\n", cells_per_sec, std_cells_per_sec)
 
     # Append the result to the data file
     if !isempty(data_file_name)
         open(data_file_name, "a") do data_file
             if dimension == 1
-                println(data_file, cells, ", ", cells_per_sec)
+                println(data_file, cells, ", ", cells_per_sec, ", ", std_cells_per_sec)
             else
-                println(data_file, cells[1] * cells[2], ", ", cells_per_sec)
+                println(data_file, cells[1] * cells[2], ", ", cells_per_sec, ", ", std_cells_per_sec)
             end
         end
     end
@@ -643,7 +647,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
 
     time_start = time_ns()
 
-    cycles, cells_per_sec, time_contrib = run_armon(params, true)
+    cycles, vals_cells_per_sec, time_contrib = run_armon(params, true)
     
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
@@ -651,28 +655,32 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
     # Merge the cells throughput and the time distribution of all processes in one reduction.
     # Since 'time_contrib' is an array of pairs, it is not a bits type. We first convert the values
     # to an array of floats, and then rebuild the array of pairs using the one of the root process.
-    time_contrib_vals = Vector{Float64}(undef, length(time_contrib) + 1)
-    time_contrib_vals[1:end-1] .= last.(time_contrib)
-    time_contrib_vals[end] = cells_per_sec
+    time_contrib_vals = last.(time_contrib)
     merged_time_contrib_vals = MPI.Reduce(time_contrib_vals, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
  
+    # Gather the throughput measurements on the root process
+    merged_vals_cells_per_sec = MPI.Gather(vals_cells_per_sec, 0, MPI.COMM_WORLD)
+
     if is_root
         if cycles <= 5
             println("not enough cycles ($cycles), cannot get an accurate measurement")
             return time_contrib
         end
 
-        total_cells_per_sec = merged_time_contrib_vals[end]
+        merged_vals_cells_per_sec = reshape(merged_vals_cells_per_sec, (repeats, params.proc_size))
+        mean_vals_cells_per_sec = mean(merged_vals_cells_per_sec; dims=2)
+        total_cells_per_sec = mean(mean_vals_cells_per_sec)
+        std_cells_per_sec = std(vals_cells_per_sec; corrected=true, mean=mean_vals_cells_per_sec)
 
-        @printf("%6.3f Giga cells/sec", total_cells_per_sec)
+        @printf("%6.3f±%3.1f Giga cells/sec\n", total_cells_per_sec, std_cells_per_sec)
 
         # Append the result to the data file
         if !isempty(data_file_name)
             open(data_file_name, "a") do data_file
                 if dimension == 1
-                    println(data_file, cells, ", ", total_cells_per_sec)
+                    println(data_file, cells, ", ", total_cells_per_sec, ", ", std_cells_per_sec)
                 else
-                    println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec)
+                    println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec, ", ", std_cells_per_sec)
                 end
             end
         end

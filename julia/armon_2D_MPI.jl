@@ -2053,7 +2053,7 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
     (cx, cy) = cart_coords
     f = open("$(output_file_path)_$(cx)x$(cy)", "w")
 
-    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat, data.ustar]
 
     if write_ghosts
         for j in 1-nghost:ny+nghost
