@@ -25,6 +25,7 @@ mutable struct MeasureParams
     jl_places::Vector{String}
     dimension::Vector{Int}
     async_comms::Vector{Bool}
+    use_sync_mpi::Bool
 
     # Armon params
     cells_list::Vector{Int}
@@ -46,6 +47,7 @@ mutable struct MeasureParams
     verbose::Bool
     use_max_threads::Bool
     cst_cells_per_process::Bool
+    limit_to_max_mem::Bool
 
     # > Time histogram
     time_histogram::Bool
@@ -161,6 +163,7 @@ sub_script_content(job_name, index, partition, nodes, processes, cores_per_proce
 #MSUB -x
 cd \${BRIDGE_MSUB_PWD}
 module load $(join(required_modules, ' '))
+$(isnothing(ref_command) ? "" : string(ref_command)[2:end-1])
 $(join([string(cmd)[2:end-1] for cmd in commands], "\n"))
 $(isnothing(ref_command) ? "" : string(ref_command)[2:end-1])
 $(!isnothing(next_script) ? "ccc_msub $next_script" : "echo 'All done.'")
@@ -183,6 +186,7 @@ function parse_measure_params(file_line_parser)
     jl_proc_bind = ["close"]
     dimension = [1]
     async_comms = [false]
+    use_sync_mpi = false
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     process_grids = ["1,1"]
@@ -204,6 +208,7 @@ function parse_measure_params(file_line_parser)
     verbose = false
     use_max_threads = false
     cst_cells_per_process = false
+    limit_to_max_mem = false
 
     time_histogram = false
     flatten_time_dims = false
@@ -260,6 +265,8 @@ function parse_measure_params(file_line_parser)
             dimension = parse.(Int, split(value, ','))
         elseif option == "async_comms"
             async_comms = parse.(Bool, split(value, ','))
+        elseif option == "use_sync_mpi"
+            use_sync_mpi = parse(Bool, value)
         elseif option == "cells"
             cells_list = value
         elseif option == "domains"
@@ -296,6 +303,8 @@ function parse_measure_params(file_line_parser)
             use_max_threads = parse(Bool, value)
         elseif option == "cst_cells_per_process"
             cst_cells_per_process = parse(Bool, value)
+        elseif option == "limit_to_max_mem"
+            limit_to_max_mem = parse(Bool, value)
         elseif option == "time_hist"
             time_histogram = parse(Bool, value)
         elseif option == "flat_hist_dims"
@@ -316,11 +325,11 @@ function parse_measure_params(file_line_parser)
                    for cells_domain in domain_list]
 
     if !isnothing(process_grid_ratios)
-        # Make sure that all ratios are compatible with all processes counts
+        # Make sure that all ratios are compatible with all processes counts
         process_grid_ratios = [parse.(Int, split(ratio, ',')) for ratio in process_grid_ratios]
         process_grids = [[1, 1]] # Provide a dummy grid
     else
-        # Use the explicitly defined process grid.
+        # Use the explicitly defined process grid.
         process_grids = [parse.(Int, split(process_grid, ',')) for process_grid in process_grids]
     end
 
@@ -350,6 +359,10 @@ function parse_measure_params(file_line_parser)
         error("Cannot make an MPI communications time graph without using MPI")
     end
 
+    if any(async_comms) && use_sync_mpi
+        error("'async_comms' must be false since 'use_sync_mpi' is true")
+    end
+
     mkpath(data_dir * name)
     gnuplot_script = plot_scripts_dir * gnuplot_script
     plot_file = plots_dir * plot_file
@@ -363,10 +376,10 @@ function parse_measure_params(file_line_parser)
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         create_sub_job_chain, add_reference_job, one_job_per_cell,
         threads, use_simd, jl_proc_bind, jl_places, 
-        dimension, async_comms, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
+        dimension, async_comms, use_sync_mpi, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, common_armon_params,
         name, repeats, gnuplot_script, plot_file, log_scale, plot_title, verbose, use_max_threads, 
-        cst_cells_per_process,
+        cst_cells_per_process, limit_to_max_mem,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file)
 end
@@ -482,7 +495,8 @@ function armon_combinaisons(measure::MeasureParams, dimension::Int)
             measure.tests_list,
             [false],
             ["Sequential"],
-            [[1, 1]]
+            [[1, 1]],
+            [nothing]
         )
     else
         return Iterators.product(
@@ -571,13 +585,13 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
     end
 
     if measure.cst_cells_per_process
-        # Scale the cells by the number of processes
+        # Scale the cells by the number of processes
         if params.dimension == 1
             cells_list .*= inti_params.processes
         else
             # We need to distribute the factor along each axis, while keeping the divisibility of 
-            # the cells count, since it will be divided by the number of processes along each axis.
-            # Therefore we make the new values multiples of 64, but this is still not perfect.
+            # the cells count, since it will be divided by the number of processes along each axis.
+            # Therefore we make the new values multiples of 64, but this is still not perfect.
             scale_factor = inti_params.processes^(1/params.dimension)
             cells_list = cells_list .* scale_factor
             cells_list .-= [cells .% 64 for cells in cells_list]
@@ -614,12 +628,14 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
         "--time-histogram", measure.time_histogram,
         "--time-MPI-graph", measure.time_MPI_plot,
         "--gnuplot-MPI-script", measure.gnuplot_MPI_script,
-        "--use-mpi", measure.use_MPI
+        "--use-mpi", measure.use_MPI,
+        "--limit-to-mem", measure.limit_to_max_mem
     ])
 
     if params.dimension > 1
         append!(armon_options, [
             "--async-comms", params.async_comms,
+            "--use-sync-mpi", measure.use_sync_mpi,
             "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
             "--flat-dims", measure.flatten_time_dims
@@ -688,6 +704,7 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
     if params.dimension > 1
         append!(armon_options, [
             "--async-comms", params.async_comms,
+            "--use-sync-mpi", measure.use_sync_mpi,
             "--transpose", measure.transpose_dims[1],
             "--splitting", measure.axis_splitting[1]
         ])
@@ -923,7 +940,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
         return nothing, nothing
     end
 
-    if !any(map(Base.Fix1(check_ratio_for_grid, inti_params.processes), measure.process_grid_ratios))
+    if !isnothing(measure.process_grid_ratios) && !any(map(Base.Fix1(check_ratio_for_grid, inti_params.processes), measure.process_grid_ratios))
         println("Skipping running $(inti_params.processes) Julia processes since none of the given grid ratios can entirely divide $(inti_params.processes)")
         return nothing, nothing
     end
@@ -992,6 +1009,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
     end
 
     try
+        println("Waiting for job to start...")
         run(cmd)
     catch e
         if isa(e, InterruptException)
@@ -1092,7 +1110,7 @@ function main()
         # Create the files and plot script once at the beginning
         create_all_data_files_and_plot(measure, i == start_at ? skip_first : 0)
 
-        # For each main parameter combinaison, run a job
+        # For each main parameter combinaison, run a job
         comb_i = 0
         for inti_params in build_inti_combinaisons(measure)
             for julia_params in parse_combinaisons(measure, inti_params)
