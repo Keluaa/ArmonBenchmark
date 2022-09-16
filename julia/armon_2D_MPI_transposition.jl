@@ -27,17 +27,6 @@ export ArmonParameters, armon
 # selon le balayage
 # 1 tableau par direction de balayage
 
-# Domaine 1000x1000:
-# sans transposition :
-# tid 1 : 1001 à 2000
-# tid 2 : 2001 à 3000
-# balayage selon y -> accès mémoire entre threads systématiques
-#
-# avec transposition :
-# tid 1 : 1001 à 2000 selon x, 1001:1000:1000000 selon y
-# tid 2 : 2001 à 3000 selon x, 1002:1000:1000000 selon y
-
-
 
 # GPU init
 
@@ -133,6 +122,7 @@ mutable struct ArmonParameters{Flt_T}
     use_simd::Bool
     use_gpu::Bool
     use_transposition::Bool
+    use_temp_vars_for_projection::Bool
 
     # MPI
     use_MPI::Bool
@@ -169,7 +159,8 @@ function ArmonParameters(;
         use_gpu = false,
         use_MPI = true, px = 1, py = 1,
         single_comm_per_axis_pass = false, reorder_grid = true, 
-        async_comms = true
+        async_comms = true,
+        use_temp_vars_for_projection = false
     )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
@@ -276,10 +267,11 @@ function ArmonParameters(;
         write_output, write_ghosts, merge_files, animation_step,
         measure_time,
         use_ccall, use_threading, use_simd, use_gpu, transpose_dims,
+        use_temp_vars_for_projection,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
         single_comm_per_axis_pass, reorder_grid, 
-        async_comms 
+        async_comms
     )
 end
 
@@ -305,6 +297,7 @@ function print_parameters(p::ArmonParameters{T}) where T
         println(" - block size: ", block_size)
     end
     println(" - use_transposition: ", p.use_transposition)
+    println(" - use temp vars for projection: ", p.use_temp_vars_for_projection)
     println(" - use_MPI:    ", p.use_MPI)
     println(" - ieee_bits:  ", sizeof(T) * 8)
     println("")
@@ -573,6 +566,8 @@ macro simd_threaded_loop(expr)
 end
 
 
+const USE_CONTINUOUS_RANGES = parse(Bool, get(ENV, "USE_CONTINUOUS_RANGES", "false"))
+
 """
     @simd_threaded_iter(range, expr)
 
@@ -598,26 +593,41 @@ macro simd_threaded_iter(range, expr)
         throw(ArgumentError("Expected a valid for loop"))
     end
 
-    # Only in for the case of a threaded loop with SIMD:
     # Extract the range of the loop and replace it with the new expression
     modified_loop_expr = copy(expr)
     range_expr = modified_loop_expr.args[1]
 
-    if range_expr.head == :(=)
-        loop_range = range_expr.args[2]
-        range_expr.args[2] = :($loop_range .+ (__j - 1))
-    else
-        error("Expected range vector")
-    end
+    if USE_CONTINUOUS_RANGES
+        if range_expr.head == :(=)
+            loop_range = range_expr.args[2]
+            range_expr.args[2] = :(__c_ideb:__c_ifin)
+        else
+            error("Expected basic range loop")
+        end
 
-    return esc(quote
-        let
-            @threaded for __j in $(range)
-                @simd_loop $(modified_loop_expr)
+        return esc(quote
+            let __c_ideb = first($(range)) - 1 + first($(loop_range)), __c_ifin = last($(range)) - 1 + last($(loop_range))
+                @simd_threaded_loop $(modified_loop_expr)
             end
         end
+        )
+    else
+        if range_expr.head == :(=)
+            loop_range = range_expr.args[2]
+            range_expr.args[2] = :($loop_range .+ (__j - 1))
+        else
+            error("Expected basic range loop")
+        end
+
+        return esc(quote
+            let
+                @threaded for __j in $(range)
+                    @simd_loop $(modified_loop_expr)
+                end
+            end
+        end
+        )
     end
-    )
 end
 
 
@@ -1840,7 +1850,7 @@ end
 function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V};
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, pmat, cmat, gmat) = data
-    (; test, nx, ny, row_length, col_length) = params
+    (; test, nx, ny, row_length) = params
     @indexing_vars(params)
 
     v_factor_top::T = 1.
@@ -1865,8 +1875,6 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V};
 
     if params.use_transposition
         # The data is column major (transposed)
-        # println("Top BC : rho[@i(nx÷2,ny)] = rho[$(@i(nx÷2,ny))] = $(rho[@i(nx÷2,ny)])")
-        # println("Top BC : rho[@i(nx÷2,ny+1)] = rho[$(@i(nx÷2,ny+1))] = $(rho[@i(nx÷2,ny+1)])")
         @simd_loop for i in 1:nx
             idx = @i(i, ny)
             idxp1 = idx + 1
@@ -1877,8 +1885,6 @@ function boundaryConditions_top!(params::ArmonParameters{T}, data::ArmonData{V};
             cmat[idxp1] = cmat[idx]
             gmat[idxp1] = gmat[idx]
         end
-        # println("Top BC : rho[@i(nx÷2,ny)] = rho[$(@i(nx÷2,ny))] = $(rho[@i(nx÷2,ny)]) (post)")
-        # println("Top BC : rho[@i(nx÷2,ny+1)] = rho[$(@i(nx÷2,ny+1))] = $(rho[@i(nx÷2,ny+1)]) (post)")
     else
         # The data is row major
         row_idx = @i(0,ny)
@@ -1928,8 +1934,6 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
 
     if params.use_transposition
         # The data is column major (transposed)
-        # println("Bottom BC : rho[@i(nx÷2,0)] = rho[$(@i(nx÷2,0))] = $(rho[@i(nx÷2,0)])")
-        # println("Bottom BC : rho[@i(nx÷2,1)] = rho[$(@i(nx÷2,1))] = $(rho[@i(nx÷2,1)])")
         @simd_loop for i in 1:nx
             idxm1 = @i(i, 0)
             idx = idxm1 + 1
@@ -1940,8 +1944,6 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
             cmat[idxm1] = cmat[idx]
             gmat[idxm1] = gmat[idx]
         end
-        # println("Bottom BC : rho[@i(nx÷2,0)] = rho[$(@i(nx÷2,0))] = $(rho[@i(nx÷2,0)]) (post)")
-        # println("Bottom BC : rho[@i(nx÷2,1)] = rho[$(@i(nx÷2,1))] = $(rho[@i(nx÷2,1)]) (post)")
     else
         # The data is row major
         row_idx = @i(0,0)
@@ -2264,13 +2266,17 @@ end
 # Time step computation
 #
 
-function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, u::V, dta::T;
+function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; cmat, domain_mask, tmp_rho) = data
-    (; cfl, Dt, ideb, ifin, dx, domain_range, row_range) = params
+    (; cmat, umat, vmat, domain_mask, tmp_rho) = data
+    (; cfl, Dt, ideb, ifin, domain_range, row_range, global_grid) = params
     @indexing_vars(params)
 
+    (g_nx, g_ny) = global_grid
+
     dt::T = Inf
+    dx::T = one(T) / g_nx
+    dy::T = one(T) / g_ny
 
     if params.cst_dt
         # Constant time step
@@ -2280,7 +2286,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, u::V, dta::T;
         # fast. Therefore first we compute dt for all cells and store the result in a temporary
         # array, then we reduce this array.
         if params.euler_projection
-            gpu_dtCFL_reduction_euler!(dx, tmp_rho, u, cmat, domain_mask;
+            gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask;
                 ndrange=length(cmat), dependencies) |> wait
             dt = reduce(min, tmp_rho)
         else
@@ -2296,19 +2302,25 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, u::V, dta::T;
             # because of some IEEE 754 non-compliance since fast math is enabled when compiling this
             # code for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
             # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
-            dt = @inbounds reduce(min, @views (one(T) ./ abs.(
+            dt_x = @inbounds reduce(min, @views (one(T) ./ abs.(
                 max.(
-                    abs.(u[ideb:ifin] .+ cmat[ideb:ifin]), 
-                    abs.(u[ideb:ifin] .- cmat[ideb:ifin])
+                    abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
+                    abs.(umat[ideb:ifin] .- cmat[ideb:ifin])
                 ) .* domain_mask[ideb:ifin])))
+            dt_y = @inbounds reduce(min, @views (one(T) ./ abs.(
+                max.(
+                    abs.(vmat[ideb:ifin] .+ cmat[ideb:ifin]), 
+                    abs.(vmat[ideb:ifin] .- cmat[ideb:ifin])
+                ) .* domain_mask[ideb:ifin])))
+            dt = min(dt_x * dx, dt_y * dy)
         else
             @simd_threaded_iter_reduce typemax(T) domain_range for i in row_range
-                dt_x = one(T) / (max(abs(u[i] + cmat[i]), abs(u[i] - cmat[i])) * domain_mask[i])
-                threadlocal = min(threadlocal, dt_x)
+                dt_x = dx / (max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])) * domain_mask[i])
+                dt_y = dy / (max(abs(vmat[i] + cmat[i]), abs(vmat[i] - cmat[i])) * domain_mask[i])
+                threadlocal = min(threadlocal, dt_x, dt_y)
             end
             dt = minimum(threadlocal)
         end
-        dt *= dx
     else
         if params.use_gpu
             wait(dependencies)
@@ -2320,7 +2332,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, u::V, dta::T;
             end
             dt = minimum(threadlocal)
         end
-        dt *= dx
+        dt *= min(dx, dtCFL_y)
     end
 
     if !isfinite(dt) || dt ≤ 0
@@ -2341,9 +2353,7 @@ end
 function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, 
         dta::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     @cpu_tic("dtCFL")
-    @perf_task "loop" "dtCFL_x" local_dt_x = dtCFL(params, data, data.u, dta; dependencies)
-    @perf_task "loop" "dtCFL_y" local_dt_y = dtCFL(params, data, data.v, dta; dependencies)
-    local_dt = min(local_dt_x, local_dt_y)
+    @perf_task "loop" "dtCFL" local_dt = dtCFL(params, data, dta; dependencies)
     @cpu_tac("dtCFL")
     
     if params.cst_dt || !params.use_MPI
@@ -2417,7 +2427,7 @@ end
 
 
 function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dataᵀ::ArmonData{V}, 
-        dt::T, tranposition_needed::Bool, threads_borders::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+        dt::T, tranposition_needed::Bool; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask) = data
     (; dx, ideb, ifin, s, domain_range, row_range) = params
     @indexing_vars(params)
@@ -2439,11 +2449,6 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
     # Projection of the conservative variables
     if params.use_transposition && tranposition_needed
-        rho = data.rho
-        umat = data.umat
-        vmat = data.vmat
-        Emat = data.Emat
-
         rhoᵀ = dataᵀ.rho
         umatᵀ = dataᵀ.umat
         vmatᵀ = dataᵀ.vmat
@@ -2455,21 +2460,38 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
             L₃ = -min(0, ustar[i+1]) * dt * domain_mask[i]
             L₂ = dX - L₁ - L₃
 
-            tmp_rho = (L₁ * rho[i-1]             + L₂ * rho[i]           + L₃ * rho[i+1]            ) / dX
-            tmp_u   = (L₁ * rho[i-1] * umat[i-1] + L₂ * rho[i] * umat[i] + L₃ * rho[i+1] * umat[i+1]) / dX / tmp_rho
-            tmp_v   = (L₁ * rho[i-1] * vmat[i-1] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+1] * vmat[i+1]) / dX / tmp_rho
-            tmp_E   = (L₁ * rho[i-1] * Emat[i-1] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+1] * Emat[i+1]) / dX / tmp_rho
-
-            # TODO : enlever les variables temporaires
             iᵀ = @iᵀ(i)
-            rhoᵀ[iᵀ]  = tmp_rho
-            umatᵀ[iᵀ] = tmp_u
-            vmatᵀ[iᵀ] = tmp_v
-            Ematᵀ[iᵀ] = tmp_E
+
+            tmp_rho_  = (L₁ * rho[i-1]             + L₂ * rho[i]           + L₃ * rho[i+1]            ) / dX
+            umatᵀ[iᵀ] = (L₁ * rho[i-1] * umat[i-1] + L₂ * rho[i] * umat[i] + L₃ * rho[i+1] * umat[i+1]) / dX / tmp_rho_
+            vmatᵀ[iᵀ] = (L₁ * rho[i-1] * vmat[i-1] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+1] * vmat[i+1]) / dX / tmp_rho_
+            Ematᵀ[iᵀ] = (L₁ * rho[i-1] * Emat[i-1] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+1] * Emat[i+1]) / dX / tmp_rho_
+            rhoᵀ[iᵀ]  = tmp_rho_
+        end
+    elseif params.use_temp_vars_for_projection
+        # @simd_threaded_loop for i in ideb:ifin
+        @simd_threaded_iter domain_range for i in row_range
+            dX = dx + dt * (ustar[i+s] - ustar[i])
+            L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
+            L₃ = -min(0, ustar[i+s]) * dt * domain_mask[i]
+            L₂ = dX - L₁ - L₃
+            
+            tmp_rho_    = (L₁ * rho[i-s]             + L₂ * rho[i]           + L₃ * rho[i+s]            ) / dX
+            tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] + L₂ * rho[i] * umat[i] + L₃ * rho[i+s] * umat[i+s]) / dX / tmp_rho_
+            tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+s] * vmat[i+s]) / dX / tmp_rho_
+            tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+s] * Emat[i+s]) / dX / tmp_rho_
+            tmp_rho[i]  = tmp_rho_
+        end
+
+        # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+        # @simd_threaded_loop for i in ideb:ifin
+        @simd_threaded_iter domain_range for i in row_range
+            rho[i]  = tmp_rho[i]
+            umat[i] = tmp_urho[i]
+            vmat[i] = tmp_vrho[i]
+            Emat[i] = tmp_Erho[i]
         end
     else
-        # TODO : remove the 'threads_borders' variable, and also the tmp_rho, tmp_urho and tmp_Erho if possible after the GPU impl
-
         @assert params.nghost ≥ 1 "There must be at least 1 ghost cell so that the projection can be made without any race conditions"
 
         # Since 'row_range' excludes the ghost cells on the borders of the row, the projection never
@@ -2488,8 +2510,6 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                 L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
                 L₃ = -min(0, ustar[i+s]) * dt * domain_mask[i]
                 L₂ = dX - L₁ - L₃
-
-                # 1 2 3 4 5 6
 
                 tmp_rho_ = (L₁ * rho[i-s]             + L₂ * rho[i]           + L₃ * rho[i+s]            ) / dX
                 tmp_u_   = (L₁ * rho[i-s] * umat[i-s] + L₂ * rho[i] * umat[i] + L₃ * rho[i+s] * umat[i+s]) / dX / tmp_rho_
@@ -2632,7 +2652,7 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
 
     f = open("$(output_file_path)_$(cx)x$(cy)", "w")
    
-    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat, data.ustar]
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat, data.Emat, data.cmat, data.ustar]
 
     if write_ghosts
         for j in 1-nghost:ny+nghost
@@ -2774,6 +2794,11 @@ function compute_ranges(params::ArmonParameters{T}, axis::Axis) where {T}
         end
     end
 
+    main_range = convert(StepRange{Int, Int}, main_range)
+    inner_range = convert(StepRange{Int, Int}, inner_range)
+    side_ghost_range_1 = convert(StepRange{Int, Int}, side_ghost_range_1)
+    side_ghost_range_2 = convert(StepRange{Int, Int}, side_ghost_range_2)
+
     return main_range, inner_range, side_ghost_range_1, side_ghost_range_2
 end
 
@@ -2799,8 +2824,6 @@ function time_loop(params::ArmonParameters{T},  data::ArmonData{V},
     dta::T = 0.
     dt::T  = 0.
     total_cycles_time::T = 0.
-
-    threads_borders = V(undef, max(length(params.domain_range), length(paramsᵀ.domain_range)) * 4 * 2)
 
     t1 = time_ns()
     t_warmup = t1
@@ -2828,7 +2851,6 @@ function time_loop(params::ArmonParameters{T},  data::ArmonData{V},
 
         for (axis, dt_factor, next_axis) in split_axes(params, cycle)
             transposition_needed = params.use_transposition && next_axis != axis
-            # println("Current params for $axis in cycle $cycle : $(params_1.current_axis)")
             if !params.use_transposition && params_1.current_axis != axis
                 # This pass is along the other axis
                 params_1, params_2 = params_2, params_1
@@ -2851,7 +2873,7 @@ function time_loop(params::ArmonParameters{T},  data::ArmonData{V},
                     event = boundaryConditions!(params_1, data_1, host_array, axis; dependencies=event)
                 end
                 @perf_task "loop" "euler_proj" event = first_order_euler_remap!(params_1, data_1, data_2,
-                    dt * dt_factor, transposition_needed, threads_borders; dependencies=event)
+                    dt * dt_factor, transposition_needed; dependencies=event)
 
                 if transposition_needed
                     # Swap the parameters and data

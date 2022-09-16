@@ -65,7 +65,7 @@ armon_base_options = [
 min_inti_cores = 4  # Minimun number of cores which will be allocated for each INTI job
 max_inti_cores = 128  # Maximum number of cores in a node
 
-max_cells_for_one_thread = 1e6  # Serial programs can take too much time for large number of cells
+max_cells_for_one_thread = 2e6  # Serial programs can take too much time for large number of cells
 
 required_modules = ["cuda", "rocm", "hwloc", "intel"]  # Modules required by most backends to run properly
 
@@ -909,8 +909,8 @@ function build_data_file_base_name(measure::MeasureParams,
     end
 
     if length(measure.use_simd) > 1
-        name *= use_simd ? "_SIMD" : "_NO_SIMD"
-        legend *= use_simd ? ", SIMD" : ""
+        name *= use_simd == 1 ? "_SIMD" : "_NO_SIMD"
+        legend *= use_simd == 1 ? ", SIMD" : ""
     end
 
     if length(measure.block_sizes) > 1 && block_size > 0  # The block size can be -1 for Kokkos

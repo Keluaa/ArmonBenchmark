@@ -30,6 +30,7 @@ use_gpu = false
 threads_places = :cores
 threads_proc_bind = :close
 dimension = 1
+use_temp_vars_for_projection = false
 
 transpose_dims = []
 axis_splitting = []
@@ -155,6 +156,12 @@ while i <= length(ARGS)
             error("'--flat-dims' is 2D only")
         end
         global flatten_time_dims = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--temp-vars-transpose"
+        global use_temp_vars_for_projection = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--continuous-ranges"
+        ENV["USE_CONTINUOUS_RANGES"] = parse(Bool, ARGS[i+1])
         global i += 1
 
     # List params
@@ -401,7 +408,7 @@ if use_MPI
                 cst_dt, maxtime, maxcycle, silent, write_output,
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, use_MPI)
         end
-    elseif mpi_impl == :async || mpi_impl == :transpose
+    elseif mpi_impl == :async
         function build_params(test, domain; 
                 ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
@@ -413,6 +420,19 @@ if use_MPI
                 maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms)
+        end
+    elseif mpi_impl == :transpose
+        function build_params(test, domain; 
+                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
+                axis_splitting, maxtime, maxcycle, silent, output_file, write_output, 
+                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
+                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
+            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
+                test=test, nx=domain[1], ny=domain[2],
+                euler_projection, transpose_dims, axis_splitting, 
+                maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
+                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
+                single_comm_per_axis_pass, reorder_grid, async_comms, use_temp_vars_for_projection)
         end
     elseif mpi_impl == :sync
         function build_params(test, domain; 

@@ -1023,8 +1023,13 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     if params.single_comm_per_axis_pass
         (; nx, ny, ifin) = params
         @indexing_vars(params)
-        first_i = @i(0, 0)
-        last_i = @i(nx+1, ny+1) + last_i - ifin
+        if params.current_axis == X_axis
+            first_i = @i(0, 1)
+            last_i = @i(nx+1, ny) + last_i - ifin - 1
+        else
+            first_i = @i(1, 0)
+            last_i = @i(nx, ny+1) + last_i - ifin - 2
+        end
     else
         first_i = ideb
         last_i = last_i
@@ -1056,8 +1061,13 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     if params.single_comm_per_axis_pass
         (; nx, ny, ifin) = params
         @indexing_vars(params)
-        first_i = @i(0, 0)
-        last_i = @i(nx+1, ny+1) + last_i - ifin
+        if params.current_axis == X_axis
+            first_i = @i(0, 1)
+            last_i = @i(nx+1, ny) + last_i - ifin - 1
+        else
+            first_i = @i(1, 0)
+            last_i = @i(nx, ny+1) + last_i - ifin - 2
+        end
     else
         first_i = ideb
         last_i = last_i
@@ -1078,7 +1088,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     # First order
-    @simd_threaded_loop for i in first_i-s:last_i+s
+    @simd_threaded_loop for i in (first_i-s):(last_i+s)
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
         ustar_1[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -1831,10 +1841,15 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
     (; dx, ideb, ifin, s) = params
 
     if params.single_comm_per_axis_pass
-        (; nx, ny) = params
+        (; nx, ny, ifin) = params
         @indexing_vars(params)
-        first_i = @i(0, 0)
-        last_i = @i(nx+1, ny+1)
+        if params.current_axis == X_axis
+            first_i = @i(0, 1)
+            last_i = @i(nx+1, ny)
+        else
+            first_i = ideb - s
+            last_i = ifin + s
+        end
     else
         first_i = ideb
         last_i = ifin
@@ -2053,7 +2068,7 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
     (cx, cy) = cart_coords
     f = open("$(output_file_path)_$(cx)x$(cy)", "w")
 
-    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat, data.ustar]
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat, data.Emat, data.cmat, data.ustar]
 
     if write_ghosts
         for j in 1-nghost:ny+nghost
