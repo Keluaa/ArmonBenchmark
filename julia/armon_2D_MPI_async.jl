@@ -799,7 +799,7 @@ macro gpu_tic(label, dependencies)
 
                 var"start_cuevent_$(label)" = CUDA.CuEvent()
                 CUDA.record(var"start_cuevent_$(label)", var"stream_$(label)")
-                var"start_cuevent_$(label)" = CudaEvent(start_cuevent)
+                var"start_cuevent_$(label)" = CUDAKernels.CudaEvent(var"start_cuevent_$(label)")
             end
         end)
     end
@@ -876,9 +876,12 @@ end
 # GPU Kernels
 #
 
-@kernel function gpu_acoustic_kernel!(i_0, s, ustar, pstar, 
-        @Const(rho), @Const(u), @Const(pmat), @Const(cmat))
-    i = @index(Global) + i_0
+@kernel function gpu_acoustic_kernel!(
+        main_range_start, main_range_step, inner_range_start, inner_range_step, s,
+        ustar, pstar, @Const(rho), @Const(u), @Const(pmat), @Const(cmat))
+    ix, iy = @index(Global, NTuple)
+    j = main_range_start  + main_range_step  * (ix - 1) - 1
+    i = inner_range_start + inner_range_step * (iy - 1) + j
     rc_l = rho[i-s] * cmat[i-s]
     rc_r = rho[i]   * cmat[i]
     ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -886,10 +889,13 @@ end
 end
 
 
-@kernel function gpu_acoustic_GAD_minmod_kernel!(i_0, s, ustar, pstar, 
-        @Const(rho), @Const(u), @Const(pmat), @Const(cmat), @Const(ustar_1), @Const(pstar_1), 
-        dt, dx)
-    i = @index(Global) + i_0
+@kernel function gpu_acoustic_GAD_minmod_kernel!(
+        main_range_start, main_range_step, inner_range_start, inner_range_step, s,
+        ustar, pstar, @Const(rho), @Const(u), @Const(pmat), @Const(cmat), 
+        @Const(ustar_1), @Const(pstar_1), dt, dx)
+    ix, iy = @index(Global, NTuple)
+    j = main_range_start  + main_range_step  * (ix - 1) - 1
+    i = inner_range_start + inner_range_step * (iy - 1) + j
 
     r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
     r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
@@ -906,12 +912,10 @@ end
     rc_l = rho[i-s] * cmat[i-s]
     rc_r = rho[i]   * cmat[i]
     Dm   = (dm_l + dm_r) / 2
-    θ    = (rc_l + rc_r) / 2 * (dt / Dm)
+    θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
     
-    ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) -
-                                             r_u_m * (ustar_1[i] -     u[i-s]))
-    pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (   pmat[i] - pstar_1[i]) -
-                                             r_p_m * (pstar_1[i] -  pmat[i-s]))
+    ustar[i] = ustar_1[i] + θ * (r_u_p * (   u[i] - ustar_1[i]) - r_u_m * (ustar_1[i] -    u[i-s]))
+    pstar[i] = pstar_1[i] + θ * (r_p_p * (pmat[i] - pstar_1[i]) - r_p_m * (pstar_1[i] - pmat[i-s]))
 end
 
 
@@ -1211,7 +1215,7 @@ gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, b
 # 
 
 function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        u::V, main_range::OrdinalRange{Int, Int}, inner_range::OrdinalRange{Int, Int},
+        u::V, main_range::StepRange{Int, Int}, inner_range::StepRange{Int, Int},
         is_outer::Bool;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat) = data
@@ -1220,10 +1224,11 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     step_label = is_outer ? "outer_acoustic!" : "inner_acoustic!"
 
     if params.use_gpu
-        error("async GPU NYI")
         @gpu_tic(step_label, dependencies)
-        # event = gpu_acoustic!(first_i - 1, s, ustar, pstar, rho, u, pmat, cmat;
-        #     ndrange=length(first_i:last_i), dependencies)
+        event = gpu_acoustic!(first(main_range), step(main_range), 
+                              first(inner_range), step(inner_range),
+                              s, ustar, pstar, rho, u, pmat, cmat;
+                              ndrange=(length(main_range), length(inner_range)), dependencies)
         @gpu_tac(step_label, event, params.current_axis)
         return event
     end
@@ -1244,32 +1249,35 @@ end
 
 
 function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V, main_range::OrdinalRange{Int, Int}, inner_range::OrdinalRange{Int, Int},
+        dt::T, u::V, main_range::StepRange{Int, Int}, inner_range::StepRange{Int, Int},
         is_outer::Bool;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat, ustar_1, pstar_1) = data
-    (; scheme, dx, ideb, s) = params
+    (; scheme, dx, s) = params
 
     step_label_1st = is_outer ? "outer_acoustic!"     : "inner_acoustic!"
     step_label_2nd = is_outer ? "outer_acoustic_GAD!" : "inner_acoustic_GAD!"
+
+    inner_range_1st_order = first(inner_range)-s:step(inner_range):last(inner_range)+s
 
     if params.use_gpu
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
-        
-        error("async GPU NYI")
 
         @gpu_tic(step_label_1st, dependencies)
-        first_kernel = gpu_acoustic!(first_i - s - 1, s, ustar_1, pstar_1,
-            rho, u, pmat, cmat;
-            ndrange=length(first_i-s:last_i+s), dependencies)
+        first_kernel = gpu_acoustic!(first(main_range), step(main_range), 
+                                     first(inner_range_1st_order), step(inner_range_1st_order),
+                                     s, ustar_1, pstar_1, rho, u, pmat, cmat;
+                                     ndrange=(length(main_range), length(inner_range_1st_order)), dependencies)
         @gpu_tac(step_label_1st, first_kernel, params.current_axis)
         
         @gpu_tic(step_label_2nd, first_kernel)
-        second_kernel = gpu_acoustic_GAD_minmod!(first_i - 1, s, ustar, pstar,
-            rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
-            ndrange=length(first_i:last_i), dependencies=first_kernel)
+        second_kernel = gpu_acoustic_GAD_minmod!(
+                                     first(main_range), step(main_range), 
+                                     first(inner_range), step(inner_range),
+                                     s, ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
+                                     ndrange=(length(main_range), length(inner_range)), dependencies=first_kernel)
         @gpu_tac(step_label_2nd, second_kernel, params.current_axis)
 
         return second_kernel
@@ -1278,8 +1286,6 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     # First order
     @cpu_tic(step_label_1st)
 
-    first_idx = first(inner_range) + first(main_range) - 1
-    inner_range_1st_order = first(inner_range)-s:step(inner_range):last(inner_range)+s
     @simd_threaded_iter main_range for i in inner_range_1st_order
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
@@ -1309,12 +1315,10 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm   = (dm_l + dm_r) / 2
-            θ    = (rc_l + rc_r) / 2 * (dt / Dm)
+            θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
 
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) -
-                                                     r_u_m * (ustar_1[i] -     u[i-s]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (   pmat[i] - pstar_1[i]) - 
-                                                     r_p_m * (pstar_1[i] -  pmat[i-s]))
+            ustar[i] = ustar_1[i] + θ * (r_u_p * (   u[i] - ustar_1[i]) - r_u_m * (ustar_1[i] -    u[i-s]))
+            pstar[i] = pstar_1[i] + θ * (r_p_p * (pmat[i] - pstar_1[i]) - r_p_m * (pstar_1[i] - pmat[i-s]))
         end
     elseif scheme == :GAD_superbee
         @simd_threaded_iter main_range for i in inner_range
@@ -1333,12 +1337,10 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm = (dm_l + dm_r) / 2
-            θ  = (rc_l + rc_r) / 2 * (dt / Dm)
+            θ  = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
             
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * (r_u_p * (      u[i] - ustar_1[i]) - 
-                                                     r_u_m * (ustar_1[i] -     u[i-s]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * (r_p_p * (   pmat[i] - pstar_1[i]) -
-                                                     r_p_m * (pstar_1[i] -  pmat[i-s]))
+            ustar[i] = ustar_1[i] + θ * (r_u_p * (   u[i] - ustar_1[i]) - r_u_m * (ustar_1[i] -    u[i-s]))
+            pstar[i] = pstar_1[i] + θ * (r_p_p * (pmat[i] - pstar_1[i]) - r_p_m * (pstar_1[i] - pmat[i-s]))
         end
     elseif scheme == :GAD_no_limiter
         @simd_threaded_iter main_range for i in inner_range
@@ -1347,12 +1349,10 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             rc_l = rho[i-s] * cmat[i-s]
             rc_r = rho[i]   * cmat[i]
             Dm = (dm_l + dm_r) / 2
-            θ  = (rc_l + rc_r) / 2 * (dt / Dm)
+            θ  = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
 
-            ustar[i] = ustar_1[i] + 1/2 * (1 - θ) * ((      u[i] - ustar_1[i]) - 
-                                                     (ustar_1[i] -     u[i-s]))
-            pstar[i] = pstar_1[i] + 1/2 * (1 - θ) * ((   pmat[i] - pstar_1[i]) - 
-                                                     (pstar_1[i] -  pmat[i-s]))
+            ustar[i] = ustar_1[i] + θ * ((   u[i] - ustar_1[i]) - (ustar_1[i] -    u[i-s]))
+            pstar[i] = pstar_1[i] + θ * ((pmat[i] - pstar_1[i]) - (pstar_1[i] - pmat[i-s]))
         end
     else
         error("The choice of the scheme for the acoustic solver is not recognized: ", scheme)
@@ -1365,7 +1365,7 @@ end
 
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V, main_range::OrdinalRange{Int, Int}, inner_range::OrdinalRange{Int, Int},
+        dt::T, u::V, main_range::StepRange{Int, Int}, inner_range::StepRange{Int, Int},
         is_outer::Bool;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
@@ -1401,6 +1401,9 @@ function numericalFluxes_inner!(params::ArmonParameters{T}, data::ArmonData{V}, 
         inner_range = (row_length*nghost+1):row_length:((ny+1-nghost)*row_length)
     end
 
+    main_range = StepRange{Int, Int}(main_range)
+    inner_range = StepRange{Int, Int}(inner_range)
+
     @perf_task "loop" "fluxes_inner" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, false; dependencies)
     return event
 end
@@ -1423,6 +1426,9 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
         main_range  = @i(1-o,1-o):@i(nx+o,1-o)
         inner_range = 1:row_length:(nghost+o)*row_length
     end
+    
+    main_range = StepRange{Int, Int}(main_range)
+    inner_range = StepRange{Int, Int}(inner_range)
 
     @perf_task "comms" "fluxes_outer_1" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, true; dependencies)
 
@@ -1435,6 +1441,9 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
         main_range  = @i(1-o,1-o):@i(nx+o,1-o)
         inner_range = (ny-nghost+o+1)*row_length:row_length:(ny+2*o)*row_length
     end
+
+    main_range = StepRange{Int, Int}(main_range)
+    inner_range = StepRange{Int, Int}(inner_range)
 
     # Shift the computation to the right/top by one column/row since the flux at index 'i' is the 
     # flux between the cells 'i-s' and 'i', but we also need the fluxes on the other side, between
