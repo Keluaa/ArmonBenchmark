@@ -442,7 +442,7 @@ if use_MPI
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
-                euler_projection, transpose_dims, axis_splitting,
+                euler_projection, transpose_dims=false, axis_splitting,
                 maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py,
                 single_comm_per_axis_pass, reorder_grid)
@@ -678,7 +678,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
     time_contrib_vals = last.(time_contrib)
     merged_time_contrib_vals = MPI.Reduce(time_contrib_vals, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
  
-    # Gather the throughput measurements on the root process
+    # Gather the throughput measurements on the root process
     merged_vals_cells_per_sec = MPI.Gather(vals_cells_per_sec, 0, MPI.COMM_WORLD)
 
     if is_root
@@ -687,12 +687,14 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
             return time_contrib
         end
 
-        merged_vals_cells_per_sec = reshape(merged_vals_cells_per_sec, (repeats, params.proc_size))
-        mean_vals_cells_per_sec = mean(merged_vals_cells_per_sec; dims=2)
-        total_cells_per_sec = mean(mean_vals_cells_per_sec)
-        std_cells_per_sec = std(vals_cells_per_sec; corrected=true, mean=mean_vals_cells_per_sec)
+        total_cells_per_sec = mean(merged_vals_cells_per_sec)
+        if length(merged_vals_cells_per_sec) > 1
+            std_cells_per_sec = std(merged_vals_cells_per_sec; corrected=true, mean=total_cells_per_sec)
+        else
+            std_cells_per_sec = 0
+        end
 
-        @printf("%6.3f±%3.1f Giga cells/sec\n", total_cells_per_sec, std_cells_per_sec)
+        @printf("%6.3f±%4.2f Giga cells/sec", total_cells_per_sec, std_cells_per_sec)
 
         # Append the result to the data file
         if !isempty(data_file_name)
@@ -839,7 +841,7 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px
                 run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
             end
 
-            if !isempty(gnuplot_MPI_script)
+            if time_MPI_graph && !isempty(gnuplot_MPI_script)
                 # Same for the MPI time graph
                 run(pipeline(`gnuplot $(gnuplot_MPI_script)`, stdout=devnull, stderr=devnull))
             end

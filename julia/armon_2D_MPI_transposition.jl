@@ -1708,9 +1708,45 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     # Ghost rows on the sides. Done separatly in order for the main range 'domain_range' to be 
-    # divided in the same manner by @simd_threaded_iter each time, thus accessing the same memory
-    # allocated next to the core because of first-touch
-    @simd_threaded_iter Iterators.flatten((side_ghost_range_1, side_ghost_range_2)) for i in all_row_range
+    # divided in the same manner by @simd_threaded_iter each time, thus accessing the same memory
+    # allocated next to the core because of first-touch
+    @simd_threaded_iter side_ghost_range_1 for i in all_row_range
+        if transposed
+            ix = ((i-1) ÷ row_length) - nghost
+            iy = ((i-1) % row_length) - nghost
+        else
+            ix = ((i-1) % row_length) - nghost
+            iy = ((i-1) ÷ row_length) - nghost
+        end
+
+        g_ix = ix + pos_x
+        g_iy = iy + pos_y
+
+        x[i] = g_ix / g_nx
+        y[i] = g_iy / g_ny
+
+        if cond(x[i] + 1. / (2*g_nx), y[i] + 1. / (2*g_ny))
+            rho[i]  = left_ρ
+            Emat[i] = left_p / ((gamma - 1.) * rho[i])
+            umat[i] = 0.
+        else
+            rho[i]  = right_ρ
+            Emat[i] = right_p / ((gamma - 1.) * rho[i])
+            umat[i] = right_u
+        end
+
+        vmat[i] = 0.
+
+        domain_mask[i] = 0.
+        pmat[i] = 0.
+        cmat[i] = 1.
+        ustar[i] = 0.
+        pstar[i] = 0.
+        ustar_1[i] = 0.
+        pstar_1[i] = 0.
+    end
+
+    @simd_threaded_iter side_ghost_range_2 for i in all_row_range
         if transposed
             ix = ((i-1) ÷ row_length) - nghost
             iy = ((i-1) % row_length) - nghost

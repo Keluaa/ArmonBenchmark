@@ -146,8 +146,8 @@ $(log_scale ? "set logscale x" : "")
 `echo "$graph_file_name" >> $plots_update_file`
 plot """
 
-gnuplot_plot_command(data_file, legend_title, pt_index) = "'$(data_file)' w lp pt $(pt_index) title '$(legend_title)'"
-gnuplot_plot_command_errorbars(data_file, legend_title, pt_index) = gnuplot_plot_command(data_file, legend_title, pt_index) * " w yerr"
+gnuplot_plot_command(data_file, legend_title, pt_index; mode="lp") = "'$(data_file)' w $(mode) pt $(pt_index) title '$(legend_title)'"
+gnuplot_plot_command_errorbars(data_file, legend_title, pt_index) = gnuplot_plot_command(data_file, legend_title, pt_index; mode="yerrorlines")
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
 gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:2 axis x1y1 w lp lc $(color_index) pt $(pt_index) title '$(legend_title)'"
 gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
@@ -935,7 +935,7 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
     end
 
     if measure.time_MPI_plot
-        # Same for the MPI plot script
+        # Same for the MPI plot script
         open(measure.gnuplot_MPI_script, "w") do gnuplot_script
             plot_title = measure.plot_title * ", MPI communications time"
             print(gnuplot_script, base_gnuplot_MPI_time_script_commands(measure.time_MPI_plot_file, plot_title,

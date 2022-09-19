@@ -84,11 +84,6 @@ function omp_bind_threads(offset::Int, places::Symbol, bind::Symbol; hyperthread
         return
     end
 
-    if Threads.nthreads() > 64
-        # See https://github.com/JuliaSIMD/Polyester.jl/issues/83
-        @warn "Polyester.jl doesn't support more than 64 threads." maxlog=1
-    end
-
     info = sysinfo()
     
     if places == :threads
