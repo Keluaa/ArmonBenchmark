@@ -40,6 +40,10 @@ function set_world_comm(comm::MPI.Comm)
     global COMM = comm
 end
 
+# Hardware counters measurements
+
+include("perf_utils.jl")
+
 #
 # Axis enum
 #
@@ -93,6 +97,9 @@ mutable struct ArmonParameters{Flt_T}
     merge_files::Bool
     animation_step::Int
     measure_time::Bool
+    measure_hw_counters::Bool
+    hw_counters_options::String
+    hw_counters_output::String
 
     # Performance
     use_ccall::Bool
@@ -126,7 +133,8 @@ function ArmonParameters(;
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
         write_output = true, write_ghosts = false, merge_files = false, animation_step = 0, 
-        measure_time = true,
+        measure_time = true, measure_hw_counters = false, 
+        hw_counters_options = default_perf_options(), hw_counters_output = "",
         use_ccall = false, use_threading = true, 
         use_simd = true, interleaving = false,
         use_gpu = false,
@@ -168,6 +176,10 @@ function ArmonParameters(;
 
     if (nx % px != 0) || (ny % py != 0)
         error("The dimensions of the global domain ($nx x $ny) are not divisible by the number of processors ($px x $py)")
+    end
+
+    if measure_hw_counters && use_gpu
+        error("Hardware counters are not present on GPU")
     end
 
     # MPI
@@ -236,7 +248,7 @@ function ArmonParameters(;
         maxtime, maxcycle,
         silent, output_dir, output_file,
         write_output, write_ghosts, merge_files, animation_step,
-        measure_time,
+        measure_time, measure_hw_counters, hw_counters_options, hw_counters_output,
         use_ccall, use_threading, use_simd, use_gpu,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
@@ -285,6 +297,9 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2], " ($(p.reorder_grid ? "" : "not ")reordered)")
     println(" - coords:     ", p.cart_coords[1], "x", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
     println(" - comms per axis: ", p.single_comm_per_axis_pass ? 1 : 2)
+    if p.measure_hw_counters
+        println(" - hardware counters measured: ", p.hw_counters_options)
+    end
 end
 
 
@@ -521,6 +536,9 @@ end
 axis_time_contrib = Dict{Axis, Dict{String, Float64}}()
 total_time_contrib = Dict{String, Float64}()
 
+axis_hw_counters = Dict{Axis, Dict{String, Dict{LinuxPerf.EventType, LinuxPerf.Counter}}}()
+const hw_counters_lock = ReentrantLock()
+
 
 function build_incr_time_pos_common(label, expr)
     return esc(quote
@@ -543,25 +561,52 @@ end
 
 function build_incr_time_pos(label, expr)
     return esc(quote
-        if params.measure_time && !is_warming_up()
-            _t_start = time_ns()
+        if (params.measure_time || params.measure_hw_counters) && !is_warming_up()
+            if params.measure_hw_counters
+                var"hw_$(label)" = init_bench(params.hw_counters_options)
+                enable_bench(var"hw_$(label)")
+            end
+            if params.measure_time
+                _t_start = time_ns()
+            end
+            
             $(expr)
-            _t_end = time_ns()
 
-            if !haskey(axis_time_contrib, params.current_axis)
-                global axis_time_contrib[params.current_axis] = Dict{String, Float64}()
+            if params.measure_time
+                _t_end = time_ns()
             end
 
-            if !haskey(axis_time_contrib[params.current_axis], $(label))
-                global axis_time_contrib[params.current_axis][$(label)] = 0.
+            if params.measure_hw_counters
+                disable_bench(var"hw_$(label)")
+                var"hw_$(label)_stats" = close_bench(var"hw_$(label)") |> reduce_threads_stats!
+                
+                if !haskey(axis_hw_counters, params.current_axis)
+                    axis_hw_counters[params.current_axis] = Dict{String, Dict{LinuxPerf.EventType, LinuxPerf.Counter}}()
+                end
+
+                if !haskey(axis_hw_counters[params.current_axis], $(label))
+                    axis_hw_counters[params.current_axis][$(label)] = Dict{LinuxPerf.EventType, LinuxPerf.Counter}()
+                end
+
+                sum_stats!(axis_hw_counters[params.current_axis][$(label)], var"hw_$(label)_stats")
             end
 
-            if !haskey(total_time_contrib, $(label))
-                global total_time_contrib[$(label)] = 0.
+            if params.measure_time
+                if !haskey(axis_time_contrib, params.current_axis)
+                    global axis_time_contrib[params.current_axis] = Dict{String, Float64}()
+                end
+    
+                if !haskey(axis_time_contrib[params.current_axis], $(label))
+                    global axis_time_contrib[params.current_axis][$(label)] = 0.
+                end
+    
+                if !haskey(total_time_contrib, $(label))
+                    global total_time_contrib[$(label)] = 0.
+                end
+    
+                global axis_time_contrib[params.current_axis][$(label)] += _t_end - _t_start
+                global total_time_contrib[$(label)] += _t_end - _t_start
             end
-
-            global axis_time_contrib[params.current_axis][$(label)] += _t_end - _t_start
-            global total_time_contrib[$(label)] += _t_end - _t_start
         else
             $(expr)
         end
@@ -1088,7 +1133,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     # First order
-    @simd_threaded_loop for i in (first_i-s):(last_i+s)
+    @time_pos_l "acoustic!" @simd_threaded_loop for i in (first_i-s):(last_i+s)
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
         ustar_1[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -1096,7 +1141,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     # Second order, for each flux limiter
-    if scheme == :GAD_minmod
+    @time_pos_l "acoustic_GAD!" if scheme == :GAD_minmod
         @simd_threaded_loop for i in first_i:last_i
             r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
             r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
@@ -1170,10 +1215,11 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
     dt::T, last_i::Int, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            return acoustic!(params, data, last_i, u; dependencies)
+            @time_pos event = acoustic!(params, data, last_i, u; dependencies)
         else
-            return acoustic_GAD!(params, data, dt, last_i, u; dependencies)
+            event = acoustic_GAD!(params, data, dt, last_i, u; dependencies)
         end
+        return event
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
     end
@@ -2155,14 +2201,14 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             last_i, x_, u = update_axis_parameters(params, data, axis)
 
             @time_pos event = boundaryConditions!(params, data, host_array, axis; dependencies=prev_event)
-            @time_pos event = numericalFluxes!(params, data, dt * dt_factor, last_i, u; dependencies=event)
+            event = numericalFluxes!(params, data, dt * dt_factor, last_i, u; dependencies=event)
             @time_pos event = cellUpdate!(params, data, dt * dt_factor, u, x_; dependencies=event)
     
             if params.euler_projection
                 if !params.single_comm_per_axis_pass 
                     @time_pos event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
                 end
-                @time_pos event = first_order_euler_remap!(params, data, dt * dt_factor; dependencies=event)
+                @time_pos_l "euler_remap" event = first_order_euler_remap!(params, data, dt * dt_factor; dependencies=event)
             end
 
             @time_pos prev_event = update_EOS!(params, data; dependencies=event)
@@ -2221,9 +2267,10 @@ end
 function armon(params::ArmonParameters{T}) where T
     (; silent, is_root) = params
 
-    if params.measure_time
+    if params.measure_time || params.measure_hw_counters
         empty!(axis_time_contrib)
         empty!(total_time_contrib)
+        empty!(axis_hw_counters)
         global in_warmup_cycle = true
     end
 
@@ -2299,6 +2346,19 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     sorted_time_contrib = sort(collect(total_time_contrib))
+
+    if params.measure_hw_counters
+        sorted_counters = sort(collect(axis_hw_counters); lt=(a, b)->(a[1] < b[1]))
+        sorted_counters = map((p)->(string(first(p)) => last(p)), sorted_counters)
+        if params.silent < 3
+            print_hardware_counters_table(stdout, sorted_counters)
+        end
+        if !isempty(params.hw_counters_output)
+            open(params.hw_counters_output, "w") do file
+                print_hardware_counters_table(file, sorted_counters; raw_print=true)
+            end
+        end
+    end
 
     return dt, cycles, cells_per_sec, sorted_time_contrib
 end

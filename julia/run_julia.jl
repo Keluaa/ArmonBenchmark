@@ -52,7 +52,7 @@ mpi_impl = :async  # :sync, :async, :transpose
 measure_time = true
 measure_hw_counters = false
 hw_counters_options = "(cache-misses,cache-references,L1-dcache-loads,L1-dcache-load-misses)," *
-    "(LLC-load-misses,LLC-loads,LLC-store-misses,LLC-stores)," *
+    #= "(LLC-load-misses,LLC-loads,LLC-store-misses,LLC-stores)," * =#
     "(dTLB-loads,dTLB-load-misses)," *
     "(cpu-cycles,instructions,branch-instructions)"
 hw_counters_output = ""
@@ -466,7 +466,8 @@ if use_MPI
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims=false, axis_splitting,
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, measure_time,
+                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, 
+                measure_time, measure_hw_counters, hw_counters_options, hw_counters_output,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py,
                 single_comm_per_axis_pass, reorder_grid)
         end

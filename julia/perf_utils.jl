@@ -1,6 +1,7 @@
 
 using LinuxPerf
 using Printf
+using PrettyTables
 
 
 function default_perf_options()

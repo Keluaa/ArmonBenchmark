@@ -332,6 +332,9 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - coords:     ", p.cart_coords[1], "x", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
     println(" - comms per axis: ", p.single_comm_per_axis_pass ? 1 : 2)
     println(" - asynchronous communications: ", p.async_comms)
+    if p.measure_hw_counters
+        println(" - hardware counters measured: ", p.hw_counters_options)
+    end
 end
 
 
@@ -3122,7 +3125,7 @@ function armon(params::ArmonParameters{T}) where T
     if params.measure_hw_counters
         sorted_counters = sort(collect(axis_hw_counters); lt=(a, b)->(a[1] < b[1]))
         sorted_counters = map((p)->(string(first(p)) => last(p)), sorted_counters)
-        if params.silent < 2
+        if params.silent < 3
             print_hardware_counters_table(stdout, sorted_counters)
         end
         if !isempty(params.hw_counters_output)
