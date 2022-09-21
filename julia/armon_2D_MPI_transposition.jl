@@ -1,6 +1,7 @@
 module Armon
 
 using Printf
+using PrettyTables
 using Polyester
 using ThreadPinning
 using KernelAbstractions
@@ -13,19 +14,19 @@ export ArmonParameters, armon
 # better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
-# make options like 'use_simd', 'use_gpu', 'use_threading', etc... a type parameter (or singleton) to
+# make options like 'use_simd', 'use_gpu', 'use_threading', etc... a type parameter (or singleton) to
 #   the functions, and with some macro shenanigans we could reduce the amount of code being compiled
 
 
-# Transposition : 
+# Transposition :
 # le but serait de vraiment faire gaffe à la localité cette fois-ci
-# il faut VRAIMENT que les threads écrivent et accèdent toujours à de la mémoire sur leur coeur
+# il faut VRAIMENT que les threads écrivent et accèdent toujours à de la mémoire sur leur coeur
 # idéalement, il faudrait aussi ce débarasser des tableaux temporaires en faisant des calculs décalés
-# DONC, les itérations ne sont pas distribuées de la même manière selon que l'on soit selon x, y ou z, 
+# DONC, les itérations ne sont pas distribuées de la même manière selon que l'on soit selon x, y ou z,
 # pour pouvoir que les threads utilisent toujours la même mémoire
-# je propose de généraliser l'utilisation de '@simd_threaded_iter', en lui donnant des ranges différents
-# selon le balayage
-# 1 tableau par direction de balayage
+# je propose de généraliser l'utilisation de '@simd_threaded_iter', en lui donnant des ranges différents
+# selon le balayage
+# 1 tableau par direction de balayage
 
 
 # GPU init
@@ -59,6 +60,10 @@ end
 
 include("vtune_lib.jl")
 using .VTune
+
+# Hardware counters measurements
+
+include("perf_utils.jl")
 
 #
 # Axis enum
@@ -115,6 +120,9 @@ mutable struct ArmonParameters{Flt_T}
     merge_files::Bool
     animation_step::Int
     measure_time::Bool
+    measure_hw_counters::Bool
+    hw_counters_options::String
+    hw_counters_output::String
 
     # Performance
     use_ccall::Bool
@@ -153,7 +161,8 @@ function ArmonParameters(;
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
         write_output = true, write_ghosts = false, merge_files = false, animation_step = 0, 
-        measure_time = true,
+        measure_time = true, measure_hw_counters = false, 
+        hw_counters_options = default_perf_options(), hw_counters_output = "",
         use_ccall = false, use_threading = true, 
         use_simd = true, interleaving = false,
         use_gpu = false,
@@ -197,6 +206,10 @@ function ArmonParameters(;
 
     if async_comms
         error("async_comms NYI")
+    end
+
+    if measure_hw_counters && use_gpu
+        error("Hardware counters are not present on GPU")
     end
 
     # MPI
@@ -265,7 +278,7 @@ function ArmonParameters(;
         maxtime, maxcycle,
         silent, output_dir, output_file,
         write_output, write_ghosts, merge_files, animation_step,
-        measure_time,
+        measure_time, measure_hw_counters, hw_counters_options, hw_counters_output,
         use_ccall, use_threading, use_simd, use_gpu, transpose_dims,
         use_temp_vars_for_projection,
         use_MPI, is_root, rank, root_rank, 
@@ -718,6 +731,9 @@ axis_time_contrib = Dict{Axis, Dict{String, Float64}}()
 total_time_contrib = Dict{String, Float64}()
 const time_contrib_lock = ReentrantLock()
 
+axis_hw_counters = Dict{Axis, Dict{String, Dict{LinuxPerf.EventType, LinuxPerf.Counter}}}()
+const hw_counters_lock = ReentrantLock()
+
 
 function add_common_time(label, time)
     if !haskey(total_time_contrib, label)
@@ -745,6 +761,19 @@ function add_time_contrib(label, time; axis=nothing, exclude_from_total=false)
         !exclude_from_total && add_common_time(label, time)
         !isnothing(axis) && add_axis_time(axis, label, time)
     end
+end
+
+
+function init_hw_counter(axis, label)
+    lock(hw_counters_lock) do
+        if !haskey(axis_hw_counters, axis)
+            global axis_hw_counters[axis] = Dict{String, Dict{LinuxPerf.EventType, LinuxPerf.Counter}}()
+        end
+        if !haskey(axis_hw_counters[axis], label)
+            global axis_hw_counters[axis][label] = Dict{LinuxPerf.EventType, LinuxPerf.Counter}()
+        end
+    end
+    return
 end
 
 
@@ -853,8 +882,16 @@ macro time_expr(expr)
 end
 
 
-macro cpu_tic(label)
-    return esc(quote
+function cpu_tic(label; axis=nothing, no_hw_counters=false)
+    return esc(quote 
+        if !$(no_hw_counters) && !isnothing($(axis)) && params.measure_hw_counters
+            if is_warming_up()
+                init_hw_counter($(axis), $(label))
+            else
+                var"tic_hw_$(label)" = init_bench(params.hw_counters_options)
+                enable_bench(var"tic_hw_$(label)")
+            end
+        end
         if params.measure_time && !is_warming_up()
             var"tic_$(label)" = time_ns()
         end
@@ -862,29 +899,30 @@ macro cpu_tic(label)
 end
 
 
-function cpu_tac(label; axis=nothing, exclude_from_total=false)
+function cpu_tac(label; axis=nothing, exclude_from_total=false, no_hw_counters=false)
     return esc(quote
         if params.measure_time && !is_warming_up()
             var"tac_$(label)" = time_ns()
             add_time_contrib($(label), var"tac_$(label)" - var"tic_$(label)"; axis=$(axis), exclude_from_total=$(exclude_from_total))
         end
+        if !$(no_hw_counters) && !isnothing($(axis)) && params.measure_hw_counters && !is_warming_up()
+            disable_bench(var"tic_hw_$(label)")
+            var"tic_hw_$(label)_stats" = close_bench(var"tic_hw_$(label)") |> reduce_threads_stats!
+            sum_stats!(axis_hw_counters[$(axis)][$(label)], var"tic_hw_$(label)_stats")
+        end
     end)
 end
 
 
-macro cpu_tac(label)
-    return cpu_tac(label)
-end
+macro cpu_tic(label)                       return cpu_tic(label; axis=:(params.current_axis)) end
+macro cpu_tic(label, axis)                 return cpu_tic(label; axis)                        end
+macro cpu_tic(label, axis, no_hw_counters) return cpu_tic(label; axis, no_hw_counters)        end
 
 
-macro cpu_tac(label, axis)
-    return cpu_tac(label; axis) 
-end
-
-
-macro cpu_tac(label, axis, exclude_from_total)
-    return cpu_tac(label; axis, exclude_from_total)
-end
+macro cpu_tac(label)                                           return cpu_tac(label; axis=:(params.current_axis))              end
+macro cpu_tac(label, axis)                                     return cpu_tac(label; axis)                                     end
+macro cpu_tac(label, axis, exclude_from_total)                 return cpu_tac(label; axis, exclude_from_total)                 end
+macro cpu_tac(label, axis, exclude_from_total, no_hw_counters) return cpu_tac(label; axis, exclude_from_total, no_hw_counters) end
 
 
 macro gpu_tic(label, dependencies)
@@ -927,19 +965,9 @@ function gpu_tac(label, kernel_event; axis=nothing, exclude_from_total=false)
 end
 
 
-macro gpu_tac(label, kernel_event)
-    return gpu_tac(label, kernel_event)
-end
-
-
-macro gpu_tac(label, kernel_event, axis)
-    return gpu_tac(label, kernel_event; axis)
-end
-
-
-macro gpu_tac(label, kernel_event, axis, exclude_from_total)
-    return gpu_tac(label, kernel_event; axis, exclude_from_total)
-end
+macro gpu_tac(label, kernel_event)                           return gpu_tac(label, kernel_event)                           end
+macro gpu_tac(label, kernel_event, axis)                     return gpu_tac(label, kernel_event; axis)                     end
+macro gpu_tac(label, kernel_event, axis, exclude_from_total) return gpu_tac(label, kernel_event; axis, exclude_from_total) end
 
 # 
 # Indexing macros
@@ -1573,7 +1601,7 @@ function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V};
         else
             @cpu_tic("updateEOS!")
             perfectGasEOS!(params, data, gamma)
-            @cpu_tac("updateEOS!", params.current_axis)
+            @cpu_tac("updateEOS!")
             return NoneEvent()
         end
     elseif test == :Bizarrium
@@ -1587,7 +1615,7 @@ function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V};
         else
             @cpu_tic("updateEOS!")
             BizarriumEOS!(params, data)
-            @cpu_tac("updateEOS!", params.current_axis)
+            @cpu_tac("updateEOS!")
             return NoneEvent()
         end
     end
@@ -2388,18 +2416,18 @@ end
 
 function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, 
         dta::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    @cpu_tic("dtCFL")
+    @cpu_tic("dtCFL", nothing)
     @perf_task "loop" "dtCFL" local_dt = dtCFL(params, data, dta; dependencies)
-    @cpu_tac("dtCFL")
+    @cpu_tac("dtCFL", nothing)
     
     if params.cst_dt || !params.use_MPI
         return local_dt
     end
 
     # Reduce all local_dts and broadcast the result to all processes
-    @cpu_tic("dt_Allreduce_MPI")
+    @cpu_tic("dt_Allreduce_MPI", nothing)
     @perf_task "comms" "MPI_dt" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
-    @cpu_tac("dt_Allreduce_MPI")
+    @cpu_tac("dt_Allreduce_MPI", nothing)
 
     return dt
 end
@@ -2456,7 +2484,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
         end
     end
 
-    @cpu_tac("cellUpdate!", params.current_axis)
+    @cpu_tac("cellUpdate!")
 
     return NoneEvent()
 end
@@ -2574,7 +2602,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         end
     end
 
-    @cpu_tac("euler_remap", params.current_axis)
+    @cpu_tac("euler_remap")
 
     return NoneEvent()
 end
@@ -2897,10 +2925,10 @@ function time_loop(params::ArmonParameters{T},  data::ArmonData{V},
                 @assert params_1.current_axis == axis
             end
             
-            @cpu_tic("comms+fluxes")
+            @cpu_tic("comms+fluxes", axis, true)
             event = boundaryConditions!(params_1, data_1, host_array, axis; dependencies=prev_event)
             event = numericalFluxes!(params_1, data_1, dt * dt_factor, u; dependencies=event)
-            @cpu_tac("comms+fluxes", axis)
+            @cpu_tac("comms+fluxes", axis, false, true)
 
             @perf_task "loop" "cellUpdate" event = cellUpdate!(params_1, data_1, dt * dt_factor, u, x; dependencies=event)
     
@@ -2984,9 +3012,10 @@ end
 function armon(params::ArmonParameters{T}) where T
     (; silent, is_root) = params
 
-    if params.measure_time
+    if params.measure_time || params.measure_hw_counters
         empty!(axis_time_contrib)
         empty!(total_time_contrib)
+        empty!(axis_hw_counters)
         global in_warmup_cycle = true
     end
 
@@ -3089,6 +3118,19 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     sorted_time_contrib = sort(collect(total_time_contrib))
+
+    if params.measure_hw_counters
+        sorted_counters = sort(collect(axis_hw_counters); lt=(a, b)->(a[1] < b[1]))
+        sorted_counters = map((p)->(string(first(p)) => last(p)), sorted_counters)
+        if params.silent < 2
+            print_hardware_counters_table(stdout, sorted_counters)
+        end
+        if !isempty(params.hw_counters_output)
+            open(params.hw_counters_output, "w") do file
+                print_hardware_counters_table(file, sorted_counters; raw_print=true)
+            end
+        end
+    end
 
     return dt, cycles, cells_per_sec, sorted_time_contrib
 end
