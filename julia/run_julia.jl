@@ -29,7 +29,7 @@ interleaving = false
 use_gpu = false
 threads_places = :cores
 threads_proc_bind = :close
-dimension = 1
+dimension = 2
 use_temp_vars_for_projection = false
 
 transpose_dims = []
@@ -47,7 +47,15 @@ proc_grid_ratios = nothing
 single_comm_per_axis_pass = false
 reorder_grid = true
 async_comms = false
-mpi_impl = :async  # :sync, :async, :transpose
+mpi_impl = :async  # :sync, :async, :transpose
+
+measure_time = true
+measure_hw_counters = false
+hw_counters_options = "(cache-misses,cache-references,L1-dcache-loads,L1-dcache-load-misses)," *
+    "(LLC-load-misses,LLC-loads,LLC-store-misses,LLC-stores)," *
+    "(dTLB-loads,dTLB-load-misses)," *
+    "(cpu-cycles,instructions,branch-instructions)"
+hw_counters_output = ""
 
 base_file_name = ""
 gnuplot_script = ""
@@ -222,6 +230,20 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--mpi-impl"
         global mpi_impl = Symbol(ARGS[i+1])
+        global i += 1
+
+    # Measurements params
+    elseif arg == "--measure-time"
+        global measure_time = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--measure-hw-counters"
+        global measure_hw_counters = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--hw-counters"
+        global hw_counters_options = ARGS[i+1]
+        global i += 1
+    elseif arg == "--hw-counters-output"
+        global hw_counters_output = ARGS[i+1]
         global i += 1
 
     # Additionnal params
@@ -417,7 +439,7 @@ if use_MPI
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
+                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, measure_time,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms)
         end
@@ -431,6 +453,7 @@ if use_MPI
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims, axis_splitting, 
                 maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
+                measure_time, measure_hw_counters, hw_counters_options, hw_counters_output,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms, use_temp_vars_for_projection)
         end
@@ -443,7 +466,7 @@ if use_MPI
             return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 euler_projection, transpose_dims=false, axis_splitting,
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
+                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, measure_time,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py,
                 single_comm_per_axis_pass, reorder_grid)
         end
@@ -490,7 +513,6 @@ else
         end
     end
 end
-
 
 
 if use_gpu && is_root
@@ -753,7 +775,7 @@ end
 function process_ratio_to_grid(n_proc, ratios)
     (rpx, rpy) = ratios
     r = rpx / rpy
-    # In theory the ratios have been pre-checked so that those convertions don't throw InexactError
+    # In theory the ratios have been pre-checked so that those convertions don't throw InexactError
     px = convert(Int, √(n_proc * r))
     py = convert(Int, √(n_proc / r))
     return px, py
