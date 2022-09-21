@@ -680,6 +680,7 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
  
     # Gather the throughput measurements on the root process
     merged_vals_cells_per_sec = MPI.Gather(vals_cells_per_sec, 0, MPI.COMM_WORLD)
+    total_cells_per_sec = MPI.Reduce(sum(vals_cells_per_sec) / repeats, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
 
     if is_root
         if cycles <= 5
@@ -687,9 +688,8 @@ function do_measure_MPI(data_file_name, comm_file_name, test, cells, transpose, 
             return time_contrib
         end
 
-        total_cells_per_sec = mean(merged_vals_cells_per_sec)
         if length(merged_vals_cells_per_sec) > 1
-            std_cells_per_sec = std(merged_vals_cells_per_sec; corrected=true, mean=total_cells_per_sec)
+            std_cells_per_sec = std(merged_vals_cells_per_sec; corrected=true) * sqrt(params.proc_size)
         else
             std_cells_per_sec = 0
         end
