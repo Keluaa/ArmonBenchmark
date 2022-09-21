@@ -1420,7 +1420,7 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    sorted_time_contrib = sort(collect(total_time_contrib))
+    sorted_time_contrib = sort(collect(time_contrib))
 
     return dt, cycles, cells_per_sec, sorted_time_contrib
 end
