@@ -107,15 +107,14 @@ function sum_stats!(stats_1::LinuxPerf.Stats, stats_2::LinuxPerf.Stats)
 end
 
 
-function print_hardware_counters_table(io::IO, 
+function print_hardware_counters_table(io::IO, hw_counters_options::String,
         counters::Vector{Pair{String, Dict{String, Dict{LinuxPerf.EventType, LinuxPerf.Counter}}}};
         raw_print=false)
     count_width = 12
 
-    # Get a sorted list of events to display
-    events = first(counters) |> last |> first |> last |> keys |> unique
-    sort!(events; lt=(a, b)->(a.category < b.category || a.event < b.event))
-    events_list = map((event) -> (LinuxPerf.EVENT_TO_NAME[event]), events)
+    # Get the order of the events to display
+    events_list = split(replace(opt, '(' => "", ')' => ""), ',') .|> strip
+    events = map((event_name) -> (LinuxPerf.NAME_TO_EVENT[event_name]), events_list)
 
     # Print header
     max_event_str_len = maximum(length.(events_list))

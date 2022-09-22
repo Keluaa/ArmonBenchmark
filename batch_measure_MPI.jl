@@ -35,7 +35,7 @@ mutable struct MeasureParams
     tests_list::Vector{String}
     transpose_dims::Vector{Bool}
     axis_splitting::Vector{String}
-    common_armon_params::Vector{String}
+    armon_params::Vector{Tuple{Vector{String}, String, String}}  # Tuple: options, legend, name suffix
 
     # Measurement params
     name::String
@@ -78,6 +78,7 @@ struct JuliaParams
     dimension::Int
     async_comms::Bool
     jl_mpi_impl::String
+    options::Tuple{Vector{String}, String, String}
 end
 
 
@@ -197,10 +198,12 @@ function parse_measure_params(file_line_parser)
     tests_list = ["Sod"]
     transpose_dims = [false]
     axis_splitting = ["Sequential"]
-    common_armon_params = [
+    armon_params = [[
         "--write-output", "0",
         "--verbose", "2"
-    ]
+    ]]
+    armon_params_legends = [""]
+    armon_params_names = [""]
     use_MPI = true
     name = nothing
     repeats = 1
@@ -286,7 +289,11 @@ function parse_measure_params(file_line_parser)
         elseif option == "splitting"
             axis_splitting = split(value, ',')
         elseif option == "armon"
-            common_armon_params = split(value, ' ')
+            armon_params = split.(split(value, ';') .|> strip, ' ')
+        elseif options == "legends"
+            armon_params_legends = split(value, ';') .|> strip
+        elseif option == "name_suffixes"
+            armon_params_names = split(value, ';') .|> strip
         elseif option == "use_MPI"
             use_MPI = parse(Bool, value)
         elseif option == "name"
@@ -365,6 +372,16 @@ function parse_measure_params(file_line_parser)
         error("Cannot make an MPI communications time graph without using MPI")
     end
 
+    if length(armon_params) != length(armon_params_legends)
+        error("Expected $(length(armon_params)) legends, got $(length(armon_params_legends))")
+    end
+
+    if length(armon_params) != length(armon_params_names)
+        error("Expected $(length(armon_params)) names, got $(length(armon_params_names))")
+    end
+
+    params_and_legends = collect(zip(armon_params, armon_params_legends, armon_params_names))
+
     mkpath(data_dir * name)
     gnuplot_script = plot_scripts_dir * gnuplot_script
     plot_file = plots_dir * plot_file
@@ -379,7 +396,7 @@ function parse_measure_params(file_line_parser)
         create_sub_job_chain, add_reference_job, one_job_per_cell,
         threads, use_simd, jl_proc_bind, jl_places, 
         dimension, async_comms, jl_mpi_impl, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
-        transpose_dims, axis_splitting, common_armon_params,
+        transpose_dims, axis_splitting, params_and_legends,
         name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose, use_max_threads, 
         cst_cells_per_process, limit_to_max_mem,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
@@ -486,7 +503,8 @@ function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
                 measure.use_simd,
                 measure.dimension,
                 measure.async_comms,
-                measure.jl_mpi_impl
+                measure.jl_mpi_impl,
+                measure.armon_params,
             )
         )
     end
@@ -614,7 +632,6 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
     end
 
     append!(armon_options, armon_base_options)
-    append!(armon_options, measure.common_armon_params)
     append!(armon_options, [
         "--dim", params.dimension,
         "--block-size", 256,
@@ -659,6 +676,9 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
         end
     end
 
+    additionnal_options, _, _ = params.options
+    append!(armon_options, additionnal_options)
+
     return armon_options
 end
 
@@ -687,7 +707,6 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
     end
 
     append!(armon_options, armon_base_options)
-    append!(armon_options, measure.common_armon_params)
     append!(armon_options, [
         "--dim", params.dimension,
         "--block-size", 256,
@@ -726,6 +745,9 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
             ], ';'))
         end
     end
+
+    additionnal_options, _ = params.options
+    append!(armon_options, additionnal_options)
 
     return armon_options
 end
@@ -825,6 +847,14 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
     if length(measure.jl_mpi_impl) > 1
         name *= "_$(params.jl_mpi_impl)"
         legend *= ", MPI $(params.jl_mpi_impl)"
+    end
+
+    if !isempty(params.options[2])
+        legend *= ", " * params.options[2]
+    end
+
+    if !isempty(params.options[3])
+        name *= "_" * params.options[3]
     end
     
     return name * "_", legend

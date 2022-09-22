@@ -2351,11 +2351,11 @@ function armon(params::ArmonParameters{T}) where T
         sorted_counters = sort(collect(axis_hw_counters); lt=(a, b)->(a[1] < b[1]))
         sorted_counters = map((p)->(string(first(p)) => last(p)), sorted_counters)
         if params.silent < 3
-            print_hardware_counters_table(stdout, sorted_counters)
+            print_hardware_counters_table(stdout, params.hw_counters_options, sorted_counters)
         end
         if !isempty(params.hw_counters_output)
             open(params.hw_counters_output, "w") do file
-                print_hardware_counters_table(file, sorted_counters; raw_print=true)
+                print_hardware_counters_table(file, params.hw_counters_options, sorted_counters; raw_print=true)
             end
         end
     end
