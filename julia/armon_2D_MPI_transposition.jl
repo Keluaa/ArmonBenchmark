@@ -2562,8 +2562,8 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         @assert params.nghost ≥ 1 "There must be at least 1 ghost cell so that the projection can be made without any race conditions"
 
         # Since 'row_range' excludes the ghost cells on the borders of the row, the projection never
-        # depends on values in another row, therefore all rows are independent and can be safely
-        # computed on seperate threads.
+        # depends on values in another row, therefore all rows are independent and can be safely
+        # computed on seperate threads.
         @threaded for j in domain_range
             # Make the first iteration to do effectively nothing on the values of the previous cell (a ghost cell)
             i_f = first(row_range) + (j - 1) - s

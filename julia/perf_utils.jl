@@ -113,7 +113,7 @@ function print_hardware_counters_table(io::IO, hw_counters_options::String,
     count_width = 12
 
     # Get the order of the events to display
-    events_list = split(replace(opt, '(' => "", ')' => ""), ',') .|> strip
+    events_list = split(replace(hw_counters_options, '(' => "", ')' => ""), ',') .|> strip
     events = map((event_name) -> (LinuxPerf.NAME_TO_EVENT[event_name]), events_list)
 
     # Print header

@@ -290,7 +290,7 @@ function parse_measure_params(file_line_parser)
             axis_splitting = split(value, ',')
         elseif option == "armon"
             armon_params = split.(split(value, ';') .|> strip, ' ')
-        elseif options == "legends"
+        elseif option == "legends"
             armon_params_legends = split(value, ';') .|> strip
         elseif option == "name_suffixes"
             armon_params_names = split(value, ';') .|> strip
