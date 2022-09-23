@@ -2521,7 +2521,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         vmatᵀ = dataᵀ.vmat
         Ematᵀ = dataᵀ.Emat
 
-        @simd_threaded_iter domain_range for i in row_range
+        #= @simd_threaded_iter domain_range for i in row_range
             dX = dx + dt * (ustar[i+1] - ustar[i])
             L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
             L₃ = -min(0, ustar[i+1]) * dt * domain_mask[i]
@@ -2534,7 +2534,66 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
             vmatᵀ[iᵀ] = (L₁ * rho[i-1] * vmat[i-1] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+1] * vmat[i+1]) / dX / tmp_rho_
             Ematᵀ[iᵀ] = (L₁ * rho[i-1] * Emat[i-1] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+1] * Emat[i+1]) / dX / tmp_rho_
             rhoᵀ[iᵀ]  = tmp_rho_
+        end =#
+
+        tmp_tables = Vector{Vector{Float64}}(undef, Threads.nthreads())
+        table_cells = 512
+        table_size = 4 * table_cells
+        
+        @threaded for j in domain_range
+            if !isdefined(tmp_tables, Threads.threadid())
+                tmp_tables[Threads.threadid()] = zeros(Float64, table_size)  # Force first-touch by zero-ing the values
+            end
+            tmp_tbl = tmp_tables[Threads.threadid()]
+            tmp_umatᵀ = view(tmp_tbl,               1:  table_cells)
+            tmp_vmatᵀ = view(tmp_tbl,   table_cells+1:2*table_cells)
+            tmp_Ematᵀ = view(tmp_tbl, 2*table_cells+1:3*table_cells)
+            tmp_rhoᵀ  = view(tmp_tbl, 3*table_cells+1:4*table_cells)
+
+            current_row_range = row_range .+ (j - 1)
+
+            partial_row_range = first(current_row_range):step(current_row_range):min(first(current_row_range)+table_cells, last(current_row_range))
+            while !isempty(partial_row_range)
+                iᵀ_base = @iᵀ(first(partial_row_range))                
+                i_base = first(partial_row_range) - 1
+                @simd_loop for idx in 1:length(partial_row_range)
+                    i = i_base + idx
+                    dX = dx + dt * (ustar[i+1] - ustar[i])
+                    L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
+                    L₃ = -min(0, ustar[i+1]) * dt * domain_mask[i]
+                    L₂ = dX - L₁ - L₃
+                    
+                    tmp_rho_       = (L₁ * rho[i-1]             + L₂ * rho[i]           + L₃ * rho[i+1]            ) / dX
+                    tmp_umatᵀ[idx] = (L₁ * rho[i-1] * umat[i-1] + L₂ * rho[i] * umat[i] + L₃ * rho[i+1] * umat[i+1]) / dX / tmp_rho_
+                    tmp_vmatᵀ[idx] = (L₁ * rho[i-1] * vmat[i-1] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+1] * vmat[i+1]) / dX / tmp_rho_
+                    tmp_Ematᵀ[idx] = (L₁ * rho[i-1] * Emat[i-1] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+1] * Emat[i+1]) / dX / tmp_rho_
+                    tmp_rhoᵀ[idx]  = tmp_rho_
+                end
+
+                # @simd_loop for idx in 1:length(partial_row_range)
+                #     umatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_umatᵀ[idx]
+                #     vmatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_vmatᵀ[idx]
+                #     Ematᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_Ematᵀ[idx]
+                #      rhoᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_rhoᵀ[idx]
+                # end
+
+                @simd_loop for idx in 1:length(partial_row_range)
+                    umatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_umatᵀ[idx]
+                end
+                @simd_loop for idx in 1:length(partial_row_range)
+                    vmatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_vmatᵀ[idx]
+                end
+                @simd_loop for idx in 1:length(partial_row_range)
+                    Ematᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_Ematᵀ[idx]
+                end
+                @simd_loop for idx in 1:length(partial_row_range)
+                    rhoᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_rhoᵀ[idx]
+                end
+
+                partial_row_range = last(partial_row_range)+1:step(current_row_range):min(last(partial_row_range)+table_cells, last(current_row_range))
+            end
         end
+
     elseif params.use_temp_vars_for_projection
         # @simd_threaded_loop for i in ideb:ifin
         @simd_threaded_iter domain_range for i in row_range
