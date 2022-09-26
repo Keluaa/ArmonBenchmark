@@ -1546,6 +1546,22 @@ function boundaryConditions_bottom!(params::ArmonParameters{T}, data::ArmonData{
 end
 
 
+function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, side::Symbol;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    if side === :left
+        boundaryConditions_left!(params, data; dependencies)
+    elseif side === :right
+        boundaryConditions_right!(params, data; dependencies)
+    elseif side === :top
+        boundaryConditions_top!(params, data; dependencies)
+    elseif side === :bottom
+        boundaryConditions_bottom!(params, data; dependencies)
+    else
+        error("Wrong side name: " * side)
+    end
+end
+
+
 function read_border_array_X!(params::ArmonParameters{T}, data::ArmonData{V}, 
         value_array::W, pos::Int; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, row_length, nx) = params
@@ -1676,6 +1692,43 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
 end
 
 
+function exchange_border!(params::ArmonParameters{T}, data::ArmonData{V}, 
+        comm_array::W, side::Symbol, action::Symbol;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+    (; nx, ny, nghost) = params
+    @indexing_vars(params)
+
+    if side === :left
+        if action === :read
+            return read_border_array_Y!(params, data, comm_array, @i(1, 1); dependencies)
+        else
+            return write_border_array_Y!(params, data, comm_array, @i(1-nghost, 1); dependencies)
+        end
+    elseif side === :right
+        if action === :read
+            return read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1); dependencies)
+        else
+            return write_border_array_Y!(params, data, comm_array, @i(nx+1, 1); dependencies)
+        end
+    elseif side === :top
+        if action === :read
+            return read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1); dependencies)
+        else
+            return write_border_array_X!(params, data, comm_array, @i(1, ny+1); dependencies)
+        end
+    elseif side === :bottom
+        if action === :read
+            return read_border_array_X!(params, data, comm_array, @i(1, 1); dependencies)
+        else
+            return write_border_array_X!(params, data, comm_array, @i(1, 1-nghost); dependencies)
+        end
+    else
+        error("Wrong side name: " * string(side))
+    end
+    error("Wrong action name: " * string(action))
+end
+
+
 function exchange_with_neighbour(params::ArmonParameters{T}, array::V, neighbour_rank::Int,
         cart_comm::MPI.Comm) where {T, V <: AbstractArray{T}}
     @time_expr "boundaryConditions!_MPI" MPI.Sendrecv!(array, neighbour_rank, 0, array, neighbour_rank, 0, cart_comm)
@@ -1684,9 +1737,9 @@ end
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
         host_array::W, axis::Axis; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
-    (; nx, ny, nghost, neighbours, cart_comm, cart_coords) = params
+    (; neighbours, cart_comm, cart_coords) = params
     (; tmp_comm_array) = data
-    @indexing_vars(params)
+
     # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: https://www.open-mpi.org/faq/?category=runcuda
     # TODO : use CUDA/ROCM-aware MPI
     # TODO : use 4 views for each side for each variable ? (2 will be contigous, 2 won't) <- pre-calculate them!
@@ -1705,6 +1758,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
     # odd  x/y coordinate in the cartesian process grid:
     #   - send+receive right or bottom
     #   - send+receive left  or top
+
     (cx, cy) = cart_coords
     if axis == X_axis
         if cx % 2 == 0
@@ -1723,46 +1777,13 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V},
     prev_event = dependencies
 
     for side in order
-        if side == :left
-            if neighbours.left == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_left!(params, data; dependencies=prev_event)
-            else
-                read_event = read_border_array_Y!(params, data, comm_array, @i(1, 1);
-                    dependencies=prev_event)
-                Event(exchange_with_neighbour, params, comm_array, neighbours.left, cart_comm;
-                    dependencies=read_event) |> wait
-                prev_event = write_border_array_Y!(params, data, comm_array, @i(1-nghost, 1))
-            end
-        elseif side == :right
-            if neighbours.right == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_right!(params, data; dependencies=prev_event)
-            else
-                read_event = read_border_array_Y!(params, data, comm_array, @i(nx-nghost+1, 1);
-                    dependencies=prev_event)
-                Event(exchange_with_neighbour, params, comm_array, neighbours.right, cart_comm;
-                    dependencies=read_event) |> wait
-                prev_event = write_border_array_Y!(params, data, comm_array, @i(nx+1, 1))
-            end
-        elseif side == :top
-            if neighbours.top == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_top!(params, data; dependencies=prev_event)
-            else
-                read_event = read_border_array_X!(params, data, comm_array, @i(1, ny-nghost+1);
-                    dependencies=prev_event)
-                Event(exchange_with_neighbour, params, comm_array, neighbours.top, cart_comm;
-                    dependencies=read_event) |> wait
-                prev_event = write_border_array_X!(params, data, comm_array, @i(1, ny+1))
-            end
-        else # side == :bottom
-            if neighbours.bottom == MPI.MPI_PROC_NULL
-                prev_event = boundaryConditions_bottom!(params, data; dependencies=prev_event)
-            else
-                read_event = read_border_array_X!(params, data, comm_array, @i(1, 1);
-                    dependencies=prev_event)
-                Event(exchange_with_neighbour, params, comm_array, neighbours.bottom, cart_comm;
-                    dependencies=read_event) |> wait
-                prev_event = write_border_array_X!(params, data, comm_array, @i(1, 1-nghost))
-            end
+        neighbour_rank = getproperty(neighbours, side)
+        if neighbour_rank == MPI.MPI_PROC_NULL
+            prev_event = boundaryConditions!(params, data, side; dependencies=prev_event)
+        else
+            read_event = exchange_border!(params, data, comm_array, side, :read; dependencies=prev_event)
+            Event(exchange_with_neighbour, params, comm_array, neighbour_rank, cart_comm; dependencies=read_event) |> wait
+            prev_event = exchange_border!(params, data, comm_array, side, :write; dependencies=prev_event)
         end
     end
 
