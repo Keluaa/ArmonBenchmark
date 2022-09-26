@@ -2521,6 +2521,8 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         vmatᵀ = dataᵀ.vmat
         Ematᵀ = dataᵀ.Emat
 
+        # TODO : index bug on the borders for both implementations
+
         #= @simd_threaded_iter domain_range for i in row_range
             dX = dx + dt * (ustar[i+1] - ustar[i])
             L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
@@ -2554,7 +2556,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
             partial_row_range = first(current_row_range):min(first(current_row_range)+table_cells-1, last(current_row_range))
             while !isempty(partial_row_range)
-                iᵀ_base = @iᵀ(first(partial_row_range))                
+                iᵀ_base = @iᵀ(first(partial_row_range))
                 i_base = first(partial_row_range) - 1
                 @simd_loop for idx in 1:length(partial_row_range)
                     i = i_base + idx
