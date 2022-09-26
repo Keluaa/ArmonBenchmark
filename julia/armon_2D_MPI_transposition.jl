@@ -2211,7 +2211,7 @@ function write_border_array_Y!(params::ArmonParameters{T}, data::ArmonData{V},
             end
         end
     else
-        # The data is row major
+        # The data is row major
         @perf_task "comms" "write_Y" for i_g in 0:nghost-1
             ghost_col = i_g * ny * 7
             @simd_loop for i in 0:ny-1
@@ -2445,7 +2445,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
     (; dx, s, domain_range, row_range) = params
 
     if params.single_comm_per_axis_pass
-        # Add one cell on each side
+        # Add one cell on each side
         row_range = (first(row_range)-s):step(row_range):(last(row_range)+s)
     end
 
@@ -2542,7 +2542,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         
         @threaded for j in domain_range
             if !isdefined(tmp_tables, Threads.threadid())
-                tmp_tables[Threads.threadid()] = zeros(Float64, table_size)  # Force first-touch by zero-ing the values
+                tmp_tables[Threads.threadid()] = zeros(Float64, table_size)  # Force first-touch by zero-ing the values
             end
             tmp_tbl = tmp_tables[Threads.threadid()]
             tmp_umatᵀ = view(tmp_tbl,               1:  table_cells)
@@ -2552,7 +2552,7 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
 
             current_row_range = row_range .+ (j - 1)
 
-            partial_row_range = first(current_row_range):step(current_row_range):min(first(current_row_range)+table_cells, last(current_row_range))
+            partial_row_range = first(current_row_range):min(first(current_row_range)+table_cells-1, last(current_row_range))
             while !isempty(partial_row_range)
                 iᵀ_base = @iᵀ(first(partial_row_range))                
                 i_base = first(partial_row_range) - 1
@@ -2570,13 +2570,14 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                     tmp_rhoᵀ[idx]  = tmp_rho_
                 end
 
-                # @simd_loop for idx in 1:length(partial_row_range)
-                #     umatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_umatᵀ[idx]
-                #     vmatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_vmatᵀ[idx]
-                #     Ematᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_Ematᵀ[idx]
-                #      rhoᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_rhoᵀ[idx]
-                # end
+                @simd_loop for idx in 1:length(partial_row_range)
+                    umatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_umatᵀ[idx]
+                    vmatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_vmatᵀ[idx]
+                    Ematᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_Ematᵀ[idx]
+                     rhoᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_rhoᵀ[idx]
+                end
 
+                #=
                 @simd_loop for idx in 1:length(partial_row_range)
                     umatᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_umatᵀ[idx]
                 end
@@ -2589,8 +2590,9 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
                 @simd_loop for idx in 1:length(partial_row_range)
                     rhoᵀ[(idx - 1) * col_length + iᵀ_base] = tmp_rhoᵀ[idx]
                 end
+                =#
 
-                partial_row_range = last(partial_row_range)+1:step(current_row_range):min(last(partial_row_range)+table_cells, last(current_row_range))
+                partial_row_range = last(partial_row_range)+1:min(last(partial_row_range)+table_cells, last(current_row_range))
             end
         end
 

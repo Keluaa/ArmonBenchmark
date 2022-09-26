@@ -291,7 +291,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - maxcycle:   ", p.maxcycle)
     println("")
     println(" - domain:     ", p.nx, "x", p.ny, " (", p.nghost, " ghosts)")
-    println(" - nbcell:     ", p.nx * p.ny, " (", p.nbcell, " total)")
+    println(" - nbcell:     ", @sprintf("%g", p.nx * p.ny), " (", p.nbcell, " total)")
     println(" - global:     ", p.global_grid[1], "x", p.global_grid[2])
     println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2], " ($(p.reorder_grid ? "" : "not ")reordered)")
     println(" - coords:     ", p.cart_coords[1], "x", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
@@ -2673,7 +2673,7 @@ function armon(params::ArmonParameters{T}) where T
                 @printf(" - %-25s %10.5f ms (%5.2f%%) (%5.2f%%)\n", 
                     step_label, step_time / 1e6, step_time / axis_total_time * 100, step_time / total_time * 100)
             end
-            @printf(" => %-24s %10.5f ms          (%5.2f%%)\n", "Axis total time:", axis_total_time / 1e6, axis_total_time / total_time * 100)
+            @printf(" => %-24s %10.5f ms           (%5.2f%%)\n", "Axis total time:", axis_total_time / 1e6, axis_total_time / total_time * 100)
         end
 
         # Print the total distribution of time

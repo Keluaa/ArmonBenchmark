@@ -1869,11 +1869,16 @@ function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
     local_dt::T = dtCFL(params, data, dta; dependencies)
 
     if cst_dt
+        wait(dependencies)
         return local_dt
     end
 
     # Reduce all local_dts and broadcast the result to all processes
-    @time_pos_common "dt_Allreduce_MPI" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
+    if params.use_MPI
+        @time_pos_common "dt_Allreduce_MPI" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
+    else
+        dt = local_dt
+    end
     return dt
 end
 
@@ -2233,6 +2238,11 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             write_result(params, data, joinpath("anim", params.output_file) * "_" *
                 @sprintf("%03d", (cycle - 1) ÷ animation_step))
         end
+    end
+
+    if params.use_gpu
+        # The last step may not be finished
+        wait(prev_event)
     end
 
     t2 = time_ns()

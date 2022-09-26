@@ -572,6 +572,40 @@ end
 get_cpu_max_mem() = Int(Sys.total_memory())
 
 
+function get_duration_string(duration_sec::Float64)
+    hours = floor(duration_sec / 3600)
+    duration_sec -= hours * 3600
+
+    minutes = floor(duration_sec / 60)
+    duration_sec -= minutes * 60
+
+    seconds = floor(duration_sec)
+    duration_sec -= seconds
+
+    ms = duration_sec
+
+    str = ""
+    print_next = false
+    for (duration, unit) in ((hours, 'h'), (minutes, 'm'), (seconds, 's'))
+        if print_next
+            str *= @sprintf("%02d", duration) * unit
+        elseif duration > 0
+            str *= @sprintf("%2d", duration) * unit
+            print_next = true
+        else
+            str *= "   "
+        end
+    end
+    
+    if hours == 0 && minutes == 0
+        str *= @sprintf("%03dms", ms)
+    end
+
+    return str
+end
+
+
+
 function run_armon(params::ArmonParameters, with_profiling::Bool)
     vals_cells_per_sec = Vector{Float64}(undef, repeats)
     total_time_contrib = nothing
@@ -627,12 +661,16 @@ function do_measure(data_file_name, hw_c_file_name, test, cells, transpose, spli
         end
     end
 
+    time_start = time_ns()
     cycles, vals_cells_per_sec, time_contrib = run_armon(params, true)
+    time_end = time_ns()
+
+    duration = (time_end - time_start) / 1.0e9
 
     mean_cells_per_sec = mean(vals_cells_per_sec)
     std_cells_per_sec = std(vals_cells_per_sec; corrected=true, mean=mean_cells_per_sec)
 
-    @printf("%6.3f±%3.1f Giga cells/sec\n", cells_per_sec, std_cells_per_sec)
+    @printf("%8.3f ± %3.1f Giga cells/sec %s\n", cells_per_sec, std_cells_per_sec, get_duration_string(duration))
 
     # Append the result to the data file
     if !isempty(data_file_name)
@@ -693,6 +731,8 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
 
+    duration = (time_end - time_start) / 1.0e9
+
     # Merge the cells throughput and the time distribution of all processes in one reduction.
     # Since 'time_contrib' is an array of pairs, it is not a bits type. We first convert the values
     # to an array of floats, and then rebuild the array of pairs using the one of the root process.
@@ -715,7 +755,7 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
             std_cells_per_sec = 0
         end
 
-        @printf("%6.3f±%4.2f Giga cells/sec", total_cells_per_sec, std_cells_per_sec)
+        @printf("%8.3f ± %4.2f Giga cells/sec", total_cells_per_sec, std_cells_per_sec)
 
         # Append the result to the data file
         if !isempty(data_file_name)
@@ -760,9 +800,9 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
                 end
             end
 
-            # TODO : add the total time (hh:mm:ss format)
-            @printf(", %5.1f%% of MPI time\n", total_MPI_time / total_time * 100)
+            @printf(", %5.1f%% of MPI time %s", total_MPI_time / total_time * 100, get_duration_string(duration))
         else
+            @printf(" %s", get_duration_string(duration))
             print("\n")
         end
     end
