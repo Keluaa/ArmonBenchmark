@@ -531,7 +531,7 @@ end
 #
 
 in_warmup_cycle = false
-function is_warming_up() return in_warmup_cycle end
+is_warming_up() = in_warmup_cycle
 
 
 axis_time_contrib = Dict{Axis, Dict{String, Float64}}()
@@ -542,7 +542,7 @@ axis_hw_counters = Dict{Axis, Dict{String, Dict{LinuxPerf.EventType, LinuxPerf.C
 
 function add_common_time_contrib(label, time)
     if !haskey(total_time_contrib, label)
-        global total_time_contrib[label] = 0.
+        global total_time_contrib[label] = time
     else
         global total_time_contrib[label] += time
     end
@@ -555,7 +555,7 @@ function add_axis_time_contrib(axis, label, time)
     end
 
     if !haskey(axis_time_contrib[axis], label)
-        global axis_time_contrib[axis][label] = 0.
+        global axis_time_contrib[axis][label] = time
     else
         global axis_time_contrib[axis][label] += time
     end
@@ -1204,14 +1204,13 @@ end
 
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-    dt::T, last_i::Int, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+        dt::T, last_i::Int, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            event = acoustic!(params, data, last_i, u; dependencies)
+            return acoustic!(params, data, last_i, u; dependencies)
         else
-            event = acoustic_GAD!(params, data, dt, last_i, u; dependencies)
+            return acoustic_GAD!(params, data, dt, last_i, u; dependencies)
         end
-        return event
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
     end
