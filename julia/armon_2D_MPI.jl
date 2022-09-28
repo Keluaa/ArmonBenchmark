@@ -2318,6 +2318,13 @@ function armon(params::ArmonParameters{T}) where T
         write_result(params, data, params.output_file)
     end
 
+    if !haskey(total_time_contrib, "boundary_conditions!")
+        # Sub-domains which aren't on one of the borders of the global domain will never use any of 
+        # the 'boundary_conditions!' functions. This timing entry must be added for consistency and 
+        # to make the reduction over all sub-domains in 'run_julia.jl' work.
+        total_time_contrib["boundary_conditions!"] = 0.
+    end
+
     if is_root && params.measure_time && silent < 3 && !isempty(axis_time_contrib)
         axis_time = Dict{Axis, Float64}()
 
