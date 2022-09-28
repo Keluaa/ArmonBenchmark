@@ -582,7 +582,7 @@ function get_duration_string(duration_sec::Float64)
     seconds = floor(duration_sec)
     duration_sec -= seconds
 
-    ms = duration_sec
+    ms = floor(duration_sec * 1000)
 
     str = ""
     print_next = false
@@ -733,6 +733,8 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
 
     duration = (time_end - time_start) / 1.0e9
 
+    sleep(0.2)
+
     # Merge the cells throughput and the time distribution of all processes in one reduction.
     # Since 'time_contrib' is an array of pairs, it is not a bits type. We first convert the values
     # to an array of floats, and then rebuild the array of pairs using the one of the root process.
@@ -800,10 +802,9 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
                 end
             end
 
-            @printf(", %5.1f%% of MPI time %s", total_MPI_time / total_time * 100, get_duration_string(duration))
+            @printf(", %5.1f%% of MPI time %s\n", total_MPI_time / total_time * 100, get_duration_string(duration))
         else
-            @printf(" %s", get_duration_string(duration))
-            print("\n")
+            @printf(" %s\n", get_duration_string(duration))
         end
     end
 
