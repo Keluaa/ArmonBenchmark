@@ -779,16 +779,13 @@ end
 #
 
 @kernel function gpu_acoustic_kernel!(
-        main_range_start, main_range_step, inner_range_start, inner_range_step, inner_range_length, s,
+        main_range_start, main_range_step, inner_range_start, inner_range_length, s,
         ustar, pstar, @Const(rho), @Const(u), @Const(pmat), @Const(cmat))
-    # ix, iy = @index(Global, NTuple)
     idx = @index(Global)
     ix, iy = divrem(idx - 1, inner_range_length)
-    ix += 1
-    iy += 1
+    j = main_range_start  + ix * main_range_step - 1
+    i = inner_range_start + iy + j
 
-    j = main_range_start  + main_range_step  * (ix - 1) - 1
-    i = inner_range_start + inner_range_step * (iy - 1) + j
     rc_l = rho[i-s] * cmat[i-s]
     rc_r = rho[i]   * cmat[i]
     ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -797,18 +794,13 @@ end
 
 
 @kernel function gpu_acoustic_GAD_minmod_kernel!(
-        main_range_start, main_range_step, inner_range_start, inner_range_step, inner_range_length, s,
+        main_range_start, main_range_step, inner_range_start, inner_range_length, s,
         ustar, pstar, @Const(rho), @Const(u), @Const(pmat), @Const(cmat), 
         @Const(ustar_1), @Const(pstar_1), dt, dx)
-    # ix, iy = @index(Global, NTuple)
-    # ix, iy = @index(Global, NTuple)
     idx = @index(Global)
     ix, iy = divrem(idx - 1, inner_range_length)
-    ix += 1
-    iy += 1
-    
-    j = main_range_start  + main_range_step  * (ix - 1) - 1
-    i = inner_range_start + inner_range_step * (iy - 1) + j
+    j = main_range_start  + ix * main_range_step - 1
+    i = inner_range_start + iy + j
 
     r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
     r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
@@ -1137,10 +1129,9 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     step_label = is_outer ? "acoustic_outer!" : "acoustic_inner!"
 
     if params.use_gpu
-        event = gpu_acoustic!(first(main_range), step(main_range), 
-                              first(inner_range), step(inner_range),
-                              s, ustar, pstar, rho, u, pmat, cmat;
-                              ndrange=(length(main_range), length(inner_range)), dependencies)
+        event = gpu_acoustic!(first(main_range), step(main_range), first(inner_range), length(inner_range), s,
+                              ustar, pstar, rho, u, pmat, cmat;
+                              ndrange=length(main_range) * length(inner_range), dependencies)
         return @time_event step_label event
     end
 
@@ -1177,15 +1168,16 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        first_kernel = @time_event_a step_label_1st gpu_acoustic!(first(main_range_1st_order), step(main_range_1st_order), 
-            first(inner_range_1st_order), step(inner_range_1st_order), length(inner_range_1st_order),
-            s, ustar_1, pstar_1, rho, u, pmat, cmat;
+        first_kernel = @time_event_a step_label_1st gpu_acoustic!(
+            first(main_range_1st_order), step(main_range_1st_order), 
+            first(inner_range_1st_order), length(inner_range_1st_order), s,
+            ustar_1, pstar_1, rho, u, pmat, cmat;
             ndrange=length(main_range_1st_order) * length(inner_range_1st_order), dependencies)
 
         second_kernel = @time_event_a step_label_2nd gpu_acoustic_GAD_minmod!(
             first(main_range), step(main_range), 
-            first(inner_range), step(inner_range), length(inner_range),
-            s, ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
+            first(inner_range), length(inner_range), s,
+            ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
             ndrange=length(main_range) * length(inner_range), dependencies=first_kernel)
 
         return second_kernel
