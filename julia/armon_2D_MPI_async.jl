@@ -779,9 +779,14 @@ end
 #
 
 @kernel function gpu_acoustic_kernel!(
-        main_range_start, main_range_step, inner_range_start, inner_range_step, s,
+        main_range_start, main_range_step, inner_range_start, inner_range_step, inner_range_length, s,
         ustar, pstar, @Const(rho), @Const(u), @Const(pmat), @Const(cmat))
-    ix, iy = @index(Global, NTuple)
+    # ix, iy = @index(Global, NTuple)
+    idx = @index(Global)
+    ix, iy = divrem(idx - 1, inner_range_length)
+    ix += 1
+    iy += 1
+
     j = main_range_start  + main_range_step  * (ix - 1) - 1
     i = inner_range_start + inner_range_step * (iy - 1) + j
     rc_l = rho[i-s] * cmat[i-s]
@@ -792,10 +797,16 @@ end
 
 
 @kernel function gpu_acoustic_GAD_minmod_kernel!(
-        main_range_start, main_range_step, inner_range_start, inner_range_step, s,
+        main_range_start, main_range_step, inner_range_start, inner_range_step, inner_range_length, s,
         ustar, pstar, @Const(rho), @Const(u), @Const(pmat), @Const(cmat), 
         @Const(ustar_1), @Const(pstar_1), dt, dx)
-    ix, iy = @index(Global, NTuple)
+    # ix, iy = @index(Global, NTuple)
+    # ix, iy = @index(Global, NTuple)
+    idx = @index(Global)
+    ix, iy = divrem(idx - 1, inner_range_length)
+    ix += 1
+    iy += 1
+    
     j = main_range_start  + main_range_step  * (ix - 1) - 1
     i = inner_range_start + inner_range_step * (iy - 1) + j
 
@@ -1153,29 +1164,35 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     step_label_1st = is_outer ? "acoustic_outer!"     : "acoustic_inner!"
     step_label_2nd = is_outer ? "acoustic_GAD_outer!" : "acoustic_GAD_inner!"
 
-    inner_range_1st_order = first(inner_range)-s:step(inner_range):last(inner_range)+s
-
+    if params.current_axis == X_axis
+        main_range_1st_order = main_range
+        inner_range_1st_order = first(inner_range)-s:step(inner_range):last(inner_range)+s
+    else
+        main_range_1st_order = first(main_range)-s:step(main_range):last(main_range)+s
+        inner_range_1st_order = inner_range
+    end
+    
     if params.use_gpu
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        first_kernel = @time_event_a step_label_1st gpu_acoustic!(first(main_range), step(main_range), 
-            first(inner_range_1st_order), step(inner_range_1st_order),
+        first_kernel = @time_event_a step_label_1st gpu_acoustic!(first(main_range_1st_order), step(main_range_1st_order), 
+            first(inner_range_1st_order), step(inner_range_1st_order), length(inner_range_1st_order),
             s, ustar_1, pstar_1, rho, u, pmat, cmat;
-            ndrange=(length(main_range), length(inner_range_1st_order)), dependencies)
+            ndrange=length(main_range_1st_order) * length(inner_range_1st_order), dependencies)
 
         second_kernel = @time_event_a step_label_2nd gpu_acoustic_GAD_minmod!(
             first(main_range), step(main_range), 
-            first(inner_range), step(inner_range),
+            first(inner_range), step(inner_range), length(inner_range),
             s, ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
-            ndrange=(length(main_range), length(inner_range)), dependencies=first_kernel)
+            ndrange=length(main_range) * length(inner_range), dependencies=first_kernel)
 
         return second_kernel
     end
 
     # First order
-    @time_expr_a step_label_1st @simd_threaded_iter main_range for i in inner_range_1st_order
+    @time_expr_a step_label_1st @simd_threaded_iter main_range_1st_order for i in inner_range_1st_order
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
         ustar_1[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
@@ -1278,9 +1295,9 @@ function numericalFluxes_inner!(params::ArmonParameters{T}, data::ArmonData{V}, 
         main_range  = @i(1,1-o):row_length:@i(1,ny+o)
         inner_range = nghost+1:nx+1-nghost
     else
-        # Compute the fluxes column by column, excluding 'nghost' rows at the top and bottom
-        main_range  = @i(1-o,1):@i(nx+o,1)
-        inner_range = (row_length*nghost+1):row_length:((ny+1-nghost)*row_length)
+        # Compute the fluxes row by row, excluding 'nghost' rows at the top and bottom
+        main_range  = @i(1,1+nghost):row_length:@i(1,ny+1-nghost)
+        inner_range = 1-o:nx+o
     end
 
     main_range = StepRange{Int, Int}(main_range)
@@ -1304,9 +1321,9 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
         main_range  = @i(1-o,1-o):row_length:@i(1-o,ny+o)
         inner_range = 1:nghost+o
     else
-        # Compute the fluxes column by column, for the first 'nghost+o' rows at the bottom
-        main_range  = @i(1-o,1-o):@i(nx+o,1-o)
-        inner_range = 1:row_length:(nghost+o)*row_length
+        # Compute the fluxes row by row, for the first 'nghost+o' rows at the bottom
+        main_range  = @i(1,1-o):row_length:@i(1,nghost)
+        inner_range = 1-o:nx+o
     end
     
     main_range = StepRange{Int, Int}(main_range)
@@ -1319,9 +1336,9 @@ function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V},
         main_range  = @i(1,1-o):row_length:@i(1+o,ny+o)
         inner_range = nx-nghost+1:nx+o
     else
-        # Compute the fluxes column by column, for the last 'nghost+o' rows at the top
-        main_range  = @i(1-o,1-o):@i(nx+o,1-o)
-        inner_range = (ny-nghost+o+1)*row_length:row_length:(ny+2*o)*row_length
+        # Compute the fluxes row by row, for the last 'nghost+o' rows at the top
+        main_range  = @i(1-o,ny-nghost+1+o):row_length:@i(1-o,ny+2*o)
+        inner_range = 1-o:nx+o
     end
 
     main_range = StepRange{Int, Int}(main_range)

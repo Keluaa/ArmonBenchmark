@@ -25,7 +25,7 @@ function spread_cells(max_cells;
         if device == :CPU
             max_mem = 250e9
         elseif device == :CUDA
-            max_mem = 42e9
+            max_mem = 40e9
         elseif device == :ROCM
             max_mem = 32e9
         else

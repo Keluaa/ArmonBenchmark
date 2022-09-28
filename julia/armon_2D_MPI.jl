@@ -2120,7 +2120,7 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     # Wait for the root command to complete
-    MPI.Barrier(cart_comm)
+    params.use_MPI && MPI.Barrier(cart_comm)
 
     (cx, cy) = cart_coords
     f = open("$(output_file_path)_$(cx)x$(cy)", "w")

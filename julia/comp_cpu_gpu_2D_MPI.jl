@@ -13,7 +13,14 @@ else
     function reset_nan_flag() end
 end
 
-include("armon_2D_MPI.jl")
+const async_impl = true
+if async_impl
+    include("armon_2D_MPI_async.jl")
+    wait_f(event) = wait(event)
+else
+    include("armon_2D_MPI.jl")
+    wait_f(event) = nothing
+end
 
 
 function all_data_from_gpu(dg_tmp::Armon.ArmonData{V}, dg::Armon.ArmonData{W}) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
@@ -49,7 +56,7 @@ function diff_data(label::String, params::Armon.ArmonParameters{T},
     messages = []
 
     for name in fieldnames(Armon.ArmonData{V})
-        name in (:gmat, :tmp_comm_array) && continue
+        name in (:gmat, :tmp_comm_array, :tmp_urho, :tmp_Erho, :tmp_vrho, :tmp_rho) && continue
 
         cpu_val = getfield(dd, name)
         gpu_val = getfield(dg, name)
@@ -217,30 +224,49 @@ function cpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
 
             is_root && println("Current axis: $(params.current_axis)")
 
-            Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+            @static if async_impl
+                Armon.boundaryConditions!(params, data, host_array, axis) |> wait_f
+            else
+                Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+            end
             recv_data_from_gpu(g_data, gpu_twin_rank)
             diff_data_and_notify("boundaryConditions_axis", params, data, g_data, gpu_twin_rank) && return cycle
 
-            Armon.numericalFluxes!(params, data, dt * dt_factor, last_i, u)
-            recv_data_from_gpu(g_data, gpu_twin_rank)
-            diff_data_and_notify("fluxes", params, data, g_data, gpu_twin_rank) && return cycle
+            @static if async_impl
+                Armon.numericalFluxes_inner!(params, data, dt * dt_factor, u) |> wait_f
+                recv_data_from_gpu(g_data, gpu_twin_rank)
+                diff_data_and_notify("fluxes_inner", params, data, g_data, gpu_twin_rank) && return cycle
 
-            Armon.cellUpdate!(params, data, dt * dt_factor, u, x_)
+                Armon.numericalFluxes_outer!(params, data, dt * dt_factor, u) |> wait_f
+                recv_data_from_gpu(g_data, gpu_twin_rank)
+                diff_data_and_notify("fluxes_outer", params, data, g_data, gpu_twin_rank) && return cycle
+            else
+                Armon.numericalFluxes!(params, data, dt * dt_factor, last_i, u)
+                recv_data_from_gpu(g_data, gpu_twin_rank)
+                diff_data_and_notify("fluxes", params, data, g_data, gpu_twin_rank) && return cycle
+            end
+
+            Armon.cellUpdate!(params, data, dt * dt_factor, u, x_) |> wait_f
             recv_data_from_gpu(g_data, gpu_twin_rank)
             diff_data_and_notify("cellUpdate", params, data, g_data, gpu_twin_rank) && return cycle
 
             if params.euler_projection
-                if !params.single_comm_per_axis_pass 
-                    Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+                if !params.single_comm_per_axis_pass
+                    @static if async_impl
+                        Armon.boundaryConditions!(params, data, host_array, axis) |> wait_f
+                    else
+                        Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+                    end
                     recv_data_from_gpu(g_data, gpu_twin_rank)
                     diff_data_and_notify("boundaryConditions_euler", params, data, g_data, gpu_twin_rank) && return cycle
                 end
-                Armon.first_order_euler_remap!(params, data, dt * dt_factor)
+
+                Armon.first_order_euler_remap!(params, data, dt * dt_factor) |> wait_f
                 recv_data_from_gpu(g_data, gpu_twin_rank)
                 diff_data_and_notify("euler_remap", params, data, g_data, gpu_twin_rank) && return cycle
             end
 
-            Armon.update_EOS!(params, data)
+            Armon.update_EOS!(params, data) |> wait_f
             recv_data_from_gpu(g_data, gpu_twin_rank)
             diff_data_and_notify("update_EOS", params, data, g_data, gpu_twin_rank) && return cycle
         end
@@ -281,30 +307,49 @@ function gpu_comp_loop(params::Armon.ArmonParameters{T}, data::Armon.ArmonData{V
         for (axis, dt_factor) in Armon.split_axes(params, cycle)
             last_i, x_, u = Armon.update_axis_parameters(params, data, axis)
 
-            Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+            @static if async_impl
+                Armon.boundaryConditions!(params, data, host_array, axis) |> wait_f
+            else
+                Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+            end
             send_data_to_cpu(data, data_tmp, cpu_twin_rank)
             get_diff_result(params, cpu_twin_rank) && return cycle
 
-            Armon.numericalFluxes!(params, data, dt * dt_factor, last_i, u)
-            send_data_to_cpu(data, data_tmp, cpu_twin_rank)
-            get_diff_result(params, cpu_twin_rank) && return cycle
+            @static if async_impl
+                Armon.numericalFluxes_inner!(params, data, dt * dt_factor, u) |> wait
+                send_data_to_cpu(data, data_tmp, cpu_twin_rank)
+                get_diff_result(params, cpu_twin_rank) && return cycle
 
-            Armon.cellUpdate!(params, data, dt * dt_factor, u, x_)
+                Armon.numericalFluxes_outer!(params, data, dt * dt_factor, u) |> wait
+                send_data_to_cpu(data, data_tmp, cpu_twin_rank)
+                get_diff_result(params, cpu_twin_rank) && return cycle
+            else
+                Armon.numericalFluxes!(params, data, dt * dt_factor, last_i, u)
+                send_data_to_cpu(data, data_tmp, cpu_twin_rank)
+                get_diff_result(params, cpu_twin_rank) && return cycle
+            end
+            
+            Armon.cellUpdate!(params, data, dt * dt_factor, u, x_) |> wait_f
             send_data_to_cpu(data, data_tmp, cpu_twin_rank)
             get_diff_result(params, cpu_twin_rank) && return cycle
  
             if params.euler_projection
                 if !params.single_comm_per_axis_pass 
-                    Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+                    @static if async_impl
+                        Armon.boundaryConditions!(params, data, host_array, axis) |> wait
+                    else
+                        Armon.boundaryConditions_MPI!(params, data, host_array, axis)
+                    end
                     send_data_to_cpu(data, data_tmp, cpu_twin_rank)
                     get_diff_result(params, cpu_twin_rank) && return cycle
                 end
-                Armon.first_order_euler_remap!(params, data, dt * dt_factor)
+
+                Armon.first_order_euler_remap!(params, data, dt * dt_factor) |> wait_f
                 send_data_to_cpu(data, data_tmp, cpu_twin_rank)
                 get_diff_result(params, cpu_twin_rank) && return cycle
             end
 
-            Armon.update_EOS!(params, data)
+            Armon.update_EOS!(params, data) |> wait_f
             send_data_to_cpu(data, data_tmp, cpu_twin_rank)
             get_diff_result(params, cpu_twin_rank) && return cycle
         end
@@ -394,6 +439,8 @@ function comp_cpu_gpu_mpi(px, py)
             single_comm_per_axis_pass,
             reorder_grid = true)
 
+        async_impl && (params.async_comms = false)
+
         global_rank = MPI.Comm_rank(MPI.COMM_WORLD)
         coords_to_ranks = MPI.Allgather(params.cart_coords => global_rank, MPI.COMM_WORLD)
         gpu_coords_to_ranks = coords_to_ranks[armon_procs+1:end]
@@ -431,6 +478,8 @@ function comp_cpu_gpu_mpi(px, py)
             use_MPI = true, px, py,
             single_comm_per_axis_pass,
             reorder_grid = true)
+
+        async_impl && (params.async_comms = false)
 
         global_rank = MPI.Comm_rank(MPI.COMM_WORLD)
         coords_to_ranks = MPI.Allgather(params.cart_coords => global_rank, MPI.COMM_WORLD)
