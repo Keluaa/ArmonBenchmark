@@ -534,9 +534,6 @@ function merge_time_contribution(time_contrib_1, time_contrib_2)
         return time_contrib_1
     end
 
-    is_root && @warn "Time contrib merge is disabled" maxlog=1
-    return time_contrib_1
-
     return map((e, f) -> (e.first => (e.second + f.second)), time_contrib_1, time_contrib_2)
 end
 
@@ -586,10 +583,10 @@ function get_duration_string(duration_sec::Float64)
 
     str = ""
     print_next = false
-    for (duration, unit) in ((hours, 'h'), (minutes, 'm'), (seconds, 's'))
+    for (duration, unit, force_print) in ((hours, 'h', false), (minutes, 'm', false), (seconds, 's', true))
         if print_next
             str *= @sprintf("%02d", duration) * unit
-        elseif duration > 0
+        elseif duration > 0 || force_print
             str *= @sprintf("%2d", duration) * unit
             print_next = true
         else
@@ -605,18 +602,26 @@ function get_duration_string(duration_sec::Float64)
 end
 
 
-
 function run_armon(params::ArmonParameters, with_profiling::Bool)
     vals_cells_per_sec = Vector{Float64}(undef, repeats)
     total_time_contrib = nothing
     total_cycles = 0
+    mean_async_efficiency = 0
 
     for i in 1:repeats
         with_profiling && @resume_profiling()
-        _, cycles, cells_per_sec, time_contrib = armon(params)
+        
+        if mpi_impl == :async
+            _, cycles, cells_per_sec, time_contrib, async_efficiency = armon(params)
+        else
+            _, cycles, cells_per_sec, time_contrib = armon(params)
+            async_efficiency = 0.
+        end
+
         with_profiling && @pause_profiling()
         vals_cells_per_sec[i] = cells_per_sec
         total_cycles += cycles
+        mean_async_efficiency += async_efficiency
         
         if MIN_TIME_CONTRIB
             total_time_contrib = reduce_time_contribution(total_time_contrib, time_contrib)
@@ -624,8 +629,10 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
             total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
         end
     end
+
+    mean_async_efficiency /= repeats
     
-    return total_cycles, vals_cells_per_sec, total_time_contrib
+    return total_cycles, vals_cells_per_sec, total_time_contrib, mean_async_efficiency
 end
 
 
@@ -662,7 +669,7 @@ function do_measure(data_file_name, hw_c_file_name, test, cells, transpose, spli
     end
 
     time_start = time_ns()
-    cycles, vals_cells_per_sec, time_contrib = run_armon(params, true)
+    cycles, vals_cells_per_sec, time_contrib, async_efficiency = run_armon(params, true)
     time_end = time_ns()
 
     duration = (time_end - time_start) / 1.0e9
@@ -726,14 +733,12 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
 
     time_start = time_ns()
 
-    cycles, vals_cells_per_sec, time_contrib = run_armon(params, true)
-    
+    cycles, vals_cells_per_sec, time_contrib, async_efficiency = run_armon(params, true)
+
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
 
     duration = (time_end - time_start) / 1.0e9
-
-    sleep(0.2)
 
     # Merge the cells throughput and the time distribution of all processes in one reduction.
     # Since 'time_contrib' is an array of pairs, it is not a bits type. We first convert the values
@@ -802,10 +807,14 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
                 end
             end
 
-            @printf(", %5.1f%% of MPI time %s\n", total_MPI_time / total_time * 100, get_duration_string(duration))
-        else
-            @printf(" %s\n", get_duration_string(duration))
+            @printf(", %5.1f%% of MPI time", total_MPI_time / total_time * 100)
+
+            if mpi_impl == :async
+                @printf(" (async: %5.1f%%)", async_efficiency * 100)
+            end
         end
+
+        @printf(" %s\n", get_duration_string(duration))
     end
 
     return time_contrib

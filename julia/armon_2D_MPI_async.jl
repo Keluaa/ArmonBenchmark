@@ -2297,7 +2297,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     prev_event = NoneEvent()
 
     while t < maxtime && cycle < maxcycle
-        cycle_time = time_ns()
+        cycle_start = time_ns()
         
         if !dt_on_even_cycles || iseven(cycle)
             dt = dtCFL_MPI(params, data, dta; dependencies=prev_event)
@@ -2348,7 +2348,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         end
 
         if !is_warming_up()
-            total_cycles_time += time_ns() - cycle_time
+            total_cycles_time += time_ns() - cycle_start
         end
 
         dta = dt
@@ -2459,6 +2459,12 @@ function armon(params::ArmonParameters{T}) where T
         write_result(params, data, params.output_file)
     end
 
+    sorted_time_contrib = sort(collect(total_time_contrib))
+    
+    sync_total_time = mapreduce(x->x[2], +, sorted_time_contrib)
+    async_efficiency = (sync_total_time - total_time) / total_time
+    async_efficiency = max(async_efficiency, 0.)
+
     if is_root && params.measure_time && silent < 3 && !isempty(axis_time_contrib)
         axis_time = Dict{Axis, Float64}()
 
@@ -2474,23 +2480,22 @@ function armon(params::ArmonParameters{T}) where T
                 @printf(" - %-25s %10.5f ms (%5.2f%%) (%5.2f%%)\n", 
                     step_label, step_time / 1e6, step_time / axis_total_time * 100, step_time / total_time * 100)
             end
-            @printf(" => %-24s %10.5f ms          (%5.2f%%)\n", "Axis total time:", axis_total_time / 1e6, axis_total_time / total_time * 100)
+            @printf(" => %-24s %10.5f ms          (%5.2f%%)\n", "Axis total time:", 
+                axis_total_time / 1e6, axis_total_time / total_time * 100)
         end
 
         # Print the total distribution of time
         println("\nTotal time repartition: ")
-        for (step_label, step_time) in sort(collect(total_time_contrib))
+        for (step_label, step_time) in sorted_time_contrib
             @printf(" - %-25s %10.5f ms (%5.2f%%)\n",
                     step_label, step_time / 1e6, step_time / total_time * 100)
         end
 
-        sync_total_time = mapreduce(x->x[2], +, collect(total_time_contrib))
-        @printf("\nAsynchronicity efficiency: %.2f sec / %.2f sec = %.2f%% (effective time / total steps time)\n", total_time / 1e9, sync_total_time / 1e9, total_time / sync_total_time * 100)
+        @printf("\nAsynchronicity efficiency: %.2f sec / %.2f sec = %.2f%% (effective time / total steps time)\n",
+            total_time / 1e9, sync_total_time / 1e9, total_time / sync_total_time * 100)
     end
 
-    sorted_time_contrib = sort(collect(total_time_contrib))
-
-    return dt, cycles, cells_per_sec, sorted_time_contrib
+    return dt, cycles, cells_per_sec, sorted_time_contrib, async_efficiency
 end
 
 end
