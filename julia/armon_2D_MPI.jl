@@ -2245,7 +2245,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 @sprintf("%03d", (cycle - 1) ÷ animation_step))
         end
     end
-
+    
     t2 = time_ns()
 
     nb_cells = nx * ny

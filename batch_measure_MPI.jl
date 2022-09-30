@@ -420,13 +420,26 @@ function parse_measure_script_file(file::IOStream, name::String)
 end
 
 
+const USAGE = """
+Usage: 
+julia batch_measure.jl [--override-node=<node>,<new node>]
+                       [--start-at=<measure index>]
+                       [--do-only=<measures count>]
+                       [--skip-first=<combinaison count>]
+                       [--count=<combinaison count>]
+                       <script files>...'
+"""
+
+
 function parse_arguments()
     if length(ARGS) == 0
-        error("Invalid number of arguments. Usage: 'julia batch_measure.jl <script files>...'")
+        error("Invalid number of arguments.\n" * USAGE)
     end
 
     start_at = 1
     skip_first = 0
+    comb_count = typemax(Int)
+    do_only = typemax(Int)
 
     node_overrides = Dict{String, String}()
 
@@ -444,6 +457,12 @@ function parse_arguments()
             elseif (startswith(arg, "--skip-first="))
                 value = split(arg, '=')[2]
                 skip_first = parse(Int, value)
+            elseif (startswith(arg, "--do-only="))
+                value = split(arg, '=')[2]
+                do_only = parse(Int, value)
+            elseif (startswith(arg, "--count="))
+                value = split(arg, '=')[2]
+                comb_count = parse(Int, value)
             else
                 error("Wrong batch option: " * arg)
             end
@@ -461,7 +480,7 @@ function parse_arguments()
         end
     end
 
-    return measures, start_at, skip_first
+    return measures, start_at, do_only, skip_first, comb_count
 end
 
 
@@ -1134,7 +1153,7 @@ end
 
 
 function main()
-    measures, start_at, skip_first = parse_arguments()
+    measures, start_at, do_only, skip_first, comb_count = parse_arguments()
 
     Base.exit_on_sigint(false) # To be able to properly handle Crtl-C
     
@@ -1144,7 +1163,7 @@ function main()
 
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
-    for (i, measure) in Iterators.drop(enumerate(measures), start_at - 1)
+    for (i, measure) in Iterators.take(Iterators.drop(enumerate(measures), start_at - 1), do_only)
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
 
         if isempty(measure.node)
@@ -1152,15 +1171,18 @@ function main()
         end
 
         # Create the files and plot script once at the beginning
-        create_all_data_files_and_plot(measure, i == start_at ? skip_first : 0)
+        create_all_data_files_and_plot(measure, i == start_at ? skip_first : 0)  # TODO : take into account 'comb_count', here the other runs after will still have their data overwritten
 
         # For each main parameter combinaison, run a job
         comb_i = 0
+        comb_c = 0
         for inti_params in build_inti_combinaisons(measure)
             for julia_params in parse_combinaisons(measure, inti_params)
                 comb_i += 1
-                if (i == start_at && comb_i <= skip_first)
+                if i == start_at && comb_i <= skip_first
                     continue
+                elseif comb_c > comb_count
+                    @goto end_loop
                 end
 
                 commands, ref_command = run_measure(measure, julia_params, inti_params, i)
@@ -1168,9 +1190,13 @@ function main()
                 if measure.create_sub_job_chain && !isnothing(commands)
                     push!(job_commands, (measure, inti_params, julia_params, commands, ref_command))
                 end
+
+                comb_c += 1
             end
         end
     end
+
+    @label end_loop
 
     if !isempty(job_commands)
         make_submission_scripts(job_commands)

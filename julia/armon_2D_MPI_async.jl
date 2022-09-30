@@ -2460,10 +2460,15 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     sorted_time_contrib = sort(collect(total_time_contrib))
-    
-    sync_total_time = mapreduce(x->x[2], +, sorted_time_contrib)
-    async_efficiency = (sync_total_time - total_time) / total_time
-    async_efficiency = max(async_efficiency, 0.)
+
+    if params.measure_time
+        sync_total_time = mapreduce(x->x[2], +, sorted_time_contrib)
+        async_efficiency = (sync_total_time - total_time) / total_time
+        async_efficiency = max(async_efficiency, 0.)
+    else
+        sync_total_time = 1.
+        async_efficiency = 0.
+    end
 
     if is_root && params.measure_time && silent < 3 && !isempty(axis_time_contrib)
         axis_time = Dict{Axis, Float64}()
