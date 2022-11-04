@@ -406,6 +406,60 @@ function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{W}) where
 end
 
 #
+# Domain ranges
+#
+
+shift(r::AbstractUnitRange,   n::Int = 1) = r .+ n
+shift(r::OrdinalRange,        n::Int = 1) = r .+ (step(r) * n)
+expand(r::AbstractUnitRange,  n::Int = 1) = first(r):(last(r)+n)
+expand(r::OrdinalRange,       n::Int = 1) = first(r):step(r):(last(r)+step(r)*n)
+prepend(r::AbstractUnitRange, n::Int = 1) = (first(r)-n):last(r)
+prepend(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):last(r)
+inflate(r::AbstractUnitRange, n::Int = 1) = (first(r)-n):(last(r)+n)
+inflate(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):(last(r)+step(r)*n)
+
+DomainRange = @NamedTuple{col::StepRange{Int, Int}, row::StepRange{Int, Int}}
+
+shift(dr::DomainRange,   n::Int = 1) = DomainRange((dr.col, shift(dr.row, n)))
+prepend(dr::DomainRange, n::Int = 1) = DomainRange((dr.col, prepend(dr.row, n)))
+expand(dr::DomainRange,  n::Int = 1) = DomainRange((dr.col, expand(dr.row, n)))
+inflate(dr::DomainRange, n::Int = 1) = DomainRange((dr.col, inflate(dr.row, n)))
+
+struct DomainRanges
+    inner::DomainRange
+    outer_lb::DomainRange  # left/bottom
+    outer_rt::DomainRange  # right/top
+    direction::Axis
+end
+
+inner_domain(dr::DomainRanges) = dr.inner
+outer_lb_domain(dr::DomainRanges) = dr.outer_lb
+outer_rt_domain(dr::DomainRanges) = dr.outer_rt
+
+# For fluxes only, we shift the computation to the right/top by one column/row since the flux at
+# index 'i' is the flux between the cells 'i-s' and 'i', but we also need the fluxes on the other
+# side, between the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed 
+# later, but only on outer right side.
+
+function inner_fluxes_domain(dr::DomainRanges)
+    if dr.direction == X_axis
+        return DomainRange((dr.inner.col, expand(dr.inner.row, 1)))
+    else
+        return DomainRange((expand(dr.inner.col, 1), dr.inner.row))
+    end
+end
+
+outer_fluxes_lb_domain(dr::DomainRanges) = dr.outer_lb
+
+function outer_fluxes_rt_domain(dr::DomainRanges)
+    if dr.direction == X_axis
+        return DomainRange((dr.outer_rt.col, shift(dr.outer_rt.row, 1)))
+    else
+        return DomainRange((shift(dr.outer_rt.col, 1), dr.outer_rt.row))
+    end
+end
+
+#
 # Threading and SIMD control macros
 #
 
@@ -1253,6 +1307,24 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     return NoneEvent()
+end
+
+
+function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
+        dt::T, u::V, range::DomainRange, is_outer::Bool;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+
+    (main_range, inner_range) = range
+
+    if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
+        if params.scheme == :Godunov
+            return acoustic!(params, data, u, main_range, inner_range, is_outer; dependencies)
+        else
+            return acoustic_GAD!(params, data, dt, u, main_range, inner_range, is_outer; dependencies)
+        end
+    else
+        error("The choice of Riemann solver is not recognized: ", params.riemann)
+    end
 end
 
 
@@ -2149,6 +2221,72 @@ function split_axes(params::ArmonParameters{T}, cycle::Int) where T
 end
 
 #
+# Inner / Outer domains definition
+#
+
+function compute_domain_ranges(params::ArmonParameters)
+    (; nx, ny, nghost, row_length, current_axis) = params
+    @indexing_vars(params)
+    
+    # Inner range
+
+    if current_axis == X_axis
+        # Parse the cells row by row, excluding 'nghost' columns at the left and right
+        col_range = @i(1,1):row_length:@i(1,ny)
+        row_range = nghost+1:nx-nghost
+    else
+        # Parse the cells row by row, excluding 'nghost' rows at the top and bottom
+        col_range = @i(1,nghost+1):row_length:@i(1,ny-nghost)
+        row_range = 1:nx
+    end
+
+    inner_range = DomainRange((col_range, row_range))
+
+    # Outer range: left/bottom
+
+    if current_axis == X_axis
+        # Parse the cells row by row, for the first 'nghost' columns on the left
+        col_range = @i(1,1):row_length:@i(1,ny)
+        row_range = 1:nghost
+    else
+        # Parse the cells row by row, for the first 'nghost' rows at the bottom
+        col_range = @i(1,1):row_length:@i(1,nghost)
+        row_range = 1:nx
+    end
+    
+    outer_lb_range = DomainRange((col_range, row_range))
+
+    # Outer range: right/top
+    if current_axis == X_axis
+        # Parse the cells row by row, for the last 'nghost' columns on the right
+        col_range = @i(1,1):row_length:@i(1,ny)
+        row_range = nx-nghost+1:nx
+    else
+        # Parse the cells row by row, for the last 'nghost' rows at the top
+        col_range = @i(1,ny-nghost+1):row_length:@i(1,ny)
+        row_range = 1:nx
+    end
+    outer_rt_range = DomainRange((col_range, row_range))
+
+    if params.single_comm_per_axis_pass
+        # Add one column/row on each of the 4 sides
+        inner_range = DomainRange((inflate(inner_range.col), inflate(inner_range.row)))
+        
+        if current_axis == X_axis
+            # Shift the outer domain to the left and right by one cell, and add one row at the top and bottom
+            outer_lb_range = DomainRange((inflate(outer_lb_range.col, 1), shift(outer_lb_range.row, -1)))
+            outer_rt_range = DomainRange((inflate(outer_rt_range.col, 1), shift(outer_rt_range.row,  1)))
+        else
+            # Shift the outer domain to the top and bottom by one cell, and add one column at the left and right
+            outer_lb_range = DomainRange((shift(outer_lb_range.col, -1), inflate(outer_lb_range.row, 1)))
+            outer_rt_range = DomainRange((shift(outer_rt_range.col,  1), inflate(outer_rt_range.row, 1)))
+        end
+    end
+
+    return DomainRanges(inner_range, outer_lb_range, outer_rt_range, current_axis)
+end
+
+#
 # Output 
 #
 
@@ -2310,11 +2448,14 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
         for (axis, dt_factor) in split_axes(params, cycle)
             last_i, x_, u = update_axis_parameters(params, data, axis)
+
+            domain_ranges = compute_domain_ranges(params)
            
             @perf_task "loop" "comms+fluxes" @time_expr_c "comms+fluxes" if params.async_comms 
                 @sync begin
                     @async begin
-                        event_2 = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=prev_event)
+                        event_2 = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=prev_event)
+                        #event_2 = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=prev_event)
                         wait(event_2)
                     end
 
@@ -2322,7 +2463,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                     bc_params.use_threading = false
                     @async begin
                         event_1 = boundaryConditions!(bc_params, data, host_array, axis; dependencies=prev_event)
-                        event_1 = numericalFluxes_outer!(bc_params, data, dt * dt_factor, u; dependencies=event_1)
+                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), true; dependencies=event_1)
+                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), true; dependencies=event_1)
+                        #event_1 = numericalFluxes_outer!(bc_params, data, dt * dt_factor, u; dependencies=event_1)
                         wait(event_1)
                     end
                 end
@@ -2330,8 +2473,11 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 event = NoneEvent()
             else
                 event = boundaryConditions!(params, data, host_array, axis; dependencies=prev_event)
-                event = numericalFluxes_outer!(params, data, dt * dt_factor, u; dependencies=event)
-                event = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=event)
+                #event = numericalFluxes_outer!(params, data, dt * dt_factor, u; dependencies=event)
+                #event = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=event)
+                event = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=event)
+                event = numericalFluxes!(params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), true; dependencies=event)
+                event = numericalFluxes!(params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), true; dependencies=event)
                 params.measure_time && wait(event)
             end
 
