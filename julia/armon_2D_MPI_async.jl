@@ -1184,10 +1184,11 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     step_label = is_outer ? "acoustic_outer!" : "acoustic_inner!"
 
     if params.use_gpu
-        event = gpu_acoustic!(first(main_range), step(main_range), first(inner_range), length(inner_range), s,
-                              out_ustar, out_pstar, rho, u, pmat, cmat;
-                              ndrange=length(main_range) * length(inner_range), dependencies)
-        return @time_event step_label event
+        event = @time_event_a step_label gpu_acoustic!(
+            first(main_range), step(main_range), first(inner_range), length(inner_range), s,
+            out_ustar, out_pstar, rho, u, pmat, cmat;
+            ndrange=length(main_range) * length(inner_range), dependencies)
+        return event
     end
 
     @time_expr_a step_label @simd_threaded_iter main_range for i in inner_range
@@ -1237,7 +1238,7 @@ function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V},
             ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
             ndrange=length(main_range) * length(inner_range), dependencies=event)
 
-        return @time_event step_label second_kernel
+        return second_kernel
     end
 
     @time_expr_a step_label if scheme == :GAD_minmod
@@ -1322,20 +1323,22 @@ end
 # Equations of State
 #
 
-function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T, range::DomainRange;
-        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T, range::DomainRange,
+        is_outer::Bool; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
     (main_range, inner_range) = range
 
+    step_label = is_outer ? "update_EOS_outer!" : "update_EOS_inner!"
+
     if params.use_gpu
-        event = gpu_update_perfect_gas_EOS!(
+        event = @time_event_a step_label gpu_update_perfect_gas_EOS!(
             first(main_range), step(main_range), first(inner_range), length(inner_range),
             gamma, rho, Emat, umat, vmat, pmat, cmat, gmat;
             ndrange=length(main_range) * length(inner_range), dependencies)
-        return @time_event "update_EOS!" event
+        return event
     end
 
-    @time_expr "update_EOS!" @simd_threaded_iter main_range for i in inner_range
+    @time_expr_a step_label @simd_threaded_iter main_range for i in inner_range
         e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
         pmat[i] = (gamma - 1.) * rho[i] * e
         cmat[i] = sqrt(gamma * pmat[i] / rho[i])
@@ -1346,16 +1349,19 @@ function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T
 end
 
 
-function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange) where {T, V <: AbstractArray{T}}
+function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange, 
+        is_outer::Bool) where {T, V <: AbstractArray{T}}
     (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
     (main_range, inner_range) = range
 
+    step_label = is_outer ? "update_EOS_outer!" : "update_EOS_inner!"
+
     if params.use_gpu
-        event = gpu_update_bizarrium_EOS!(
+        event = @time_event_a step_label gpu_update_bizarrium_EOS!(
             first(main_range), step(main_range), first(inner_range), length(inner_range),
             rho, Emat, umat, vmat, pmat, cmat, gmat;
             ndrange=length(main_range) * length(inner_range), dependencies)
-        return @time_event "update_EOS!" event
+        return event
     end
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
@@ -1365,7 +1371,7 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::Do
     rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
     q = -42080895/14941154; r = 727668333/149411540
 
-    @time_expr "update_EOS!" @simd_threaded_iter main_range for i in inner_range
+    @time_expr step_label @simd_threaded_iter main_range for i in inner_range
         x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # Formula (4b)
 
         f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)  # Formula (15b)
@@ -1389,13 +1395,13 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::Do
 end
 
 
-function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange;
-        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange, 
+        is_outer::Bool; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     if params.test in (:Sod, :Sod_y, :Sod_circ)
         gamma::T = 7/5
-        return perfectGasEOS!(params, data, gamma, range; dependencies)
+        return perfectGasEOS!(params, data, gamma, range, is_outer; dependencies)
     elseif test == :Bizarrium
-        return BizarriumEOS!(params, data, range; dependencies)
+        return BizarriumEOS!(params, data, range, is_outer; dependencies)
     end
 end
 
@@ -2351,7 +2357,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             @perf_task "loop" "comms+fluxes" @time_expr_c "comms+fluxes" if params.async_comms 
                 @sync begin
                     @async begin
-                        event_2 = update_EOS!(params, data, inner_ghosts_domain(domain_ranges, params.nghosts); dependencies=prev_event)
+                        event_2 = update_EOS!(params, data, inner_domain(domain_ranges), false; dependencies=prev_event)
                         event_2 = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=event_2)
                         wait(event_2)
                     end
@@ -2359,8 +2365,8 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                     bc_params = copy(params)
                     bc_params.use_threading = false
                     @async begin
-                        event_1 = update_EOS!(params, data, outer_lb_domain(domain_ranges); dependencies=prev_event)
-                        event_1 = update_EOS!(params, data, outer_rt_domain(domain_ranges); dependencies=event_1)
+                        event_1 = update_EOS!(params, data, outer_lb_domain(domain_ranges), true; dependencies=prev_event)
+                        event_1 = update_EOS!(params, data, outer_rt_domain(domain_ranges), true; dependencies=event_1)
 
                         event_1 = boundaryConditions!(bc_params, data, host_array, axis; dependencies=event_1)
 
@@ -2372,9 +2378,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
                 event = NoneEvent()
             else
-                event = update_EOS!(params, data, inner_domain(domain_ranges); dependencies=prev_event)
-                event = update_EOS!(params, data, outer_lb_domain(domain_ranges); dependencies=event)
-                event = update_EOS!(params, data, outer_rt_domain(domain_ranges); dependencies=event)
+                event = update_EOS!(params, data, inner_domain(domain_ranges), false; dependencies=prev_event)
+                event = update_EOS!(params, data, outer_lb_domain(domain_ranges), true; dependencies=event)
+                event = update_EOS!(params, data, outer_rt_domain(domain_ranges), true; dependencies=event)
                 
                 event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
                 
@@ -2442,6 +2448,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             println("Grind time:  ", round(grind_time / 1e3, digits=5),        " µs/cell/cycle")
             println("Cells/sec:   ", round(1 / grind_time * 1e3, digits=5),    " Mega cells/sec")
             println("Cycles:      ", cycle)
+            println("Last Δt:     ", @sprintf("%.18f", dt),                    " sec")
         end
     end
 
