@@ -13,6 +13,7 @@ export ArmonParameters, armon
 # better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
+# Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
 
 # GPU init
 
@@ -878,9 +879,13 @@ end
 end
 
 
-@kernel function gpu_update_perfect_gas_EOS_kernel!(i_0, gamma,
+@kernel function gpu_update_perfect_gas_EOS_kernel!(
+        main_range_start, main_range_step, inner_range_start, inner_range_length, gamma,
         @Const(rho), @Const(Emat), @Const(umat), @Const(vmat), pmat, cmat, gmat)
-    i = @index(Global) + i_0
+    idx = @index(Global)
+    ix, iy = divrem(idx - 1, inner_range_length)
+    j = main_range_start  + ix * main_range_step - 1
+    i = inner_range_start + iy + j
 
     e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
     pmat[i] = (gamma - 1.) * rho[i] * e
@@ -889,9 +894,13 @@ end
 end
 
 
-@kernel function gpu_update_bizarrium_EOS_kernel!(i_0, 
+@kernel function gpu_update_bizarrium_EOS_kernel!(
+        main_range_start, main_range_step, inner_range_start, inner_range_length,
         @Const(rho), @Const(Emat), @Const(umat), @Const(vmat), pmat, cmat, gmat)
-    i = @index(Global) + i_0
+    idx = @index(Global)
+    ix, iy = divrem(idx - 1, inner_range_length)
+    j = main_range_start  + ix * main_range_step - 1
+    i = inner_range_start + iy + j
 
     type = eltype(rho)
 
@@ -1122,18 +1131,10 @@ end
     L₃ = -min(0, ustar[i+s]) * dt * mask
     L₂ = dX - L₁ - L₃
     
-    tmp_rho[i]  = (L₁ * rho[i-s] 
-                 + L₂ * rho[i] 
-                 + L₃ * rho[i+s]) / dX
-    tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] 
-                 + L₂ * rho[i]   * umat[i] 
-                 + L₃ * rho[i+s] * umat[i+s]) / dX
-    tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] 
-                 + L₂ * rho[i]   * vmat[i] 
-                 + L₃ * rho[i+s] * vmat[i+s]) / dX
-    tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] 
-                 + L₂ * rho[i]   * Emat[i] 
-                 + L₃ * rho[i+s] * Emat[i+s]) / dX
+    tmp_rho[i]  = (L₁ * rho[i-s]             + L₂ * rho[i]           + L₃ * rho[i+s]            ) / dX
+    tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] + L₂ * rho[i] * umat[i] + L₃ * rho[i+s] * umat[i+s]) / dX
+    tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+s] * vmat[i+s]) / dX
+    tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+s] * Emat[i+s]) / dX
 end
 
 
@@ -1174,17 +1175,17 @@ gpu_first_order_euler_remap_2! = gpu_first_order_euler_remap_2_kernel!(device, b
 # 
 
 function acoustic!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        u::V, main_range::StepRange{Int, Int}, inner_range::StepRange{Int, Int},
-        is_outer::Bool;
+        u::V, out_ustar::V, out_pstar::V, range::DomainRange, is_outer::Bool;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; ustar, pstar, rho, pmat, cmat) = data
+    (; rho, pmat, cmat) = data
     (; s) = params
+    (main_range, inner_range) = range
 
     step_label = is_outer ? "acoustic_outer!" : "acoustic_inner!"
 
     if params.use_gpu
         event = gpu_acoustic!(first(main_range), step(main_range), first(inner_range), length(inner_range), s,
-                              ustar, pstar, rho, u, pmat, cmat;
+                              out_ustar, out_pstar, rho, u, pmat, cmat;
                               ndrange=length(main_range) * length(inner_range), dependencies)
         return @time_event step_label event
     end
@@ -1192,8 +1193,8 @@ function acoustic!(params::ArmonParameters{T}, data::ArmonData{V},
     @time_expr_a step_label @simd_threaded_iter main_range for i in inner_range
         rc_l = rho[i-s] * cmat[i-s]
         rc_r = rho[i]   * cmat[i]
-        ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
-        pstar[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
+        out_ustar[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
+        out_pstar[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
     end
 
     return NoneEvent()
@@ -1201,52 +1202,45 @@ end
 
 
 function acoustic_GAD!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V, main_range::StepRange{Int, Int}, inner_range::StepRange{Int, Int},
+        dt::T, u::V, range::DomainRange,
         is_outer::Bool; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ustar, pstar, rho, pmat, cmat, ustar_1, pstar_1) = data
     (; scheme, dx, s) = params
+    (main_range, inner_range) = range
 
-    step_label_1st = is_outer ? "acoustic_outer!"     : "acoustic_inner!"
-    step_label_2nd = is_outer ? "acoustic_GAD_outer!" : "acoustic_GAD_inner!"
+    step_label = is_outer ? "acoustic_GAD_outer!" : "acoustic_GAD_inner!"
 
+    # Add one column/row on both sides since the second order solver relies on the first order fluxes
+    # of the neighbouring cells.
     if params.current_axis == X_axis
         main_range_1st_order = main_range
-        inner_range_1st_order = first(inner_range)-s:step(inner_range):last(inner_range)+s
+        inner_range_1st_order = inflate(inner_range, 1)
     else
-        main_range_1st_order = first(main_range)-s:step(main_range):last(main_range)+s
+        main_range_1st_order = inflate(main_range, 1)
         inner_range_1st_order = inner_range
     end
+
+    # First order
+    event = acoustic!(params, data, u, ustar_1, pstar_1, 
+        DomainRange((main_range_1st_order, inner_range_1st_order)), is_outer;
+        dependencies)
     
+    # Second order, for each flux limiter
     if params.use_gpu
         if params.scheme != :GAD_minmod
             error("Only the minmod limiter is implemented for GPU")
         end
 
-        first_kernel = @time_event_a step_label_1st gpu_acoustic!(
-            first(main_range_1st_order), step(main_range_1st_order), 
-            first(inner_range_1st_order), length(inner_range_1st_order), s,
-            ustar_1, pstar_1, rho, u, pmat, cmat;
-            ndrange=length(main_range_1st_order) * length(inner_range_1st_order), dependencies)
-
-        second_kernel = @time_event_a step_label_2nd gpu_acoustic_GAD_minmod!(
+        second_kernel = @time_event_a step_label gpu_acoustic_GAD_minmod!(
             first(main_range), step(main_range), 
             first(inner_range), length(inner_range), s,
             ustar, pstar, rho, u, pmat, cmat, ustar_1, pstar_1, dt, dx;
-            ndrange=length(main_range) * length(inner_range), dependencies=first_kernel)
+            ndrange=length(main_range) * length(inner_range), dependencies=event)
 
-        return second_kernel
+        return @time_event step_label second_kernel
     end
 
-    # First order
-    @time_expr_a step_label_1st @simd_threaded_iter main_range_1st_order for i in inner_range_1st_order
-        rc_l = rho[i-s] * cmat[i-s]
-        rc_r = rho[i]   * cmat[i]
-        ustar_1[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
-        pstar_1[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
-    end
-
-    # Second order, for each flux limiter
-    @time_expr_a step_label_2nd if scheme == :GAD_minmod
+    @time_expr_a step_label if scheme == :GAD_minmod
         @simd_threaded_iter main_range for i in inner_range
             r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
             r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
@@ -1313,130 +1307,56 @@ end
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
         dt::T, u::V, range::DomainRange, is_outer::Bool;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-
-    (main_range, inner_range) = range
-
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            return acoustic!(params, data, u, main_range, inner_range, is_outer; dependencies)
+            return acoustic!(params, data, u, data.ustar, data.pstar, range, is_outer; dependencies)
         else
-            return acoustic_GAD!(params, data, dt, u, main_range, inner_range, is_outer; dependencies)
+            return acoustic_GAD!(params, data, dt, u, range, is_outer; dependencies)
         end
     else
         error("The choice of Riemann solver is not recognized: ", params.riemann)
     end
-end
-
-
-function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V, main_range::StepRange{Int, Int}, inner_range::StepRange{Int, Int},
-        is_outer::Bool; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
-        if params.scheme == :Godunov
-            return acoustic!(params, data, u, main_range, inner_range, is_outer; dependencies)
-        else
-            return acoustic_GAD!(params, data, dt, u, main_range, inner_range, is_outer; dependencies)
-        end
-    else
-        error("The choice of Riemann solver is not recognized: ", params.riemann)
-    end
-end
-
-
-function numericalFluxes_inner!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, u::V;
-        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; nx, ny, nghost, row_length, s) = params
-    @indexing_vars(params)
-
-    # Add one more ring of cells to compute on the sides if needed
-    o = convert(Int, params.single_comm_per_axis_pass)
-
-    # In both cases, we also include one more cell/row on the left/top of the inner domain to have 
-    # the fluxes at the left/bottom and right/top of every cell in the inner domain. 
-
-    if params.current_axis == X_axis
-        # Compute the fluxes row by row, excluding 'nghost' columns at the left and right
-        main_range  = @i(1,1-o):row_length:@i(1,ny+o)
-        inner_range = nghost+1:nx+1-nghost
-    else
-        # Compute the fluxes row by row, excluding 'nghost' rows at the top and bottom
-        main_range  = @i(1,1+nghost):row_length:@i(1,ny+1-nghost)
-        inner_range = 1-o:nx+o
-    end
-
-    main_range = StepRange{Int, Int}(main_range)
-    inner_range = StepRange{Int, Int}(inner_range)
-
-    @perf_task "loop" "fluxes_inner" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, false; dependencies)
-    return event
-end
-
-
-function numericalFluxes_outer!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; nx, ny, nghost, row_length, s) = params
-    @indexing_vars(params)
-
-    # Add one more ring of cells to compute on the sides if needed
-    o = convert(Int, params.single_comm_per_axis_pass)
-
-    if params.current_axis == X_axis
-        # Compute the fluxes row by row, for the first 'nghost+o' columns on the left
-        main_range  = @i(1-o,1-o):row_length:@i(1-o,ny+o)
-        inner_range = 1:nghost+o
-    else
-        # Compute the fluxes row by row, for the first 'nghost+o' rows at the bottom
-        main_range  = @i(1,1-o):row_length:@i(1,nghost)
-        inner_range = 1-o:nx+o
-    end
-    
-    main_range = StepRange{Int, Int}(main_range)
-    inner_range = StepRange{Int, Int}(inner_range)
-
-    @perf_task "comms" "fluxes_outer_1" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, true; dependencies)
-
-    if params.current_axis == X_axis
-        # Compute the fluxes row by row, for the last 'nghost+o' columns on the right
-        main_range  = @i(1,1-o):row_length:@i(1+o,ny+o)
-        inner_range = nx-nghost+1:nx+o
-    else
-        # Compute the fluxes row by row, for the last 'nghost+o' rows at the top
-        main_range  = @i(1-o,ny-nghost+1+o):row_length:@i(1-o,ny+2*o)
-        inner_range = 1-o:nx+o
-    end
-
-    main_range = StepRange{Int, Int}(main_range)
-    inner_range = StepRange{Int, Int}(inner_range)
-
-    # Shift the computation to the right/top by one column/row since the flux at index 'i' is the 
-    # flux between the cells 'i-s' and 'i', but we also need the fluxes on the other side, between
-    # the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed later.
-    inner_range = inner_range .+ 1
-
-    @perf_task "comms" "fluxes_outer_2" event = numericalFluxes!(params, data, dt, u, main_range, inner_range, true; dependencies=event)
-    return event
 end
 
 #
 # Equations of State
 #
 
-function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T) where {T, V <: AbstractArray{T}}
+function perfectGasEOS!(params::ArmonParameters{T}, data::ArmonData{V}, gamma::T, range::DomainRange;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
-    (; ideb, ifin) = params
+    (main_range, inner_range) = range
 
-    @simd_threaded_loop for i in ideb:ifin
+    if params.use_gpu
+        event = gpu_update_perfect_gas_EOS!(
+            first(main_range), step(main_range), first(inner_range), length(inner_range),
+            gamma, rho, Emat, umat, vmat, pmat, cmat, gmat;
+            ndrange=length(main_range) * length(inner_range), dependencies)
+        return @time_event "update_EOS!" event
+    end
+
+    @time_expr "update_EOS!" @simd_threaded_iter main_range for i in inner_range
         e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)
         pmat[i] = (gamma - 1.) * rho[i] * e
         cmat[i] = sqrt(gamma * pmat[i] / rho[i])
         gmat[i] = (1. + gamma) / 2
     end
+
+    return NoneEvent()
 end
 
 
-function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange) where {T, V <: AbstractArray{T}}
     (; umat, vmat, pmat, cmat, gmat, rho, Emat) = data
-    (; ideb, ifin) = params
+    (main_range, inner_range) = range
+
+    if params.use_gpu
+        event = gpu_update_bizarrium_EOS!(
+            first(main_range), step(main_range), first(inner_range), length(inner_range),
+            rho, Emat, umat, vmat, pmat, cmat, gmat;
+            ndrange=length(main_range) * length(inner_range), dependencies)
+        return @time_event "update_EOS!" event
+    end
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
     # "Dissipative issue of high-order shock capturing schemes with non-convex equations of state",
@@ -1445,7 +1365,7 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
     rho0 = 10000; K0 = 1e+11; Cv0 = 1000; T0 = 300; eps0 = 0; G0 = 1.5; s = 1.5
     q = -42080895/14941154; r = 727668333/149411540
 
-    @simd_threaded_loop for i in ideb:ifin
+    @time_expr "update_EOS!" @simd_threaded_iter main_range for i in inner_range
         x = rho[i]/rho0 - 1; g = G0*(1-rho0/rho[i]) # Formula (4b)
 
         f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)  # Formula (15b)
@@ -1464,35 +1384,18 @@ function BizarriumEOS!(params::ArmonParameters{T}, data::ArmonData{V}) where {T,
         cmat[i] = sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i]              # Formula (8)
         gmat[i] = 0.5/(rho[i]^3*cmat[i]^2)*(pk0second+(G0*rho0)^2*(pmat[i]-pk0)) # Formula (8) + (11)
     end
+
+    return NoneEvent()
 end
 
 
-function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V};
+function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; rho, umat, vmat, pmat, cmat, gmat, Emat) = data
-    (; ideb, ifin, test) = params
-
-    if test == :Sod || test == :Sod_y || test == :Sod_circ
+    if params.test in (:Sod, :Sod_y, :Sod_circ)
         gamma::T = 7/5
-        if params.use_gpu
-            event = gpu_update_perfect_gas_EOS!(ideb - 1, gamma, rho, Emat,
-                umat, vmat, pmat, cmat, gmat;
-                ndrange=length(ideb:ifin), dependencies)
-            return @time_event "update_EOS!" event
-        else
-            @time_expr "update_EOS!" perfectGasEOS!(params, data, gamma)
-            return NoneEvent()
-        end
+        return perfectGasEOS!(params, data, gamma, range; dependencies)
     elseif test == :Bizarrium
-        if params.use_gpu
-            event = gpu_update_bizarrium_EOS!(ideb - 1, rho, Emat,
-                umat, vmat, pmat, cmat, gmat;
-                ndrange=length(ideb:ifin), dependencies)
-            return @time_event "update_EOS!" event
-        else
-            @time_expr "update_EOS!" BizarriumEOS!(params, data)
-            return NoneEvent()
-        end
+        return BizarriumEOS!(params, data, range; dependencies)
     end
 end
 
@@ -1599,12 +1502,6 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         pstar[i] = 0.
         ustar_1[i] = 0.
         pstar_1[i] = 0.
-    end
-
-    if test == :Sod || test == :Sod_y || test == :Sod_circ
-        perfectGasEOS!(params, data, gamma)
-    else
-        BizarriumEOS!(params, data)
     end
     
     return
@@ -2454,30 +2351,37 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             @perf_task "loop" "comms+fluxes" @time_expr_c "comms+fluxes" if params.async_comms 
                 @sync begin
                     @async begin
-                        event_2 = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=prev_event)
-                        #event_2 = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=prev_event)
+                        event_2 = update_EOS!(params, data, inner_ghosts_domain(domain_ranges, params.nghosts); dependencies=prev_event)
+                        event_2 = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=event_2)
                         wait(event_2)
                     end
 
                     bc_params = copy(params)
                     bc_params.use_threading = false
                     @async begin
-                        event_1 = boundaryConditions!(bc_params, data, host_array, axis; dependencies=prev_event)
+                        event_1 = update_EOS!(params, data, outer_lb_domain(domain_ranges); dependencies=prev_event)
+                        event_1 = update_EOS!(params, data, outer_rt_domain(domain_ranges); dependencies=event_1)
+
+                        event_1 = boundaryConditions!(bc_params, data, host_array, axis; dependencies=event_1)
+
                         event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), true; dependencies=event_1)
                         event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), true; dependencies=event_1)
-                        #event_1 = numericalFluxes_outer!(bc_params, data, dt * dt_factor, u; dependencies=event_1)
                         wait(event_1)
                     end
                 end
 
                 event = NoneEvent()
             else
-                event = boundaryConditions!(params, data, host_array, axis; dependencies=prev_event)
-                #event = numericalFluxes_outer!(params, data, dt * dt_factor, u; dependencies=event)
-                #event = numericalFluxes_inner!(params, data, dt * dt_factor, u; dependencies=event)
+                event = update_EOS!(params, data, inner_domain(domain_ranges); dependencies=prev_event)
+                event = update_EOS!(params, data, outer_lb_domain(domain_ranges); dependencies=event)
+                event = update_EOS!(params, data, outer_rt_domain(domain_ranges); dependencies=event)
+                
+                event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
+                
                 event = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=event)
                 event = numericalFluxes!(params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), true; dependencies=event)
                 event = numericalFluxes!(params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), true; dependencies=event)
+                
                 params.measure_time && wait(event)
             end
 
@@ -2490,7 +2394,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
                 @perf_task "loop" "euler_proj" event = first_order_euler_remap!(params, data, dt * dt_factor; dependencies=event)
             end
 
-            @perf_task "loop" "EOS" prev_event = update_EOS!(params, data; dependencies=event)
+            prev_event = event
         end
 
         if !is_warming_up()
