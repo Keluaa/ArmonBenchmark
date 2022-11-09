@@ -15,6 +15,7 @@ Dt = 0.
 maxtime = 0.0
 maxcycle = 500
 euler_projection = true
+projection = :euler
 cst_dt = false
 dt_on_even_cycles = false
 ieee_bits = 64
@@ -129,6 +130,11 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--euler"
         global euler_projection = parse(Bool, ARGS[i+1])
+        global projection = :euler
+        global i += 1
+    elseif arg == "--projection"
+        global projection = Symbol(ARGS[i+1])
+        global euler_projection = (projection != :none)
         global i += 1
     elseif arg == "--cst-dt"
         global cst_dt = parse(Bool, ARGS[i+1])
@@ -432,9 +438,10 @@ if use_MPI
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
+            return ArmonParameters(; ieee_bits, riemann, scheme, projection,
+                nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
-                euler_projection, transpose_dims, axis_splitting, 
+                transpose_dims, axis_splitting, 
                 maxtime, maxcycle, silent, output_file, write_output, write_ghosts, measure_time,
                 use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms)

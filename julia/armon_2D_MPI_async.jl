@@ -71,9 +71,9 @@ mutable struct ArmonParameters{Flt_T}
     cfl::Flt_T
     Dt::Flt_T
     cst_dt::Bool
-    dt_on_even_cycles::Bool 
-    euler_projection::Bool
+    dt_on_even_cycles::Bool
     axis_splitting::Symbol
+    projection::Symbol
 
     # Indexing
     row_length::Int
@@ -119,6 +119,7 @@ mutable struct ArmonParameters{Flt_T}
     neighbours::NamedTuple{(:top, :bottom, :left, :right), NTuple{4, Int}}  # Ranks of the neighbours of this process
     global_grid::NTuple{2, Int}  # Dimensions (nx, ny) of the global grid
     single_comm_per_axis_pass::Bool
+    extra_ring_width::Int  # Number of cells to compute additionally when 'single_comm_per_axis_pass' is true
     reorder_grid::Bool
 
     # Asynchronicity
@@ -129,10 +130,10 @@ end
 # Constructor for ArmonParameters
 function ArmonParameters(;
         ieee_bits = 64,
-        test = :Sod, riemann = :acoustic, scheme = :GAD_minmod,
+        test = :Sod, riemann = :acoustic, scheme = :GAD_minmod, projection = :euler,
         nghost = 2, nx = 10, ny = 10, 
         cfl = 0.6, Dt = 0., cst_dt = false, dt_on_even_cycles = false,
-        euler_projection = false, transpose_dims = false, axis_splitting = :Sequential,
+        transpose_dims = false, axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
         write_output = true, write_ghosts = false, merge_files = false, animation_step = 0, 
@@ -172,9 +173,13 @@ function ArmonParameters(;
         error("Writing the ghost cells to a single output file is not possible")
     end
 
-    if (single_comm_per_axis_pass && (scheme == :Godunov && nghost < 2 || nghost < 3)
-            || (scheme == :Godunov && nghost < 1 || nghost < 2))
-        error("Not enough ghost cells for the scheme.")
+    min_nghost = 1
+    min_nghost += (scheme != :Godunov)
+    min_nghost += single_comm_per_axis_pass
+    min_nghost += (projection == :euler_2nd)
+
+    if nghost < min_nghost
+        error("Not enough ghost cells for the scheme and/or projection, at least $min_nghost are needed.")
     end
 
     if (nx % px != 0) || (ny % py != 0)
@@ -234,12 +239,20 @@ function ArmonParameters(;
     # Used only for indexing with the `@i` macro
     idx_row = row_length
     idx_col = 1
+
+    # Ring width
+    if single_comm_per_axis_pass
+        extra_ring_width = 1
+        extra_ring_width += projection == :euler_2nd
+    else
+        extra_ring_width = 0
+    end
     
     return ArmonParameters{flt_type}(
         test, riemann, scheme,
         nghost, nx, ny, dx,
         cfl, Dt, cst_dt, dt_on_even_cycles,
-        euler_projection, axis_splitting,
+        axis_splitting, projection,
         row_length, col_length, nbcell,
         ideb, ifin, index_start,
         idx_row, idx_col,
@@ -251,7 +264,7 @@ function ArmonParameters(;
         use_ccall, use_threading, use_simd, use_gpu,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
-        single_comm_per_axis_pass, reorder_grid, 
+        single_comm_per_axis_pass, extra_ring_width, reorder_grid, 
         async_comms 
     )
 end
@@ -286,7 +299,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - splitting:  ", p.axis_splitting)
     println(" - cfl:        ", p.cfl)
     println(" - Dt:         ", p.Dt, p.dt_on_even_cycles ? ", updated only for even cycles" : "")
-    println(" - euler proj: ", p.euler_projection)
+    println(" - euler proj: ", p.projection)
     println(" - cst dt:     ", p.cst_dt)
     println(" - maxtime:    ", p.maxtime)
     println(" - maxcycle:   ", p.maxcycle)
@@ -419,6 +432,27 @@ prepend(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):last(r)
 inflate(r::AbstractUnitRange, n::Int = 1) = (first(r)-n):(last(r)+n)
 inflate(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):(last(r)+step(r)*n)
 
+
+function union(r1::AbstractUnitRange, r2::AbstractUnitRange)
+    if last(r1) + 1 < first(r2) || last(r2) + 1 < first(r1)
+        error("The ranges $r1 and $r2 are disjoint")
+    else
+        return min(first(r1), first(r2)):max(last(r1), last(r2))
+    end
+end
+
+
+function union(r1::OrdinalRange, r2::OrdinalRange)
+    if step(r1) != step(r2)
+        error("The ranges $r1 and $r2 have different steps")
+    elseif last(r1) + step(r1) < first(r2) || last(r2) + step(r1) < first(r1)
+        error("The ranges $r1 and $r2 are disjoint")
+    else
+        return min(first(r1), first(r2)):step(r1):max(last(r1), last(r2))
+    end
+end
+
+
 DomainRange = @NamedTuple{col::StepRange{Int, Int}, row::StepRange{Int, Int}}
 
 shift(dr::DomainRange,   n::Int = 1) = DomainRange((dr.col, shift(dr.row, n)))
@@ -433,6 +467,7 @@ struct DomainRanges
     direction::Axis
 end
 
+full_domain(dr::DomainRanges) = DomainRange((dr.inner.col, foldl(union, (dr.outer_lb.row, dr.inner.row, dr.outer_rt.row))))
 inner_domain(dr::DomainRanges) = dr.inner
 outer_lb_domain(dr::DomainRanges) = dr.outer_lb
 outer_rt_domain(dr::DomainRanges) = dr.outer_rt
@@ -1466,6 +1501,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
     pos_y = cy * ny
 
     one_more_ring = params.single_comm_per_axis_pass
+    r = params.extra_ring_width
 
     @simd_threaded_loop for i in 1:nbcell
         ix = ((i-1) % row_length) - nghost
@@ -1490,10 +1526,10 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
         vmat[i] = 0.
 
-        # Set to 1 if the cell is in the real domain or 0 in the ghost domain
+        # Set the domain mask to 1 if the cell should be computed or 0 otherwise
         if one_more_ring
             domain_mask[i] = (
-                (-1 ≤   ix < nx+1 && -1 ≤   iy < ny+1)  # Include as well one ring of ghost cells...
+                (-r ≤   ix < nx+r && -r ≤   iy < ny+r)  # Include as well a ring of ghost cells...
              && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
              && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
             ) ? 1. : 0
@@ -1896,7 +1932,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
         # fast. Therefore first we compute dt for all cells and store the result in a temporary
         # array, then we reduce this array.
         # TODO : fix this
-        if params.euler_projection
+        if params.projection != :none
             gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask;
                 ndrange=length(cmat), dependencies) |> wait
             dt = reduce(min, tmp_rho)
@@ -1905,7 +1941,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
                 ndrange=length(cmat), dependencies) |> wait
             dt = reduce(min, tmp_rho) * min(dx, dy)
         end
-    elseif params.euler_projection
+    elseif params.projection != :none
         if params.use_gpu
             wait(dependencies)
             # We need the absolute value of the divisor since the result of the max can be negative,
@@ -1933,6 +1969,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
         end
     else
         if params.use_gpu
+            wait(dependencies)
             dt = reduce(min, @views (1. ./ (cmat .* domain_mask)))
         else
             @batch threadlocal=typemax(T) for i in ideb:ifin
@@ -1983,8 +2020,9 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
     if params.single_comm_per_axis_pass
         (; nx, ny) = params
         @indexing_vars(params)
-        first_i = @i(0, 0)
-        last_i = @i(nx+1, ny+1)
+        r = params.extra_ring_width
+        first_i = @i(1-r, 1-r)
+        last_i = @i(nx+r, ny+r)
     else
         first_i = ideb
         last_i = ifin
@@ -1993,7 +2031,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
     if params.use_gpu
         event = gpu_cell_update!(first_i - 1, dx, dt, s, ustar, pstar, rho, u, Emat, domain_mask;
             ndrange=length(first_i:last_i), dependencies)
-        if !params.euler_projection
+        if params.projection == :none
             event = gpu_cell_update_lagrange!(first_i - 1, last_i, dt, s, x, ustar;
                 ndrange=length(first_i:last_i), dependencies=event)
         end
@@ -2008,7 +2046,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
         Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
     end
 
-    if !params.euler_projection
+    if params.projection == :none
         @time_expr "cellUpdate!" @simd_threaded_loop for i in first_i:last_i
             x[i] += dt * ustar[i]
         end
@@ -2041,12 +2079,12 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
         L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
         L₃ = -min(0, ustar[i+s]) * dt * domain_mask[i]
         L₂ = dX - L₁ - L₃
-        
-        tmp_rho_    = (L₁ * rho[i-s]             + L₂ * rho[i]           + L₃ * rho[i+s]            ) / dX
-        tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] + L₂ * rho[i] * umat[i] + L₃ * rho[i+s] * umat[i+s]) / dX / tmp_rho_
-        tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+s] * vmat[i+s]) / dX / tmp_rho_
-        tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+s] * Emat[i+s]) / dX / tmp_rho_
-        tmp_rho[i]  = tmp_rho_
+
+        tmp_rho_    = (L₁ * rho[i-s]             + L₂ * rho[i]           + L₃ * rho[i+s]            )
+        tmp_urho[i] = (L₁ * rho[i-s] * umat[i-s] + L₂ * rho[i] * umat[i] + L₃ * rho[i+s] * umat[i+s]) / tmp_rho_
+        tmp_vrho[i] = (L₁ * rho[i-s] * vmat[i-s] + L₂ * rho[i] * vmat[i] + L₃ * rho[i+s] * vmat[i+s]) / tmp_rho_
+        tmp_Erho[i] = (L₁ * rho[i-s] * Emat[i-s] + L₂ * rho[i] * Emat[i] + L₃ * rho[i+s] * Emat[i+s]) / tmp_rho_
+        tmp_rho[i]  = tmp_rho_ / dX
     end
 
     # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
@@ -2058,6 +2096,426 @@ function first_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}
     end
 
     return NoneEvent()
+end
+
+
+function slope_minmod(uᵢ₋::T, uᵢ::T, uᵢ₊::T, r₋::T, r₊::T) where T
+    Δu₊ = r₊ * (uᵢ₊ - uᵢ )
+    Δu₋ = r₋ * (uᵢ  - uᵢ₋)
+    s = sign(Δu₊)
+    return s * max(0, min(s * Δu₊, s * Δu₋))
+end
+
+
+function second_order_euler_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, domain_mask) = data
+    (; dx, ideb, ifin, s) = params
+    @indexing_vars(params)
+
+    if params.use_gpu
+        error("Second order remap GPU NYI")
+    end
+
+    @time_expr "2nd_euler_remap" @simd_threaded_loop for i in ideb:ifin
+        dX = dx + dt * (ustar[i+s] - ustar[i])
+        L₁ =  max(0, ustar[i])   * dt * domain_mask[i]
+        L₃ = -min(0, ustar[i+s]) * dt * domain_mask[i]
+        L₂ = dX - L₁ - L₃
+
+        ρ₋₋  = rho[i-2s]
+        uρ₋₋ = rho[i-2s] * umat[i-2s]
+        vρ₋₋ = rho[i-2s] * vmat[i-2s]
+        Eρ₋₋ = rho[i-2s] * Emat[i-2s]
+
+        ρ₋   = rho[i-s]
+        uρ₋  = rho[i-s] * umat[i-s]
+        vρ₋  = rho[i-s] * vmat[i-s]
+        Eρ₋  = rho[i-s] * Emat[i-s]
+ 
+        ρ    = rho[i]
+        uρ   = rho[i] * umat[i]
+        vρ   = rho[i] * vmat[i]
+        Eρ   = rho[i] * Emat[i]
+
+        ρ₊   = rho[i+s]
+        uρ₊  = rho[i+s] * umat[i+s]
+        vρ₊  = rho[i+s] * vmat[i+s]
+        Eρ₊  = rho[i+s] * Emat[i+s]
+
+        ρ₊₊  = rho[i+2s]
+        uρ₊₊ = rho[i+2s] * umat[i+2s]
+        vρ₊₊ = rho[i+2s] * vmat[i+2s]
+        Eρ₊₊ = rho[i+2s] * Emat[i+2s]
+
+        # First order
+        tmp_ρ  = L₁ *  ρ₋ + L₂ *  ρ + L₃ *  ρ₊
+        tmp_uρ = L₁ * uρ₋ + L₂ * uρ + L₃ * uρ₊
+        tmp_vρ = L₁ * vρ₋ + L₂ * vρ + L₃ * vρ₊
+        tmp_Eρ = L₁ * Eρ₋ + L₂ * Eρ + L₃ * Eρ₊
+
+        # Lagrangian cells lengths
+        Δxᵢ₋₋ = dx + dt * (ustar[i-s]  - ustar[i-2s])
+        Δxᵢ₋  = dx + dt * (ustar[i]    - ustar[i-s] )
+        Δxᵢ   = dx + dt * (ustar[i+s]  - ustar[i]   )
+        Δxᵢ₊  = dx + dt * (ustar[i+2s] - ustar[i+s] )
+        Δxᵢ₊₊ = dx + dt * (ustar[i+3s] - ustar[i+2s])
+
+        # Second order, left contribution
+        r₋ = (2 * Δxᵢ₋) / (Δxᵢ₋ + Δxᵢ₋₋)
+        r₊ = (2 * Δxᵢ₋) / (Δxᵢ₋ + Δxᵢ  )
+
+        Δρ  = slope_minmod( ρ₋₋,  ρ₋,  ρ, r₋, r₊)
+        Δuρ = slope_minmod(uρ₋₋, uρ₋, uρ, r₋, r₊)
+        Δvρ = slope_minmod(vρ₋₋, vρ₋, vρ, r₋, r₊)
+        ΔEρ = slope_minmod(Eρ₋₋, Eρ₋, Eρ, r₋, r₊)
+
+        length_factor = (dx + dt * ustar[i-s]) / Δxᵢ₋
+        tmp_ρ  += L₁ / 2 * Δρ  * length_factor
+        tmp_uρ += L₁ / 2 * Δuρ * length_factor
+        tmp_vρ += L₁ / 2 * Δvρ * length_factor
+        tmp_Eρ += L₁ / 2 * ΔEρ * length_factor
+
+        # Second order, right contribution
+        r₋ = (2 * Δxᵢ₊) / (Δxᵢ₊ + Δxᵢ  )
+        r₊ = (2 * Δxᵢ₊) / (Δxᵢ₊ + Δxᵢ₊₊)
+
+        Δρ  = slope_minmod( ρ,  ρ₊,  ρ₊₊, r₋, r₊)
+        Δuρ = slope_minmod(uρ, uρ₊, uρ₊₊, r₋, r₊)
+        Δvρ = slope_minmod(vρ, vρ₊, vρ₊₊, r₋, r₊)
+        ΔEρ = slope_minmod(Eρ, Eρ₊, Eρ₊₊, r₋, r₊)
+
+        length_factor = (dx + dt * ustar[i+s]) / Δxᵢ₊
+        tmp_ρ  -= L₃ / 2 * Δρ  * length_factor
+        tmp_uρ -= L₃ / 2 * Δuρ * length_factor
+        tmp_vρ -= L₃ / 2 * Δvρ * length_factor
+        tmp_Eρ -= L₃ / 2 * ΔEρ * length_factor
+
+        # Finalisation
+        tmp_urho[i] = tmp_uρ / tmp_ρ
+        tmp_vrho[i] = tmp_vρ / tmp_ρ
+        tmp_Erho[i] = tmp_Eρ / tmp_ρ
+        tmp_rho[i]  = tmp_ρ  / dX
+    end
+
+    # (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+    @time_expr "2nd_euler_remap" @simd_threaded_loop for i in ideb:ifin
+        rho[i]  = tmp_rho[i]
+        umat[i] = tmp_urho[i]
+        vmat[i] = tmp_vrho[i]
+        Emat[i] = tmp_Erho[i]
+    end
+
+    return NoneEvent()
+end
+
+
+function second_order_euler_remap_precomp!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
+        range::DomainRange; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
+    (; dx, s) = params
+    @indexing_vars(params)
+
+    (main_range, inner_range) = range
+
+    if params.use_gpu
+        error("Second order remap GPU NYI")
+    end
+    
+    if params.current_axis == X_axis
+        slopes_main_range = main_range
+        slopes_inner_range = inflate(inner_range, 1)
+    else
+        slopes_main_range = inflate(main_range, 1)
+        slopes_inner_range = inner_range
+    end
+
+    @time_expr "2nd_euler_remap" @simd_threaded_iter slopes_main_range for i in slopes_inner_range
+        # Second order, slopes pre-calculation
+        Δxᵢ₋  = dx + dt * (ustar[i]    - ustar[i-s])
+        Δxᵢ   = dx + dt * (ustar[i+s]  - ustar[i]  )
+        Δxᵢ₊  = dx + dt * (ustar[i+2s] - ustar[i+s])
+
+        length_factor = 1 / Δxᵢ / 2
+
+        r₋ = (2 * Δxᵢ) / (Δxᵢ + Δxᵢ₋)
+        r₊ = (2 * Δxᵢ) / (Δxᵢ + Δxᵢ₊)
+
+        ρ₋   = rho[i-s]
+        ρ    = rho[i]
+        ρ₊   = rho[i+s]
+
+        # All slopes are written with an offset of +s, in order to prevent overriding values in the next step
+        tmp_rho[i+s] = slope_minmod( ρ₋,  ρ,  ρ₊, r₋, r₊) * length_factor
+
+        uρ₋  = ρ₋ * umat[i-s]
+        uρ   = ρ  * umat[i]
+        uρ₊  = ρ₊ * umat[i+s]
+        tmp_urho[i+s] = slope_minmod(uρ₋, uρ, uρ₊, r₋, r₊) * length_factor
+
+        vρ₋  = ρ₋ * vmat[i-s]
+        vρ   = ρ  * vmat[i]
+        vρ₊  = ρ₊ * vmat[i+s]
+        tmp_vrho[i+s] = slope_minmod(vρ₋, vρ, vρ₊, r₋, r₊) * length_factor
+
+        Eρ₋  = ρ₋ * Emat[i-s]
+        Eρ   = ρ  * Emat[i]
+        Eρ₊  = ρ₊ * Emat[i+s]
+        tmp_Erho[i+s] = slope_minmod(Eρ₋, Eρ, Eρ₊, r₋, r₊) * length_factor
+    end
+
+    @time_expr "2nd_euler_remap" @simd_threaded_iter main_range for i in inner_range
+        dX = dx + dt * (ustar[i+s] - ustar[i])
+        L₁ =  max(0, ustar[i])   * dt
+        L₃ = -min(0, ustar[i+s]) * dt
+        L₂ = dX - L₁ - L₃
+
+        if L₁ > 0
+            δxᵢ₋ = dx - dt * ustar[i-s]
+        else
+            δxᵢ₋ = dx + dt * ustar[i]
+        end
+
+        if L₃ < 0
+            δxᵢ₊ = dx - dt * ustar[i]
+        else
+            δxᵢ₊ = dx + dt * ustar[i+2s]
+        end
+
+        # Note: the slopes in tmp_xxx[i] are shifted by +s
+        
+        ρ₋   = rho[i-s]
+        ρ    = rho[i]
+        ρ₊   = rho[i+s]
+        tmp_ρ  = L₁ * (ρ₋ + tmp_rho[i] * δxᵢ₋) + L₂ * ρ + L₃ * (ρ₊ - tmp_rho[i+2s] * δxᵢ₊)
+
+        uρ₋  = ρ₋ * umat[i-s] + tmp_urho[i]    * δxᵢ₋
+        uρ   = ρ  * umat[i]
+        uρ₊  = ρ₊ * umat[i+s] - tmp_urho[i+2s] * δxᵢ₊
+        tmp_uρ = L₁ * uρ₋ + L₂ * uρ + L₃ * uρ₊
+
+        vρ₋  = ρ₋ * vmat[i-s] + tmp_vrho[i]    * δxᵢ₋
+        vρ   = ρ  * vmat[i]
+        vρ₊  = ρ₊ * vmat[i+s] - tmp_vrho[i+2s] * δxᵢ₊
+        tmp_vρ = L₁ * vρ₋ + L₂ * vρ + L₃ * vρ₊
+
+        Eρ₋  = ρ₋ * Emat[i-s] + tmp_Erho[i]    * δxᵢ₋
+        Eρ   = ρ  * Emat[i]
+        Eρ₊  = ρ₊ * Emat[i+s] - tmp_Erho[i+2s] * δxᵢ₊
+        tmp_Eρ = L₁ * Eρ₋ + L₂ * Eρ + L₃ * Eρ₊
+
+        # Finalisation: (ρ, ρu, ρv, ρE) -> (ρ, u, v, E)
+        # Since we know tmp_xxx[i] is not needed by other cells, we can overwrite it
+        tmp_urho[i] = tmp_uρ / tmp_ρ
+        tmp_vrho[i] = tmp_vρ / tmp_ρ
+        tmp_Erho[i] = tmp_Eρ / tmp_ρ
+        tmp_rho[i]  = tmp_ρ / dX
+    end
+
+    @time_expr "2nd_euler_remap" @simd_threaded_iter main_range for i in inner_range
+        rho[i]  = tmp_rho[i]
+        umat[i] = tmp_urho[i]
+        vmat[i] = tmp_vrho[i]
+        Emat[i] = tmp_Erho[i]
+    end
+
+    return NoneEvent()
+end
+
+
+function projection_1st_euler_conservative(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, 
+        range::DomainRange; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
+    (; dx, s) = params
+    (main_range, inner_range) = range
+
+    if params.use_gpu
+        error("remap GPU NYI")
+    end
+
+    @time_expr "euler_remap" @simd_threaded_iter main_range for i in inner_range
+        Δx  = dx
+        Δxₗ = Δx + dt * (ustar[i+s]  - ustar[i])
+
+        disp = dt * ustar[i]
+        if disp > 0
+            δρ₋  = disp * (rho[i-s]            )
+            δuρ₋ = disp * (rho[i-s] * umat[i-s])
+            δvρ₋ = disp * (rho[i-s] * vmat[i-s])
+            δEρ₋ = disp * (rho[i-s] * Emat[i-s])
+        else
+            δρ₋  = disp * (rho[i]              )
+            δuρ₋ = disp * (rho[i]   * umat[i]  )
+            δvρ₋ = disp * (rho[i]   * vmat[i]  )
+            δEρ₋ = disp * (rho[i]   * Emat[i]  )
+        end
+
+        disp = dt * ustar[i+s]
+        if disp > 0
+            δρ₊  = disp * (rho[i]              )
+            δuρ₊ = disp * (rho[i]   * umat[i]  )
+            δvρ₊ = disp * (rho[i]   * vmat[i]  )
+            δEρ₊ = disp * (rho[i]   * Emat[i]  )
+        else
+            δρ₊  = disp * (rho[i+s]            )
+            δuρ₊ = disp * (rho[i+s] * umat[i+s])
+            δvρ₊ = disp * (rho[i+s] * vmat[i+s])
+            δEρ₊ = disp * (rho[i+s] * Emat[i+s])
+        end
+
+        tmp_ρ  = (Δxₗ * rho[i]           - (δρ₊  - δρ₋ )) / Δx
+        tmp_uρ = (Δxₗ * rho[i] * umat[i] - (δuρ₊ - δuρ₋)) / Δx
+        tmp_vρ = (Δxₗ * rho[i] * vmat[i] - (δvρ₊ - δvρ₋)) / Δx
+        tmp_Eρ = (Δxₗ * rho[i] * Emat[i] - (δEρ₊ - δEρ₋)) / Δx
+
+        tmp_urho[i] = tmp_uρ / tmp_ρ
+        tmp_vrho[i] = tmp_vρ / tmp_ρ
+        tmp_Erho[i] = tmp_Eρ / tmp_ρ
+        tmp_rho[i]  = tmp_ρ
+    end
+
+    @time_expr "euler_remap" @simd_threaded_iter main_range for i in inner_range
+        rho[i]  = tmp_rho[i]
+        umat[i] = tmp_urho[i]
+        vmat[i] = tmp_vrho[i]
+        Emat[i] = tmp_Erho[i]
+    end
+
+    return NoneEvent()
+end
+
+
+function projection_2nd_euler_conservative(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, range::DomainRange;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    (; rho, umat, vmat, Emat, ustar, tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
+    (; dx, s) = params
+    (main_range, inner_range) = range
+
+    if params.use_gpu
+        error("Second order remap GPU NYI")
+    end
+
+    if params.current_axis == X_axis
+        slopes_main_range = main_range
+        slopes_inner_range = inflate(inner_range, 1)
+    else
+        slopes_main_range = inflate(main_range, 1)
+        slopes_inner_range = inner_range
+    end
+
+    @time_expr "2nd_euler_remap" @simd_threaded_iter main_range for i in inner_range
+        Δx = dx
+        
+        Δxₗ₋₋ = Δx + dt * (ustar[i-s]  - ustar[i-2s])
+        Δxₗ₋  = Δx + dt * (ustar[i]    - ustar[i-s] )
+        Δxₗ   = Δx + dt * (ustar[i+s]  - ustar[i]   )
+        Δxₗ₊  = Δx + dt * (ustar[i+2s] - ustar[i+s] )
+        Δxₗ₊₊ = Δx + dt * (ustar[i+3s] - ustar[i+2s])
+
+        r₋  = (2 * Δxₗ₋) / (Δxₗ₋ + Δxₗ₋₋)
+        r₊  = (2 * Δxₗ₋) / (Δxₗ₋ + Δxₗ  )
+
+        Δρᵢ₋  = slope_minmod(rho[i-2s]             , rho[i-s]            , rho[i]                , r₋, r₊)
+        Δuρᵢ₋ = slope_minmod(rho[i-2s] * umat[i-2s], rho[i-s] * umat[i-s], rho[i]    * umat[i]   , r₋, r₊)
+        Δvρᵢ₋ = slope_minmod(rho[i-2s] * vmat[i-2s], rho[i-s] * vmat[i-s], rho[i]    * vmat[i]   , r₋, r₊)
+        ΔEρᵢ₋ = slope_minmod(rho[i-2s] * Emat[i-2s], rho[i-s] * Emat[i-s], rho[i]    * Emat[i]   , r₋, r₊)
+
+        r₋  = (2 * Δxₗ) / (Δxₗ + Δxₗ₋)
+        r₊  = (2 * Δxₗ) / (Δxₗ + Δxₗ₊)
+
+        Δρᵢ   = slope_minmod(rho[i-s]              , rho[i]              , rho[i+s]              , r₋, r₊)
+        Δuρᵢ  = slope_minmod(rho[i-s]  * umat[i-s] , rho[i]   * umat[i]  , rho[i+s]  * umat[i+s] , r₋, r₊)
+        Δvρᵢ  = slope_minmod(rho[i-s]  * vmat[i-s] , rho[i]   * vmat[i]  , rho[i+s]  * vmat[i+s] , r₋, r₊)
+        ΔEρᵢ  = slope_minmod(rho[i-s]  * Emat[i-s] , rho[i]   * Emat[i]  , rho[i+s]  * Emat[i+s] , r₋, r₊)
+
+        r₋  = (2 * Δxₗ₊) / (Δxₗ₊ + Δxₗ  )
+        r₊  = (2 * Δxₗ₊) / (Δxₗ₊ + Δxₗ₊₊)
+        
+        Δρᵢ₊  = slope_minmod(rho[i]                , rho[i+s]            , rho[i+2s]             , r₋, r₊)
+        Δuρᵢ₊ = slope_minmod(rho[i]    * umat[i]   , rho[i+s] * umat[i+s], rho[i+2s] * umat[i+2s], r₋, r₊)
+        Δvρᵢ₊ = slope_minmod(rho[i]    * vmat[i]   , rho[i+s] * vmat[i+s], rho[i+2s] * vmat[i+2s], r₋, r₊)
+        ΔEρᵢ₊ = slope_minmod(rho[i]    * Emat[i]   , rho[i+s] * Emat[i+s], rho[i+2s] * Emat[i+2s], r₋, r₊)
+
+        disp = dt * ustar[i]
+        if disp > 0
+            length_factor = (Δx - dt * ustar[i-s] ) / Δxₗ₋ / 2
+            #length_factor = (Δx - dt * ustar[i-s] ) / Δx / 2
+            δρ₋  = disp * (rho[i-s]             + Δρᵢ₋  * length_factor)
+            δuρ₋ = disp * (rho[i-s] * umat[i-s] + Δuρᵢ₋ * length_factor)
+            δvρ₋ = disp * (rho[i-s] * vmat[i-s] + Δvρᵢ₋ * length_factor)
+            δEρ₋ = disp * (rho[i-s] * Emat[i-s] + ΔEρᵢ₋ * length_factor)
+        else
+            length_factor = (Δx + dt * ustar[i+s] ) / Δxₗ  / 2
+            #length_factor = (Δx + dt * ustar[i+s] ) / Δxₗ  / 2
+            δρ₋  = disp * (rho[i]               - Δρᵢ   * length_factor)
+            δuρ₋ = disp * (rho[i]   * umat[i]   - Δuρᵢ  * length_factor)
+            δvρ₋ = disp * (rho[i]   * vmat[i]   - Δvρᵢ  * length_factor)
+            δEρ₋ = disp * (rho[i]   * Emat[i]   - ΔEρᵢ  * length_factor)
+        end
+
+        disp = dt * ustar[i+s]
+        if disp > 0
+            length_factor = (Δx - dt * ustar[i]   ) / Δxₗ  / 2
+            #length_factor = (Δx - dt * ustar[i]   ) / Δx  / 2
+            δρ₊  = disp * (rho[i]               + Δρᵢ   * length_factor)
+            δuρ₊ = disp * (rho[i]   * umat[i]   + Δuρᵢ  * length_factor)
+            δvρ₊ = disp * (rho[i]   * vmat[i]   + Δvρᵢ  * length_factor)
+            δEρ₊ = disp * (rho[i]   * Emat[i]   + ΔEρᵢ  * length_factor)
+        else
+            length_factor = (Δx + dt * ustar[i+2s]) / Δxₗ₊ / 2
+            #length_factor = (Δx + dt * ustar[i+2s]) / Δx / 2
+            δρ₊  = disp * (rho[i+s]             - Δρᵢ₊  * length_factor)
+            δuρ₊ = disp * (rho[i+s] * umat[i+s] - Δuρᵢ₊ * length_factor)
+            δvρ₊ = disp * (rho[i+s] * vmat[i+s] - Δvρᵢ₊ * length_factor)
+            δEρ₊ = disp * (rho[i+s] * Emat[i+s] - ΔEρᵢ₊ * length_factor)
+        end
+
+        tmp_ρ  = (Δxₗ * rho[i]           - (δρ₊  - δρ₋ )) / Δx
+        tmp_uρ = (Δxₗ * rho[i] * umat[i] - (δuρ₊ - δuρ₋)) / Δx
+        tmp_vρ = (Δxₗ * rho[i] * vmat[i] - (δvρ₊ - δvρ₋)) / Δx
+        tmp_Eρ = (Δxₗ * rho[i] * Emat[i] - (δEρ₊ - δEρ₋)) / Δx
+
+        tmp_urho[i] = tmp_uρ / tmp_ρ
+        tmp_vrho[i] = tmp_vρ / tmp_ρ
+        tmp_Erho[i] = tmp_Eρ / tmp_ρ
+        tmp_rho[i]  = tmp_ρ
+    end
+
+    @time_expr "2nd_euler_remap" @simd_threaded_iter main_range for i in inner_range
+        rho[i]  = tmp_rho[i]
+        umat[i] = tmp_urho[i]
+        vmat[i] = tmp_vrho[i]
+        Emat[i] = tmp_Erho[i]
+    end
+
+    return NoneEvent()
+end
+
+
+function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    params.projection == :none && return
+    
+    if !params.single_comm_per_axis_pass
+        # Additionnal communications phase needed to get the new values of the lagrangian cells
+        dependencies = boundaryConditions!(params, data, host_array, axis; dependencies)
+    end
+
+    domain_ranges = compute_domain_ranges(params)
+
+    if params.projection == :euler
+        first_order_euler_remap!(params, data, dt; dependencies)
+    elseif params.projection == :euler_2nd
+        second_order_euler_remap!(params, data, dt; dependencies)
+    elseif params.projection == :euler_2nd_precomp
+        second_order_euler_remap_precomp!(params, data, dt, full_domain(domain_ranges); dependencies)
+    elseif params.projection == :euler_1st_cons
+        projection_1st_euler_conservative(params, data, dt, full_domain(domain_ranges); dependencies)
+    elseif params.projection == :euler_2nd_cons
+        projection_2nd_euler_conservative(params, data, dt, full_domain(domain_ranges); dependencies)
+    else
+        error("Unknown projection scheme: $(params.projection)")
+    end
 end
 
 #
@@ -2172,17 +2630,19 @@ function compute_domain_ranges(params::ArmonParameters)
     outer_rt_range = DomainRange((col_range, row_range))
 
     if params.single_comm_per_axis_pass
-        # Add one column/row on each of the 4 sides
-        inner_range = DomainRange((inflate(inner_range.col), inflate(inner_range.row)))
+        r = params.extra_ring_width
+
+        # Add 'r' columns/rows on each of the 4 sides
+        inner_range = DomainRange((inflate(inner_range.col, r), inflate(inner_range.row, r)))
         
         if current_axis == X_axis
-            # Shift the outer domain to the left and right by one cell, and add one row at the top and bottom
-            outer_lb_range = DomainRange((inflate(outer_lb_range.col, 1), shift(outer_lb_range.row, -1)))
-            outer_rt_range = DomainRange((inflate(outer_rt_range.col, 1), shift(outer_rt_range.row,  1)))
+            # Shift the outer domain to the left and right by 'r' cells, and add 'r' rows at the top and bottom
+            outer_lb_range = DomainRange((inflate(outer_lb_range.col, r), shift(outer_lb_range.row, -r)))
+            outer_rt_range = DomainRange((inflate(outer_rt_range.col, r), shift(outer_rt_range.row,  r)))
         else
-            # Shift the outer domain to the top and bottom by one cell, and add one column at the left and right
-            outer_lb_range = DomainRange((shift(outer_lb_range.col, -1), inflate(outer_lb_range.row, 1)))
-            outer_rt_range = DomainRange((shift(outer_rt_range.col,  1), inflate(outer_rt_range.row, 1)))
+            # Shift the outer domain to the top and bottom by 'r' cells, and add 'r' columns at the left and right
+            outer_lb_range = DomainRange((shift(outer_lb_range.col, -r), inflate(outer_lb_range.row, r)))
+            outer_rt_range = DomainRange((shift(outer_rt_range.col,  r), inflate(outer_rt_range.row, r)))
         end
     end
 
@@ -2198,7 +2658,7 @@ function write_result_single_file(params::ArmonParameters{T}, data::ArmonData{V}
     (; silent, nx, ny, nghost, row_length, col_length, output_dir, merge_files,
        is_root, cart_comm, cart_coords, global_grid) = params
 
-    if is_root && merge_files && !params.euler_projection
+    if is_root && merge_files && params.projection == :none
         @warn "The output is written in an uniform matrix format, which is incompatible with an non uniform grid." maxlog=1
     end
 
@@ -2310,6 +2770,41 @@ function write_result(params::ArmonParameters{T}, data::ArmonData{V},
     end
 end
 
+#
+# Conservation test
+# 
+
+function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+    (; rho, Emat, domain_mask, x, y) = data
+    (; ideb, ifin, dx, row_length) = params
+    
+    if params.projection == :none
+        @batch threadlocal=zeros(T, 2) for i in ideb:ifin
+            ds = (x[i+1] - x[i]) * (y[i+row_length] - y[i])
+            threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
+            threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
+        end
+    else
+        ds = dx * dx
+        @batch threadlocal=zeros(T, 2) for i in ideb:ifin
+            threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
+            threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
+        end
+    end
+
+    threadlocal = sum(threadlocal)  # Reduce the result of each thread
+
+    total_mass   = threadlocal[1]
+    total_energy = threadlocal[2]
+
+    if params.use_MPI
+        total_mass   = MPI.Reduce(total_mass,   MPI.Op(+, T), params.cart_comm)
+        total_energy = MPI.Reduce(total_energy, MPI.Op(+, T), params.cart_comm)
+    end
+
+    return total_mass, total_energy
+end
+
 # 
 # Main time loop
 # 
@@ -2331,6 +2826,10 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         host_array = Vector{T}(undef, length(data.tmp_comm_array))
     else
         host_array = Vector{T}()
+    end
+
+    if silent <= 1
+        initial_mass, initial_energy = conservation_vars(params, data)
     end
 
     last_i::Int, x_::V, u::V = update_axis_parameters(params, data, params.current_axis)
@@ -2392,14 +2891,8 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
             end
 
             @perf_task "loop" "cellUpdate" event = cellUpdate!(params, data, dt * dt_factor, u, x_; dependencies=event)
-    
-            if params.euler_projection
-                if !params.single_comm_per_axis_pass 
-                    event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
-                end
-                @perf_task "loop" "euler_proj" event = first_order_euler_remap!(params, data, dt * dt_factor; dependencies=event)
-            end
-
+            @perf_task "loop" "euler_proj" event = projection_remap!(params, data, dt * dt_factor; dependencies=event)
+            
             prev_event = event
         end
 
@@ -2413,8 +2906,13 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
 
         if is_root
             if silent <= 1
-                @printf("Cycle %4d: dt = %.18f, t = %.18f\n", cycle, dt, t)
+                current_mass, current_energy = conservation_vars(params, data)
+                ΔM = abs(initial_mass - current_mass)
+                ΔE = abs(initial_energy - current_energy)
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %.6f, |ΔE| = %.6f\n", cycle, dt, t, ΔM, ΔE)
             end
+        elseif silent <= 1
+            conservation_vars(params, data)
         end
 
         if cycle == 5
@@ -2537,7 +3035,7 @@ function armon(params::ArmonParameters{T}) where T
             axis_total_time = mapreduce(x->x[2], +, collect(time_contrib_axis))
             axis_time[axis] = axis_total_time
 
-            println("\nTime for each step of the $axis:          ( axis%,  total%)")
+            println("\nTime for each step of the $axis:          ( axis%) (total%)")
             for (step_label, step_time) in sort(collect(time_contrib_axis))
                 @printf(" - %-25s %10.5f ms (%5.2f%%) (%5.2f%%)\n", 
                     step_label, step_time / 1e6, step_time / axis_total_time * 100, step_time / total_time * 100)
