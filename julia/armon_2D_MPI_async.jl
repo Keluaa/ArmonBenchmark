@@ -402,7 +402,9 @@ function data_to_gpu(data::ArmonData{V}) where {T, V <: AbstractArray{T}}
         device_type(data.tmp_vrho),
         device_type(data.tmp_Erho),
         device_type(data.domain_mask),
-        device_type(data.tmp_comm_array)
+        device_type(data.tmp_comm_array),
+        device_type(data.work_array_1),
+        device_type(data.work_array_2)
     )
 end
 
@@ -2187,12 +2189,12 @@ function first_order_euler_remap_advection!(params::ArmonParameters{T}, data::Ar
         advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, Emat, ustar) = data
-    (; s) = params
+    (; dx, s) = params
     (main_range, inner_range) = range
 
     if params.use_gpu
         event = gpu_first_order_euler_remap!(
-            first(main_range), step(main_range_step), first(inner_range), length(inner_range), s,
+            first(main_range), step(main_range), first(inner_range), length(inner_range), s,
             dx, dt, ustar, rho, umat, vmat, Emat,
             advection_ρ, advection_uρ, advection_vρ, advection_Eρ;
             ndrange=length(main_range) * length(inner_range), dependencies)
@@ -2304,7 +2306,7 @@ function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T
     slopes_vρ = work_array_1
     slopes_Eρ = work_array_2
 
-    if params.projection == :euler_1st
+    if params.projection == :euler
         event = first_order_euler_remap_advection!(params, data, dt, advection_range,
             advection_ρ, advection_uρ, advection_vρ, advection_Eρ; dependencies)
     elseif params.projection == :euler_2nd

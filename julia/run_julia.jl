@@ -356,7 +356,7 @@ if use_MPI
     using .Armon
 
     # Create a communicator for each node of the MPI world
-    node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.MPI_COMM_TYPE_SHARED, rank)
+    node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.COMM_TYPE_SHARED, rank)
 
     # Get the rank and the number of processes running on the same node
     local_rank = MPI.Comm_rank(node_local_comm)
