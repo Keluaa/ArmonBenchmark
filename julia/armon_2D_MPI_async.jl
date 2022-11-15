@@ -349,8 +349,6 @@ struct ArmonData{V}
     tmp_Erho::V
     domain_mask::V
     tmp_comm_array::V
-    work_array_1::V
-    work_array_2::V
 end
 
 
@@ -374,9 +372,7 @@ function ArmonData(type::Type, size::Int64, tmp_comm_size::Int64)
         Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
-        Vector{type}(undef, tmp_comm_size),
-        Vector{type}(undef, size),
-        Vector{type}(undef, size)
+        Vector{type}(undef, tmp_comm_size)
     )
 end
 
@@ -402,9 +398,7 @@ function data_to_gpu(data::ArmonData{V}) where {T, V <: AbstractArray{T}}
         device_type(data.tmp_vrho),
         device_type(data.tmp_Erho),
         device_type(data.domain_mask),
-        device_type(data.tmp_comm_array),
-        device_type(data.work_array_1),
-        device_type(data.work_array_2)
+        device_type(data.tmp_comm_array)
     )
 end
 
@@ -1215,33 +1209,9 @@ end
 end
 
 
-@kernel function gpu_second_order_euler_remap_1_kernel!(
+@kernel function gpu_second_order_euler_remap_kernel!(
         main_range_start, main_range_step, inner_range_start, inner_range_length, s,
         dx, dt, @Const(ustar), @Const(rho), @Const(umat), @Const(vmat), @Const(Emat),
-        slopes_ρ, slopes_uρ, slopes_vρ, slopes_Eρ)
-    idx = @index(Global)
-    ix, iy = divrem(idx - 1, inner_range_length)
-    j = main_range_start  + ix * main_range_step - 1
-    i = inner_range_start + iy + j
-
-    Δxₗ₋  = dx + dt * (ustar[i]    - ustar[i-s])
-    Δxₗ   = dx + dt * (ustar[i+s]  - ustar[i]  )
-    Δxₗ₊  = dx + dt * (ustar[i+2s] - ustar[i+s])
-
-    r₋  = (2 * Δxₗ) / (Δxₗ + Δxₗ₋)
-    r₊  = (2 * Δxₗ) / (Δxₗ + Δxₗ₊)
-    
-    slopes_ρ[i]  = slope_minmod(rho[i-s]            , rho[i]          , rho[i+s]            , r₋, r₊)
-    slopes_uρ[i] = slope_minmod(rho[i-s] * umat[i-s], rho[i] * umat[i], rho[i+s] * umat[i+s], r₋, r₊)
-    slopes_vρ[i] = slope_minmod(rho[i-s] * vmat[i-s], rho[i] * vmat[i], rho[i+s] * vmat[i+s], r₋, r₊)
-    slopes_Eρ[i] = slope_minmod(rho[i-s] * Emat[i-s], rho[i] * Emat[i], rho[i+s] * Emat[i+s], r₋, r₊)
-end
-
-
-@kernel function gpu_second_order_euler_remap_2_kernel!(
-        main_range_start, main_range_step, inner_range_start, inner_range_length, s,
-        dx, dt, @Const(ustar), @Const(rho), @Const(umat), @Const(vmat), @Const(Emat),
-        @Const(slopes_ρ), @Const(slopes_uρ), @Const(slopes_vρ), @Const(slopes_Eρ),
         advection_ρ, advection_uρ, advection_vρ, advection_Eρ)
     idx = @index(Global)
     ix, iy = divrem(idx - 1, inner_range_length)
@@ -1257,12 +1227,23 @@ end
         Δxₑ = dx + dt * ustar[i+s]
     end
 
-    Δxₗ = dx + dt * (ustar[i+s] - ustar[i])
+    Δxₗ₋  = dx + dt * (ustar[i]    - ustar[i-s])
+    Δxₗ   = dx + dt * (ustar[i+s]  - ustar[i]  )
+    Δxₗ₊  = dx + dt * (ustar[i+2s] - ustar[i+s])
+
+    r₋  = (2 * Δxₗ) / (Δxₗ + Δxₗ₋)
+    r₊  = (2 * Δxₗ) / (Δxₗ + Δxₗ₊)
+
+    slopes_ρ  = slope_minmod(rho[i-s]            , rho[i]          , rho[i+s]            , r₋, r₊)
+    slopes_uρ = slope_minmod(rho[i-s] * umat[i-s], rho[i] * umat[i], rho[i+s] * umat[i+s], r₋, r₊)
+    slopes_vρ = slope_minmod(rho[i-s] * vmat[i-s], rho[i] * vmat[i], rho[i+s] * vmat[i+s], r₋, r₊)
+    slopes_Eρ = slope_minmod(rho[i-s] * Emat[i-s], rho[i] * Emat[i], rho[i+s] * Emat[i+s], r₋, r₊)
+
     length_factor = Δxₑ / (2 * Δxₗ)
-    advection_ρ[is]  = disp * (rho[i]           - slopes_ρ[i]  * length_factor)
-    advection_uρ[is] = disp * (rho[i] * umat[i] - slopes_uρ[i] * length_factor)
-    advection_vρ[is] = disp * (rho[i] * vmat[i] - slopes_vρ[i] * length_factor)
-    advection_Eρ[is] = disp * (rho[i] * Emat[i] - slopes_Eρ[i] * length_factor)
+    advection_ρ[is]  = disp * (rho[i]           - slopes_ρ  * length_factor)
+    advection_uρ[is] = disp * (rho[i] * umat[i] - slopes_uρ * length_factor)
+    advection_vρ[is] = disp * (rho[i] * vmat[i] - slopes_vρ * length_factor)
+    advection_Eρ[is] = disp * (rho[i] * Emat[i] - slopes_Eρ * length_factor)
 end
 
 
@@ -1285,8 +1266,7 @@ gpu_cell_update! = gpu_cell_update_kernel!(device, block_size)
 gpu_cell_update_lagrange! = gpu_cell_update_lagrange_kernel!(device, block_size)
 gpu_euler_projection! = gpu_euler_projection_kernel!(device, block_size)
 gpu_first_order_euler_remap! = gpu_first_order_euler_remap_kernel!(device, block_size)
-gpu_second_order_euler_remap_1! = gpu_second_order_euler_remap_1_kernel!(device, block_size)
-gpu_second_order_euler_remap_2! = gpu_second_order_euler_remap_2_kernel!(device, block_size)
+gpu_second_order_euler_remap! = gpu_second_order_euler_remap_kernel!(device, block_size)
 
 #
 # Acoustic Riemann problem solvers
@@ -1529,7 +1509,7 @@ end
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; x, y, rho, umat, vmat, pmat, cmat, Emat, 
-       ustar, pstar, ustar_1, pstar_1, work_array_1, work_array_2, domain_mask) = data
+       ustar, pstar, ustar_1, pstar_1, domain_mask) = data
     (; test, nghost, nbcell, nx, ny, row_length, cart_coords, global_grid) = params
 
     if test == :Sod || test == :Sod_y || test == :Sod_circ
@@ -1627,8 +1607,6 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         pstar[i] = 0.
         ustar_1[i] = 0.
         pstar_1[i] = 0.
-        work_array_1[i] = 0.
-        work_array_2[i] = 0.
     end
     
     return
@@ -2094,7 +2072,7 @@ function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
 end
 
 # 
-# Cell update and euler projection
+# Lagrangian cell update
 # 
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
@@ -2140,6 +2118,9 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
     return NoneEvent()
 end
 
+#
+# Euler projection
+#
 
 function slope_minmod(uᵢ₋::T, uᵢ::T, uᵢ₊::T, r₋::T, r₊::T) where T
     Δu₊ = r₊ * (uᵢ₊ - uᵢ )
@@ -2221,7 +2202,6 @@ end
 
 function second_order_euler_remap_advection!(params::ArmonParameters{T}, data::ArmonData{V}, 
         dt::T, range::DomainRange,
-        slopes_ρ::V, slopes_uρ::V, slopes_vρ::V, slopes_Eρ::V,
         advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; rho, umat, vmat, Emat, ustar) = data
@@ -2229,38 +2209,15 @@ function second_order_euler_remap_advection!(params::ArmonParameters{T}, data::A
     (main_range, inner_range) = range
 
     if params.use_gpu
-        event = gpu_second_order_euler_remap_1!(
+        event = gpu_second_order_euler_remap!(
             first(main_range), step(main_range), first(inner_range), length(inner_range), s,
             dx, dt, ustar, rho, umat, vmat, Emat,
-            slopes_ρ, slopes_uρ, slopes_vρ, slopes_Eρ;
-            ndrange=length(main_range) * length(inner_range), dependencies)
-
-        event = gpu_second_order_euler_remap_2!(
-            first(main_range), step(main_range), first(inner_range), length(inner_range), s,
-            dx, dt, ustar, rho, umat, vmat, Emat,
-            slopes_ρ, slopes_uρ, slopes_vρ, slopes_Eρ,
             advection_ρ, advection_uρ, advection_vρ, advection_Eρ;
-            ndrange=length(main_range) * length(inner_range), dependencies=event)
+            ndrange=length(main_range) * length(inner_range), dependencies)
 
         return @time_event "euler_remap_2nd" event
     end
 
-    @time_expr "euler_remap_2nd" @simd_threaded_iter main_range for i in inner_range
-        Δxₗ₋  = dx + dt * (ustar[i]    - ustar[i-s])
-        Δxₗ   = dx + dt * (ustar[i+s]  - ustar[i]  )
-        Δxₗ₊  = dx + dt * (ustar[i+2s] - ustar[i+s])
-
-        r₋  = (2 * Δxₗ) / (Δxₗ + Δxₗ₋)
-        r₊  = (2 * Δxₗ) / (Δxₗ + Δxₗ₊)
-
-        slopes_ρ[i]  = slope_minmod(rho[i-s]            , rho[i]          , rho[i+s]            , r₋, r₊)
-        slopes_uρ[i] = slope_minmod(rho[i-s] * umat[i-s], rho[i] * umat[i], rho[i+s] * umat[i+s], r₋, r₊)
-        slopes_vρ[i] = slope_minmod(rho[i-s] * vmat[i-s], rho[i] * vmat[i], rho[i+s] * vmat[i+s], r₋, r₊)
-        slopes_Eρ[i] = slope_minmod(rho[i-s] * Emat[i-s], rho[i] * Emat[i], rho[i+s] * Emat[i+s], r₋, r₊)
-    end
-
-    # TODO : try to fuse those two loops, therefore removing 4 arrays, at the cost of more calcs
-    
     @time_expr "euler_remap_2nd" @simd_threaded_iter main_range for i in inner_range
         is = i
         disp = dt * ustar[i]
@@ -2271,12 +2228,23 @@ function second_order_euler_remap_advection!(params::ArmonParameters{T}, data::A
             Δxₑ = dx + dt * ustar[i+s]
         end
 
-        Δxₗ = dx + dt * (ustar[i+s] - ustar[i])
+        Δxₗ₋  = dx + dt * (ustar[i]    - ustar[i-s])
+        Δxₗ   = dx + dt * (ustar[i+s]  - ustar[i]  )
+        Δxₗ₊  = dx + dt * (ustar[i+2s] - ustar[i+s])
+
+        r₋  = (2 * Δxₗ) / (Δxₗ + Δxₗ₋)
+        r₊  = (2 * Δxₗ) / (Δxₗ + Δxₗ₊)
+
+        slopes_ρ  = slope_minmod(rho[i-s]            , rho[i]          , rho[i+s]            , r₋, r₊)
+        slopes_uρ = slope_minmod(rho[i-s] * umat[i-s], rho[i] * umat[i], rho[i+s] * umat[i+s], r₋, r₊)
+        slopes_vρ = slope_minmod(rho[i-s] * vmat[i-s], rho[i] * vmat[i], rho[i+s] * vmat[i+s], r₋, r₊)
+        slopes_Eρ = slope_minmod(rho[i-s] * Emat[i-s], rho[i] * Emat[i], rho[i+s] * Emat[i+s], r₋, r₊)
+
         length_factor = Δxₑ / (2 * Δxₗ)
-        advection_ρ[is]  = disp * (rho[i]           - slopes_ρ[i]  * length_factor)
-        advection_uρ[is] = disp * (rho[i] * umat[i] - slopes_uρ[i] * length_factor)
-        advection_vρ[is] = disp * (rho[i] * vmat[i] - slopes_vρ[i] * length_factor)
-        advection_Eρ[is] = disp * (rho[i] * Emat[i] - slopes_Eρ[i] * length_factor)
+        advection_ρ[is]  = disp * (rho[i]           - slopes_ρ  * length_factor)
+        advection_uρ[is] = disp * (rho[i] * umat[i] - slopes_uρ * length_factor)
+        advection_vρ[is] = disp * (rho[i] * vmat[i] - slopes_vρ * length_factor)
+        advection_Eρ[is] = disp * (rho[i] * Emat[i] - slopes_Eρ * length_factor)
     end
     
     return NoneEvent()
@@ -2292,7 +2260,7 @@ function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T
         dependencies = boundaryConditions!(params, data, host_array, axis; dependencies)
     end
 
-    (; tmp_rho, tmp_urho, tmp_vrho, tmp_Erho, ustar_1, pstar_1, work_array_1, work_array_2) = data
+    (; tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
     domain_ranges = compute_domain_ranges(params)
     advection_range = full_domain_projection_advection(domain_ranges)
 
@@ -2301,17 +2269,11 @@ function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T
     advection_vρ = tmp_vrho
     advection_Eρ = tmp_Erho
 
-    slopes_ρ  = ustar_1
-    slopes_uρ = pstar_1
-    slopes_vρ = work_array_1
-    slopes_Eρ = work_array_2
-
     if params.projection == :euler
         event = first_order_euler_remap_advection!(params, data, dt, advection_range,
             advection_ρ, advection_uρ, advection_vρ, advection_Eρ; dependencies)
     elseif params.projection == :euler_2nd
-        event = second_order_euler_remap_advection!(params, data, dt, advection_range,
-            slopes_ρ, slopes_uρ, slopes_vρ, slopes_Eρ,
+        event = second_order_euler_remap_advection_2!(params, data, dt, advection_range,
             advection_ρ, advection_uρ, advection_vρ, advection_Eρ; dependencies)
     else
         error("Unknown projection scheme: $(params.projection)")
@@ -2581,24 +2543,41 @@ function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where
     (; rho, Emat, domain_mask, x, y) = data
     (; ideb, ifin, dx, row_length) = params
     
-    if params.projection == :none
-        @batch threadlocal=zeros(T, 2) for i in ideb:ifin
-            ds = (x[i+1] - x[i]) * (y[i+row_length] - y[i])
-            threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
-            threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
+    if params.use_gpu
+        if params.projection == :none
+            total_mass = @inbounds reduce(+, @views (
+                rho[ideb:ifin] .* domain_mask[ideb:ifin]
+                .* (x[ideb+1:ifin+1] .- x[ideb:ifin])
+                .* (y[ideb+row_length:ifin+row_length] .- y[ideb:ifin])))
+            total_energy = @inbounds reduce(+, @views (
+                rho[ideb:ifin] .* Emat[ideb:ifin] .* domain_mask[ideb:ifin]
+                .* (x[ideb+1:ifin+1] .- x[ideb:ifin])
+                .* (y[ideb+row_length:ifin+row_length] .- y[ideb:ifin])))
+        else
+            total_mass = @inbounds reduce(+, @views (
+                rho[ideb:ifin] .* domain_mask[ideb:ifin] .* (dx * dx)))
+            total_energy = @inbounds reduce(+, @views (
+                rho[ideb:ifin] .* Emat[ideb:ifin] .* domain_mask[ideb:ifin] .* (dx * dx)))
         end
     else
-        ds = dx * dx
-        @batch threadlocal=zeros(T, 2) for i in ideb:ifin
-            threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
-            threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
+        if params.projection == :none
+            @batch threadlocal=zeros(T, 2) for i in ideb:ifin
+                ds = (x[i+1] - x[i]) * (y[i+row_length] - y[i])
+                threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
+                threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
+            end
+        else
+            ds = dx * dx
+            @batch threadlocal=zeros(T, 2) for i in ideb:ifin
+                threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
+                threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
+            end
         end
+
+        threadlocal  = sum(threadlocal)  # Reduce the result of each thread
+        total_mass   = threadlocal[1]
+        total_energy = threadlocal[2]
     end
-
-    threadlocal = sum(threadlocal)  # Reduce the result of each thread
-
-    total_mass   = threadlocal[1]
-    total_energy = threadlocal[2]
 
     if params.use_MPI
         total_mass   = MPI.Reduce(total_mass,   MPI.Op(+, T), params.cart_comm)
