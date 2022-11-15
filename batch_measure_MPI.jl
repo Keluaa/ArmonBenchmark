@@ -427,6 +427,7 @@ julia batch_measure.jl [--override-node=<node>,<new node>]
                        [--do-only=<measures count>]
                        [--skip-first=<combinaison count>]
                        [--count=<combinaison count>]
+                       [--help]
                        <script files>...'
 """
 
@@ -463,8 +464,10 @@ function parse_arguments()
             elseif (startswith(arg, "--count="))
                 value = split(arg, '=')[2]
                 comb_count = parse(Int, value)
+            elseif arg == "--help" || arg == "-h"
+                println(USAGE)
             else
-                error("Wrong batch option: " * arg)
+                error("Wrong batch option: " * arg * "\n" * USAGE)
             end
         else
             # Measure file
@@ -1163,7 +1166,14 @@ function main()
 
     # Main loop, running in the login node, parsing through all measurments to do
     setup_env()
-    for (i, measure) in Iterators.take(Iterators.drop(enumerate(measures), start_at - 1), do_only)
+
+    measures_to_do = Iterators.take(Iterators.drop(enumerate(measures), start_at - 1), do_only)
+    if length(measures_to_do) == 0
+        println("Nothing to do.")
+        return
+    end
+
+    for (i, measure) in measures_to_do
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
 
         if isempty(measure.node)
