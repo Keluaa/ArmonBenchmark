@@ -28,6 +28,8 @@ use_threading = true
 use_simd = true
 interleaving = false
 use_gpu = false
+block_size = 1024
+gpu = :CUDA
 threads_places = :cores
 threads_proc_bind = :close
 dimension = 2
@@ -250,19 +252,18 @@ while i <= length(ARGS)
 
     # Additionnal params
     elseif arg == "--gpu"
-        gpu = ARGS[i+1]
+        global gpu = Symbol(uppercase(ARGS[i+1]))
         global i += 1
-        if gpu == "ROCM"
+        if gpu == :ROCM
             ENV["USE_ROCM_GPU"] = "true"
-        elseif gpu == "CUDA"
+        elseif gpu == :CUDA
             ENV["USE_ROCM_GPU"] = "false"
         else
-            println("Unknown gpu: ", gpu)
-            exit(1)
+            error("Unknown gpu: " * gpu)
         end
         global use_gpu = true
     elseif arg == "--block-size"
-        block_size = parse(Int, ARGS[i+1])
+        global block_size = parse(Int, ARGS[i+1])
         global i += 1
         ENV["GPU_BLOCK_SIZE"] = block_size
     elseif arg == "--limit-to-mem"
@@ -314,7 +315,7 @@ end
 if use_MPI
     if use_gpu
         # We must select a GPU before initializing MPI
-        if parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
+        if gpu == :ROCM
             error("ROCM is, for now, not MPI aware")
         end
 
@@ -443,7 +444,7 @@ if use_MPI
                 test=test, nx=domain[1], ny=domain[2],
                 transpose_dims, axis_splitting, 
                 maxtime, maxcycle, silent, output_file, write_output, write_ghosts, measure_time,
-                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
+                use_ccall, use_threading, use_simd, use_gpu, gpu, block_size, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms)
         end
     elseif mpi_impl == :transpose
@@ -520,7 +521,7 @@ end
 
 
 if use_gpu && is_root
-    if parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
+    if gpu == :ROCM
         println("Using ROCM GPU")
     else
         println("Using CUDA GPU")
@@ -563,7 +564,7 @@ end
 
 
 function get_gpu_max_mem()
-    if parse(Bool, get(ENV, "USE_ROCM_GPU", "false"))
+    if gpu== :ROCM
         is_root && @warn "AMDGPU.jl doesn't know how much memory there is. Using the a default value of 32GB" maxlog=1
         return 32*10^9
     else
