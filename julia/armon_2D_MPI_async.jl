@@ -18,7 +18,7 @@ export ArmonParameters, armon
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
 # Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
-# Merge GAD and euler 2nd kernels into a single one
+# Merge GAD and euler 2nd kernels into a single one + delete the unneeded arrays
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
 # Bug: the Bizarrium EOS gives NaNs on the CPU
 
@@ -787,7 +787,7 @@ end
     is = i
     disp = dt * ustar[i]
     if disp > 0
-        Δxₑ = dx - dt * ustar[i-s]
+        Δxₑ = -(dx - dt * ustar[i-s])
         i = i - s
     else
         Δxₑ = dx + dt * ustar[i+s]
