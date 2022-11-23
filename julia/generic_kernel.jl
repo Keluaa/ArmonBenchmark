@@ -98,9 +98,9 @@ function make_simd_threaded_loop(expr::Expr; threading=:dynamic, simd=:dynamic, 
         range_expr.args[1] = :(__i_idx)
         range_expr.args[2] = :(1:__loop_length)
 
-        # Add in the loop body, before the first statement: `i = range_var[__i_idx] - 1 + __j`
+        # Add in the loop body, before the first statement: `i = range_var[__i_idx] - 1 + __j_iter`
         first_expr_idx = loop_body.args[1] isa LineNumberNode ? 2 : 1
-        insert!(loop_body.args, first_expr_idx, :($i = __loop_range[__i_idx] - 1 + __j))
+        insert!(loop_body.args, first_expr_idx, :($i = __loop_range[__i_idx] - 1 + __j_iter))
     end
 
     return quote
@@ -363,9 +363,9 @@ function options_list_to_dict(raw_options)
 end
 
 
-function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr})
+function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}, device::Symbol)
     indexing_type = :none
-    uses_iteration_index = false
+    used_indexing_types = Set{Symbol}()
     options = nothing
 
     new_body = MacroTools.postwalk(body) do expr
@@ -397,24 +397,27 @@ function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}
             else
                 return expr
             end
+        elseif device == :CPU && @capture(expr, @print(opts__))
+            return Expr(:call, :print, opts...)
         else
             return expr
         end
 
         if stmt_indexing_type == :iter_idx
             # @iter_idx can be mixed with the other indexing macros
-            uses_iteration_index = true
         elseif indexing_type == :none
             indexing_type = stmt_indexing_type
         elseif stmt_indexing_type != indexing_type
             error("Cannot mix calls to @index_1D_lin() and @index_2D_lin() in the same kernel")
         end
 
+        push!(used_indexing_types, stmt_indexing_type)
+
         # Replace the macro accordingly
-        return indexing_replacements[stmt_indexing_type]
+        return unblock(indexing_replacements[stmt_indexing_type])
     end
 
-    return new_body, indexing_type, uses_iteration_index, options_list_to_dict(options)
+    return new_body, indexing_type, used_indexing_types, options_list_to_dict(options)
 end
 
 
@@ -465,11 +468,13 @@ function transform_kernel(func::Expr)
 
     cpu_def = deepcopy(def)
 
-    cpu_body, indexing_type, uses_iteration_index, options = kernel_body_pass!(cpu_def[:body], Dict(
+    cpu_body, indexing_type, used_indexing_types, options = kernel_body_pass!(cpu_def[:body], Dict(
         :lin_1D => quote $loop_index_name end,
         :lin_2D => quote $loop_index_name end,
         :iter_idx => quote __j_iter + __i_idx end
-    ))
+    ), :CPU)
+
+    uses_iteration_index = :iter_idx in used_indexing_types
 
     # Wrap the kernel body with a multi-threaded loop with SIMD
     if indexing_type == :lin_1D
@@ -530,33 +535,54 @@ function transform_kernel(func::Expr)
 
     gpu_def = deepcopy(def)
 
-    var_i, var_j = gensym(:i), gensym(:j)
+    var_global_lin = gensym(:I_gl_lin)
+    var_global_ntuple = gensym(:I_gl_ntuple)
+    var_1D_lin = gensym(:I_1D_lin)
+    var_2D_lin = gensym(:I_2D_lin)
+
     gpu_def[:body], _, _, _ = kernel_body_pass!(gpu_def[:body], Dict(
-        :lin_1D => quote @index(Global, Linear) + i_0 end,
-        :lin_2D => quote
-            let
-                ($var_i, $var_j) = @index(Global, NTuple)
-                $loop_index_name = i_0 + $var_j * row_length + $var_i
-                $loop_index_name
-            end
-        end,
-        :iter_idx => quote @index(Global, Linear) end
-    ))
+        :lin_1D => quote $var_1D_lin end,
+        :lin_2D => quote $var_2D_lin end,
+        :iter_idx => quote $var_global_lin end
+    ), :GPU)
+
+    use_1D_lin = :lin_1D in used_indexing_types
+    use_2D_lin = :lin_2D in used_indexing_types
+    use_global_lin = :iter_idx in used_indexing_types || use_1D_lin
+    use_global_ntuple = use_2D_lin
+
+    # KernelAbstractions parses only the first layer statements of the kernel body, and doesn't 
+    # recurse into it. Therefore in order to properly initialize the `@index` macros we store into
+    # tmp varaiables the result of the `@index` macro used in the loop body.
+    indexing_init = quote
+        $(use_global_lin    ? :($var_global_lin    = @index(Global, Linear)) : Expr(:block))
+        $(use_global_ntuple ? :($var_global_ntuple = @index(Global, NTuple)) : Expr(:block))
+        $(use_1D_lin        ? :($var_1D_lin = $var_global_lin + i_0)         : Expr(:block))
+        $(use_2D_lin        ? :(
+            $var_2D_lin = $var_global_ntuple[1] * row_length + $var_global_ntuple[2] + i_0
+        ) : Expr(:block))
+    end
+    pushfirst!(gpu_def[:body].args, indexing_init.args...)
 
     # Adjust the GPU parameters
+    # Note: For the initial index `i_0`, we substract 1 because of how the main and inner ranges are
+    # defined, and substract 1+row_length because of the fact that the index returned by the `@index`
+    # starts at 1 and not 0.
     if indexing_type == :lin_1D
         gpu_loop_params = (:(i_0::Int),)
-        gpu_loop_params_names = (:(first(loop_range) - 1),)
+        gpu_loop_params_names = (:(first(loop_range) - 2),)
         gpu_ndrange = :(length(loop_range))
+        gpu_params_unpack = Expr(:block)
     elseif indexing_type == :lin_2D
         # Don't add 'row_length' to the GPU kernel parameters if it is already present
         if is_row_length_in_args
             gpu_loop_params = (:(i_0::Int),)
-            gpu_loop_params_names = (:(first(main_range) - row_length - 1),)
+            gpu_loop_params_names = (:(first(main_range) + first(inner_range) - row_length - 2),)
         else
             gpu_loop_params = (:(i_0::Int), :(row_length::Int))
-            gpu_loop_params_names = (:(first(main_range) - row_length - 1), :row_length)
+            gpu_loop_params_names = (:(first(main_range) + first(inner_range) - row_length - 2), :row_length)
         end
+        gpu_params_unpack = :((; row_length) = params)
         gpu_ndrange = :((length(main_range), length(inner_range)))
     end
 
@@ -640,7 +666,8 @@ function transform_kernel(func::Expr)
         $data_unpack
         $main_loop_arg_unpack
         if params.use_gpu
-            gpu_kernel_func = $kernel_func_name(params.device, params.block_size)  # Get the right KernelAbstraction function
+            $gpu_params_unpack
+            gpu_kernel_func = $kernel_func_name(params.device, params.block_size)  # Get the right KernelAbstraction function...
             ndrange = $(gpu_ndrange)
             return $(gpu_call)  # ...then call it
         else

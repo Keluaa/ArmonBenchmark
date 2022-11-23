@@ -34,6 +34,10 @@ threads_places = :cores
 threads_proc_bind = :close
 dimension = 2
 use_temp_vars_for_projection = false
+output_precision = 6
+compare = false
+compare_ref = false
+comparison_tol = 1e-10
 
 transpose_dims = []
 axis_splitting = []
@@ -82,6 +86,8 @@ end
 i = 1
 while i <= length(ARGS)
     arg = ARGS[i]
+
+    # Solver params
     if arg == "-s"
         global scheme = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
@@ -94,9 +100,6 @@ while i <= length(ARGS)
     elseif arg == "--riemann"
         global riemann = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
-    elseif arg == "--verbose"
-        global silent = parse(Int, ARGS[i+1])
-        global i += 1
     elseif arg == "--time"
         global maxtime = parse(Float64, ARGS[i+1])
         global i += 1
@@ -105,30 +108,6 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--dt"
         global Dt = parse(Float64, ARGS[i+1])
-        global i += 1
-    elseif arg == "--output-file"
-        global output_file = ARGS[i+1]
-        global i += 1
-    elseif arg == "--write-output"
-        global write_output = parse(Bool, ARGS[i+1])
-        global i += 1
-    elseif arg == "--write-ghosts"
-        global write_ghosts = parse(Bool, ARGS[i+1])
-        global i += 1
-    elseif arg == "--use-ccall"
-        global use_ccall = parse(Bool, ARGS[i+1])
-        global i += 1
-    elseif arg == "--use-threading"
-        global use_threading = parse(Bool, ARGS[i+1])
-        global i += 1
-    elseif arg == "--use-simd"
-        global use_simd = parse(Bool, ARGS[i+1])
-        global i += 1
-    elseif arg == "--interleaving"
-        global interleaving = parse(Bool, ARGS[i+1])
-        global i += 1
-    elseif arg == "--use-gpu"
-        global use_gpu = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--euler"
         global euler_projection = parse(Bool, ARGS[i+1])
@@ -147,6 +126,80 @@ while i <= length(ARGS)
     elseif arg == "--nghost"
         global nghost = parse(Int, ARGS[i+1])
         global i += 1
+
+    # Solver output params
+    elseif arg == "--verbose"
+        global silent = parse(Int, ARGS[i+1])
+        global i += 1
+    elseif arg == "--output-file"
+        global output_file = ARGS[i+1]
+        global i += 1
+    elseif arg == "--write-output"
+        global write_output = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--write-ghosts"
+        global write_ghosts = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--output-digits"
+        global output_precision = parse(Int, ARGS[i+1])
+        global i += 1
+    elseif arg == "--compare"
+        global compare = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--compare-ref"
+        global compare_ref = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--comparision-tolerance"
+        global comparison_tol = parse(Float64, ARSG[i+1])
+        global i += 1
+
+    # Multithreading params
+    elseif arg == "--use-threading"
+        global use_threading = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--use-simd"
+        global use_simd = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--use-ccall"
+        global use_ccall = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--interleaving"
+        global interleaving = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--use-std-threads"
+        use_std_threads = parse(Bool, ARGS[i+1])
+        if use_std_threads
+            ENV["USE_STD_LIB_THREADS"] = "true"
+        else
+            ENV["USE_STD_LIB_THREADS"] = "false"
+        end
+        global i += 1
+    elseif arg == "--threads-places"
+        global threads_places = Symbol(ARGS[i+1])
+        global i += 1
+    elseif arg == "--threads-proc-bind"
+        global threads_proc_bind = Symbol(ARGS[i+1])
+        global i += 1
+
+    # GPU params
+    elseif arg == "--use-gpu"
+        global use_gpu = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--gpu"
+        global gpu = Symbol(uppercase(ARGS[i+1]))
+        global i += 1
+        if gpu == :ROCM
+            ENV["USE_ROCM_GPU"] = "true"
+        elseif gpu == :CUDA
+            ENV["USE_ROCM_GPU"] = "false"
+        else
+            error("Unknown gpu: " * gpu)
+        end
+        global use_gpu = true
+    elseif arg == "--block-size"
+        global block_size = parse(Int, ARGS[i+1])
+        global i += 1
+        ENV["GPU_BLOCK_SIZE"] = block_size
 
     # 1D only params
     elseif arg == "--iterations"
@@ -249,29 +302,14 @@ while i <= length(ARGS)
     elseif arg == "--hw-counters"
         global hw_counters_options = ARGS[i+1]
         global i += 1
-
-    # Additionnal params
-    elseif arg == "--gpu"
-        global gpu = Symbol(uppercase(ARGS[i+1]))
-        global i += 1
-        if gpu == :ROCM
-            ENV["USE_ROCM_GPU"] = "true"
-        elseif gpu == :CUDA
-            ENV["USE_ROCM_GPU"] = "false"
-        else
-            error("Unknown gpu: " * gpu)
-        end
-        global use_gpu = true
-    elseif arg == "--block-size"
-        global block_size = parse(Int, ARGS[i+1])
-        global i += 1
-        ENV["GPU_BLOCK_SIZE"] = block_size
-    elseif arg == "--limit-to-mem"
-        global limit_to_max_mem = parse(Bool, ARGS[i+1])
-        global i += 1
     elseif arg == "--repeats"
         global repeats = parse(Int, ARGS[i+1])
         global i += 1
+    elseif arg == "--limit-to-mem"
+        global limit_to_max_mem = parse(Bool, ARGS[i+1])
+        global i += 1
+
+    # Measurement output params
     elseif arg == "--data-file"
         global base_file_name = ARGS[i+1]
         global i += 1
@@ -289,20 +327,6 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--gnuplot-MPI-script"
         global gnuplot_MPI_script = ARGS[i+1]
-        global i += 1
-    elseif arg == "--use-std-threads"
-        use_std_threads = parse(Bool, ARGS[i+1])
-        if use_std_threads
-            ENV["USE_STD_LIB_THREADS"] = "true"
-        else
-            ENV["USE_STD_LIB_THREADS"] = "false"
-        end
-        global i += 1
-    elseif arg == "--threads-places"
-        global threads_places = Symbol(ARGS[i+1])
-        global i += 1
-    elseif arg == "--threads-proc-bind"
-        global threads_proc_bind = Symbol(ARGS[i+1])
         global i += 1
     else
         println("Wrong option: ", arg)
@@ -443,9 +467,11 @@ if use_MPI
                 nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 transpose_dims, axis_splitting, 
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, measure_time,
-                use_ccall, use_threading, use_simd, use_gpu, gpu, block_size, use_MPI, px, py, 
-                single_comm_per_axis_pass, reorder_grid, async_comms)
+                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, output_precision, 
+                measure_time,
+                use_ccall, use_threading, use_simd, use_gpu, device=gpu, block_size, use_MPI, px, py, 
+                single_comm_per_axis_pass, reorder_grid, async_comms,
+                compare, is_ref=compare_ref, comparison_tolerance=comparison_tol)
         end
     elseif mpi_impl == :transpose
         function build_params(test, domain; 
