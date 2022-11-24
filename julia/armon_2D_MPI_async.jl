@@ -20,7 +20,7 @@ export ArmonParameters, armon
 # Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
 # Merge GAD and euler 2nd kernels into a single one + delete the unneeded arrays
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
-# Bug: the Bizarrium EOS gives NaNs on the CPU
+# Bug: fix dtCFL on AMDGPU
 
 # MPI Init
 
@@ -312,6 +312,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - use_ccall:  ", p.use_ccall)
     print(" - use_gpu:    ", p.use_gpu)
     if p.use_gpu
+        print(", ")
         if p.device == CPU()
             println("CPU")
         elseif p.device == CUDADevice()
@@ -468,90 +469,7 @@ end
 # Domain ranges
 #
 
-shift(r::AbstractUnitRange,   n::Int = 1) = r .+ n
-shift(r::OrdinalRange,        n::Int = 1) = r .+ (step(r) * n)
-expand(r::AbstractUnitRange,  n::Int = 1) = first(r):(last(r)+n)
-expand(r::OrdinalRange,       n::Int = 1) = first(r):step(r):(last(r)+step(r)*n)
-prepend(r::AbstractUnitRange, n::Int = 1) = (first(r)-n):last(r)
-prepend(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):last(r)
-inflate(r::AbstractUnitRange, n::Int = 1) = (first(r)-n):(last(r)+n)
-inflate(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):(last(r)+step(r)*n)
-
-
-function union(r1::AbstractUnitRange, r2::AbstractUnitRange)
-    if last(r1) + 1 < first(r2) || last(r2) + 1 < first(r1)
-        error("The ranges $r1 and $r2 are disjoint")
-    else
-        return min(first(r1), first(r2)):max(last(r1), last(r2))
-    end
-end
-
-
-function union(r1::OrdinalRange, r2::OrdinalRange)
-    if step(r1) != step(r2)
-        error("The ranges $r1 and $r2 have different steps")
-    elseif last(r1) + step(r1) < first(r2) || last(r2) + step(r1) < first(r1)
-        error("The ranges $r1 and $r2 are disjoint")
-    else
-        return min(first(r1), first(r2)):step(r1):max(last(r1), last(r2))
-    end
-end
-
-
-DomainRange = @NamedTuple{col::StepRange{Int, Int}, row::StepRange{Int, Int}}
-
-shift(dr::DomainRange,   n::Int = 1) = DomainRange((dr.col, shift(dr.row, n)))
-prepend(dr::DomainRange, n::Int = 1) = DomainRange((dr.col, prepend(dr.row, n)))
-expand(dr::DomainRange,  n::Int = 1) = DomainRange((dr.col, expand(dr.row, n)))
-inflate(dr::DomainRange, n::Int = 1) = DomainRange((dr.col, inflate(dr.row, n)))
-
-function inflate_dir(dr::DomainRange, dir::Axis, n::Int = 1)
-    if dir == X_axis
-        return DomainRange((dr.col, inflate(dr.row, n)))
-    else
-        return DomainRange((inflate(dr.col, n), dr.row))
-    end
-end
-
-struct DomainRanges
-    inner::DomainRange
-    outer_lb::DomainRange  # left/bottom
-    outer_rt::DomainRange  # right/top
-    direction::Axis
-end
-
-full_domain(dr::DomainRanges) = DomainRange((dr.inner.col, foldl(union, (dr.outer_lb.row, dr.inner.row, dr.outer_rt.row))))
-inner_domain(dr::DomainRanges) = dr.inner
-outer_lb_domain(dr::DomainRanges) = dr.outer_lb
-outer_rt_domain(dr::DomainRanges) = dr.outer_rt
-
-# For fluxes only, we shift the computation to the right/top by one column/row since the flux at
-# index 'i' is the flux between the cells 'i-s' and 'i', but we also need the fluxes on the other
-# side, between the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed 
-# later, but only on outer right side.
-
-function inner_fluxes_domain(dr::DomainRanges)
-    if dr.direction == X_axis
-        return DomainRange((dr.inner.col, expand(dr.inner.row, 1)))
-    else
-        return DomainRange((expand(dr.inner.col, 1), dr.inner.row))
-    end
-end
-
-outer_fluxes_lb_domain(dr::DomainRanges) = dr.outer_lb
-
-function outer_fluxes_rt_domain(dr::DomainRanges)
-    if dr.direction == X_axis
-        return DomainRange((dr.outer_rt.col, shift(dr.outer_rt.row, 1)))
-    else
-        return DomainRange((shift(dr.outer_rt.col, 1), dr.outer_rt.row))
-    end
-end
-
-function full_domain_projection_advection(dr::DomainRanges)
-    fd = full_domain(dr)
-    return inflate_dir(fd, dr.direction)
-end
+include("domain_ranges.jl")
 
 #
 # Threading and SIMD control macros
@@ -669,7 +587,7 @@ end
 
 
 @generic_kernel function update_bizarrium_EOS!_kernel(
-        rho::V, Emat::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
+        rho::V, umat::V, vmat::V, Emat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, dynamic_label)
 
     i = @index_2D_lin()
@@ -898,11 +816,11 @@ end
 # 
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V, range::DomainRange, is_outer::Bool;
+        dt::T, u::V, range::DomainRange, label::Symbol;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
-            step_label = is_outer ? "acoustic_outer!" : "acoustic_inner!"
+            step_label = "acoustic_$(label)!"
             return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
         else
             # 1st order
@@ -910,13 +828,13 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
             # of the neighbouring cells.
             range_1st_order = inflate_dir(range, params.current_axis)
 
-            step_label = is_outer ? "acoustic_outer!" : "acoustic_inner!"
+            step_label = "acoustic_$(label)!"
             dependencies = acoustic!(params, data, step_label, range_1st_order, data.ustar_1, data.pstar_1, u; dependencies)
 
             params.scheme != :GAD_minmod && error("Only the GAD scheme with minmod limiter is supported right now") # TODO : fix this
 
             # 2nd order
-            step_label = is_outer ? "acoustic_GAD_outer!" : "acoustic_GAD_inner!"
+            step_label = "acoustic_GAD_$(label)!"
             return acoustic_GAD_minmod!(params, data, step_label, range, dt, u; dependencies)
         end
     else
@@ -929,8 +847,8 @@ end
 #
 
 function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange, 
-        is_outer::Bool; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    step_label = is_outer ? "update_EOS_outer!" : "update_EOS_inner!"
+        label::Symbol; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    step_label = "update_EOS_$(label)!"
     if params.test in (:Sod, :Sod_y, :Sod_circ)
         gamma::T = 7/5
         return update_perfect_gas_EOS!(params, data, step_label, range, gamma; dependencies)
@@ -1044,7 +962,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         ustar_1[i] = 0.
         pstar_1[i] = 0.
     end
-    
+
     return
 end
 
@@ -1493,6 +1411,11 @@ end
 function compute_domain_ranges(params::ArmonParameters)
     (; nx, ny, nghost, row_length, current_axis) = params
     @indexing_vars(params)
+
+    # Full range
+    col_range = @i(1,1):row_length:@i(1,ny)
+    row_range = 1:nx
+    full_range = DomainRange((col_range, row_range))
     
     # Inner range
 
@@ -1538,6 +1461,7 @@ function compute_domain_ranges(params::ArmonParameters)
         r = params.extra_ring_width
 
         # Add 'r' columns/rows on each of the 4 sides
+        full_range  = DomainRange((inflate(full_range.col,  r), inflate(full_range.row,  r)))
         inner_range = DomainRange((inflate(inner_range.col, r), inflate(inner_range.row, r)))
         
         if current_axis == X_axis
@@ -1551,7 +1475,7 @@ function compute_domain_ranges(params::ArmonParameters)
         end
     end
 
-    return DomainRanges(inner_range, outer_lb_range, outer_rt_range, current_axis)
+    return DomainRanges(full_range, inner_range, outer_lb_range, outer_rt_range, current_axis)
 end
 
 #
@@ -1871,13 +1795,22 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     last_i::Int, x_::V, u::V = update_axis_parameters(params, data, params.current_axis)
+    domain_ranges = compute_domain_ranges(params)
 
+    EOS_up_to_date = false  # p, c and g are not initialized by `init_test`
     prev_event = NoneEvent()
 
     while t < maxtime && cycle < maxcycle
         cycle_start = time_ns()
         
         if !dt_on_even_cycles || iseven(cycle)
+            if !EOS_up_to_date
+                update_EOS!(params, data, full_domain(domain_ranges), :full; dependencies=prev_event) |> wait
+                step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, params.current_axis) && @goto stop
+                prev_event = NoneEvent()
+                EOS_up_to_date = true
+            end
+
             dt = dtCFL_MPI(params, data, dta; dependencies=prev_event)
             prev_event = NoneEvent()
 
@@ -1888,44 +1821,53 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
 
         for (axis, dt_factor) in split_axes(params, cycle)
             last_i, x_, u = update_axis_parameters(params, data, axis)
-
             domain_ranges = compute_domain_ranges(params)
-           
-            @perf_task "loop" "comms+fluxes" @time_expr_c "comms+fluxes" if params.async_comms 
+            
+            @perf_task "loop" "comms+fluxes" @time_expr_c "comms+fluxes" if params.async_comms
+                error("oops")
                 @sync begin
                     @async begin
-                        event_2 = update_EOS!(params, data, inner_domain(domain_ranges), false; dependencies=prev_event)
-                        event_2 = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=event_2)
+                        if !EOS_up_to_date 
+                            event_2 = update_EOS!(params, data, inner_domain(domain_ranges), :inner; dependencies=prev_event)
+                        else
+                            event_2 = prev_event
+                        end
+
+                        event_2 = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), :inner; dependencies=event_2)
                         wait(event_2)
                     end
 
                     bc_params = copy(params)
-                    bc_params.use_threading = false
+                    bc_params.use_threading = false  # TODO : check if this is still necessary
                     @async begin
-                        event_1 = update_EOS!(params, data, outer_lb_domain(domain_ranges), true; dependencies=prev_event)
-                        event_1 = update_EOS!(params, data, outer_rt_domain(domain_ranges), true; dependencies=event_1)
+                        if !EOS_up_to_date
+                            event_1 = update_EOS!(params, data, outer_lb_domain(domain_ranges), :outer; dependencies=prev_event)
+                            event_1 = update_EOS!(params, data, outer_rt_domain(domain_ranges), :outer; dependencies=event_1)
+                        else
+                            event_1 = prev_event
+                        end
 
                         event_1 = boundaryConditions!(bc_params, data, host_array, axis; dependencies=event_1)
 
-                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), true; dependencies=event_1)
-                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), true; dependencies=event_1)
+                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), :outer; dependencies=event_1)
+                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), :outer; dependencies=event_1)
                         wait(event_1)
                     end
                 end
 
                 event = NoneEvent()
             else
-                event = update_EOS!(params, data, inner_domain(domain_ranges), false; dependencies=prev_event)
-                event = update_EOS!(params, data, outer_lb_domain(domain_ranges), true; dependencies=event)
-                event = update_EOS!(params, data, outer_rt_domain(domain_ranges), true; dependencies=event)
-                step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, axis; dependencies=event) && @goto stop
+                if !EOS_up_to_date
+                    event = update_EOS!(params, data, full_domain(domain_ranges), :full; dependencies=prev_event)
+                    step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, axis; dependencies=event) && @goto stop
+                else
+                    event = prev_event
+                end
                 
                 event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
                 step_checkpoint(params, data, cpu_data, "boundaryConditions!", cycle, axis; dependencies=event) && @goto stop
                 
-                event = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), false; dependencies=event)
-                event = numericalFluxes!(params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), true; dependencies=event)
-                event = numericalFluxes!(params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), true; dependencies=event)
+                event = numericalFluxes!(params, data, dt * dt_factor, u, full_fluxes_domain(domain_ranges), :full; dependencies=event)
                 step_checkpoint(params, data, cpu_data, "numericalFluxes!", cycle, axis; dependencies=event) && @goto stop
                 
                 params.measure_time && wait(event)
@@ -1938,6 +1880,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
             step_checkpoint(params, data, cpu_data, "projection_remap!", cycle, axis; dependencies=event) && @goto stop
             
             prev_event = event
+            EOS_up_to_date = false
         end
 
         if !is_warming_up()
