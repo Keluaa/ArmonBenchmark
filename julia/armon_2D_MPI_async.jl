@@ -574,6 +574,53 @@ end
 end
 
 
+@generic_kernel function acoustic_GAD_minmod_single_kernel!_kernel(
+        s::Int, dt::T, dx::T, ustar::V, pstar::V,
+        rho::V, u::V, pmat::V, cmat::V, ustar_1::V, pstar_1::V)
+    @kernel_options(add_time, async, dynamic_label)
+
+    i = @index_2D_lin()
+
+    i = i - s
+    rc_l₋ = rho[i-s] * cmat[i-s]
+    rc_r₋ = rho[i]   * cmat[i]
+    ustar_i₋ = (rc_l₋*   u[i-s] + rc_r₋*   u[i] +             (pmat[i-s] - pmat[i])) / (rc_l₋ + rc_r₋)
+    pstar_i₋ = (rc_r₋*pmat[i-s] + rc_l₋*pmat[i] + rc_l₋*rc_r₋*(   u[i-s] -    u[i])) / (rc_l₋ + rc_r₋)
+
+    i = i + s
+    rc_l = rho[i-s] * cmat[i-s]
+    rc_r = rho[i]   * cmat[i]
+    ustar_i = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
+    pstar_i = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
+
+    i = i + s
+    rc_l₊ = rho[i-s] * cmat[i-s]
+    rc_r₊ = rho[i]   * cmat[i]
+    ustar_i₊ = (rc_l₊*   u[i-s] + rc_r₊*   u[i] +             (pmat[i-s] - pmat[i])) / (rc_l₊ + rc_r₊)
+    pstar_i₊ = (rc_r₊*pmat[i-s] + rc_l₊*pmat[i] + rc_l₊*rc_r₊*(   u[i-s] -    u[i])) / (rc_l₊ + rc_r₊)
+
+    i = i - s
+    
+    r_u_m = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
+    r_p_m = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
+    r_u_p = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
+    r_p_p = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
+
+    r_u_m = max(0., min(1., r_u_m))
+    r_p_m = max(0., min(1., r_p_m))
+    r_u_p = max(0., min(1., r_u_p))
+    r_p_p = max(0., min(1., r_p_p))
+
+    dm_l = rho[i-s] * dx
+    dm_r = rho[i]   * dx
+    Dm   = (dm_l + dm_r) / 2
+    θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
+    
+    ustar[i] = ustar_i + θ * (r_u_p * (   u[i] - ustar_i) - r_u_m * (ustar_i -    u[i-s]))
+    pstar[i] = pstar_i + θ * (r_p_p * (pmat[i] - pstar_i) - r_p_m * (pstar_i - pmat[i-s]))
+end
+
+
 @generic_kernel function update_perfect_gas_EOS!_kernel(gamma::T, 
         rho::V, Emat::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, dynamic_label)
@@ -824,6 +871,9 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
         if params.scheme == :Godunov
             step_label = "acoustic_$(label)!"
             return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
+        elseif params.scheme == :GAD_minmod_single
+            step_label = "acoustic_GAD_$(label)!"
+            return acoustic_GAD_minmod_single!(params, data, step_label, range, dt, u; dependencies)
         else
             # 1st order
             # Add one column/row on both sides since the second order solver relies on the first order fluxes
