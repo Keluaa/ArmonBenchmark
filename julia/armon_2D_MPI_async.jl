@@ -588,7 +588,7 @@ end
 
 @generic_kernel function update_bizarrium_EOS!_kernel(
         rho::V, umat::V, vmat::V, Emat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
-    @kernel_options(add_time, async, dynamic_label)
+    @kernel_options(add_time, async, dynamic_label, debug)
 
     i = @index_2D_lin()
 
@@ -596,28 +596,30 @@ end
     # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state"
     # JCP 2009
 
-    rho0::T = 10000.
-    K0::T   = 1e+11
-    Cv0::T  = 1000.
-    T0::T   = 300.
-    eps0::T = 0.
-    G0::T   = 1.5
-    s::T    = 1.5
-    q::T    = -42080895/14941154
-    r::T    = 727668333/149411540
+    @kernel_init begin
+        rho0::T = 10000.
+        K0::T   = 1e+11
+        Cv0::T  = 1000.
+        T0::T   = 300.
+        eps0::T = 0.
+        G0::T   = 1.5
+        s::T    = 1.5
+        q::T    = -42080895/14941154
+        r::T    = 727668333/149411540
+    end
 
-    x::T = rho[i] / rho0 - 1
-    g::T = G0 * (1-rho0 / rho[i])
+    x = rho[i] / rho0 - 1
+    g = G0 * (1-rho0 / rho[i])
 
-    f0::T = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)
-    f1::T = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)
-    f2::T = (2*q+6*r*x+2*s*f1)/(1-s*x)
-    f3::T = (6*r+3*s*f2)/(1-s*x)
+    f0 = (1+(s/3-2)*x+q*x^2+r*x^3)/(1-s*x)
+    f1 = (s/3-2+2*q*x+3*r*x^2+s*f0)/(1-s*x)
+    f2 = (2*q+6*r*x+2*s*f1)/(1-s*x)
+    f3 = (6*r+3*s*f2)/(1-s*x)
 
-    epsk0::T     = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0
-    pk0::T       = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)
-    pk0prime::T  = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)
-    pk0second::T = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 
+    epsk0     = eps0 - Cv0*T0*(1+g) + 0.5*(K0/rho0)*x^2*f0
+    pk0       = -Cv0*T0*G0*rho0 + 0.5*K0*x*(1+x)^2*(2*f0+x*f1)
+    pk0prime  = -0.5*K0*(1+x)^3*rho0 * (2*(1+3x)*f0 + 2*x*(2+3x)*f1 + x^2*(1+x)*f2)
+    pk0second = 0.5*K0*(1+x)^4*rho0^2 * (12*(1+2x)*f0 + 6*(1+6x+6*x^2)*f1 + 
                                                     6*x*(1+x)*(1+2x)*f2 + x^2*(1+x)^2*f3)
 
     e = Emat[i] - 0.5 * (umat[i]^2 + vmat[i]^2)

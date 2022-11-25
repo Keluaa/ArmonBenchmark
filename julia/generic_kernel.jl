@@ -322,6 +322,31 @@ end
 macro kernel_options(options...) kernel_macro_error() end
 
 
+"""
+    @kernel_init(expr)
+
+Allows to initialize some internal variables of the kernel before the loop.
+The given expression must NOT depend on any index. 
+You must not use any indexing macro (`@index_1D_lin()`, etc...) in the expression.
+
+All paramerters of the kernel are available during the execution of the init expression.
+On GPU, this expression will be executed by each thread.
+
+This is a workaround for a limitation of Polyester.jl which prevents you from typing variables.
+
+```julia
+@generic_kernel function simple_kernel(a, b)
+    @kernel_init begin
+        c::Float64 = sin(0.123)
+    end
+    i = @index_1D_lin()
+    a[i] += b[i] * c
+end
+```
+"""
+macro kernel_init(expr) kernel_macro_error() end
+
+
 struct KernelWithSIMD end
 struct KernelWithoutSIMD end
 struct KernelWithThreading end
@@ -367,6 +392,7 @@ function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}
     indexing_type = :none
     used_indexing_types = Set{Symbol}()
     options = nothing
+    init_expr = Expr(:block)
 
     new_body = MacroTools.postwalk(body) do expr
         if @capture(expr, @index_1D_lin())
@@ -378,6 +404,9 @@ function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}
         elseif @capture(expr, @kernel_options(opts__))
             options !== nothing && error("@kernel_options can only be used once per kernel.")
             options = opts
+            return Expr(:block)
+        elseif @capture(expr, @kernel_init(body_))
+            init_expr = body
             return Expr(:block)
         elseif expr isa Expr && expr.head == :macrocall
             # Expressions of the form `@index_1D_lin()` can have a line number node in the Expr,
@@ -393,6 +422,10 @@ function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}
                 opts = expr.args[2:end]
                 filter!((opt) -> !(opt isa LineNumberNode), opts)
                 options = opts
+                return Expr(:block)
+            elseif expr.args[1] == Symbol("@kernel_init")
+                !isempty(init_expr.args) && error("@kernel_init can only be used once per kernel.")
+                init_expr = expr.args[end]
                 return Expr(:block)
             else
                 return expr
@@ -417,7 +450,7 @@ function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}
         return unblock(indexing_replacements[stmt_indexing_type])
     end
 
-    return new_body, indexing_type, used_indexing_types, options_list_to_dict(options)
+    return new_body, init_expr, indexing_type, used_indexing_types, options_list_to_dict(options)
 end
 
 
@@ -468,7 +501,7 @@ function transform_kernel(func::Expr)
 
     cpu_def = deepcopy(def)
 
-    cpu_body, indexing_type, used_indexing_types, options = kernel_body_pass!(cpu_def[:body], Dict(
+    cpu_body, init_expr, indexing_type, used_indexing_types, options = kernel_body_pass!(cpu_def[:body], Dict(
         :lin_1D => quote $loop_index_name end,
         :lin_2D => quote $loop_index_name end,
         :iter_idx => quote __j_iter + __i_idx end
@@ -522,6 +555,12 @@ function transform_kernel(func::Expr)
         else
             cpu_def[:body] = make_simd_threaded_iter(:main_range, main_loop; threading, simd, add_iteration_indexes=uses_iteration_index)
         end
+
+        if !isempty(init_expr.args)
+            # Add the init expression before the `let` block
+            cpu_def[:body] = Expr(:block, init_expr, cpu_def[:body])
+        end
+
         push!(cpu_block.args, combinedef(cpu_def))
     end
 
@@ -540,7 +579,7 @@ function transform_kernel(func::Expr)
     var_1D_lin = gensym(:I_1D_lin)
     var_2D_lin = gensym(:I_2D_lin)
 
-    gpu_def[:body], _, _, _ = kernel_body_pass!(gpu_def[:body], Dict(
+    gpu_def[:body], _, _, _, _ = kernel_body_pass!(gpu_def[:body], Dict(
         :lin_1D => quote $var_1D_lin end,
         :lin_2D => quote $var_2D_lin end,
         :iter_idx => quote $var_global_lin end
@@ -562,7 +601,7 @@ function transform_kernel(func::Expr)
             $var_2D_lin = $var_global_ntuple[1] * row_length + $var_global_ntuple[2] + i_0
         ) : Expr(:block))
     end
-    pushfirst!(gpu_def[:body].args, indexing_init.args...)
+    pushfirst!(gpu_def[:body].args, indexing_init.args..., init_expr)
 
     # Adjust the GPU parameters
     # Note: For the initial index `i_0`, we substract 1 because of how the main and inner ranges are
