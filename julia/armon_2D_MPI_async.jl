@@ -18,7 +18,6 @@ export ArmonParameters, armon
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
 # Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
-# Merge GAD and euler 2nd kernels into a single one + delete the unneeded arrays
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
 # Bug: fix dtCFL on AMDGPU
 
@@ -388,12 +387,10 @@ struct ArmonData{V}
     gmat::V
     ustar::V
     pstar::V
-    ustar_1::V
-    pstar_1::V
-    tmp_rho::V
-    tmp_urho::V
-    tmp_vrho::V
-    tmp_Erho::V
+    work_array_1::V
+    work_array_2::V
+    work_array_3::V
+    work_array_4::V
     domain_mask::V
     tmp_comm_array::V
 end
@@ -401,8 +398,6 @@ end
 
 function ArmonData(type::Type, size::Int64, tmp_comm_size::Int64)
     return ArmonData{Vector{type}}(
-        Vector{type}(undef, size),
-        Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
         Vector{type}(undef, size),
@@ -437,12 +432,10 @@ function data_to_gpu(data::ArmonData{V}, device_array) where {T, V <: AbstractAr
         device_array(data.gmat),
         device_array(data.ustar),
         device_array(data.pstar),
-        device_array(data.ustar_1),
-        device_array(data.pstar_1),
-        device_array(data.tmp_rho),
-        device_array(data.tmp_urho),
-        device_array(data.tmp_vrho),
-        device_array(data.tmp_Erho),
+        device_array(data.work_array_1),
+        device_array(data.work_array_2),
+        device_array(data.work_array_3),
+        device_array(data.work_array_4),
         device_array(data.domain_mask),
         device_array(data.tmp_comm_array)
     )
@@ -542,7 +535,7 @@ function acoustic_Godunov(ρᵢ::T, ρᵢ₋₁::T, cᵢ::T, cᵢ₋₁::T, uᵢ
 end
 
 
-@generic_kernel function acoustic_f!_kernel(s::Int, ustar_::V, pstar_::V, 
+@generic_kernel function acoustic!_kernel(s::Int, ustar_::V, pstar_::V, 
         rho::V, u::V, pmat::V, cmat::V) where V
     @kernel_options(add_time, async, dynamic_label)
 
@@ -554,48 +547,7 @@ end
 end
 
 
-@generic_kernel function acoustic!_kernel(s::Int, ustar_::V, pstar_::V, 
-        rho::V, u::V, pmat::V, cmat::V) where V
-    @kernel_options(add_time, async, dynamic_label)
-
-    i = @index_2D_lin()
-    rc_l = rho[i-s] * cmat[i-s]
-    rc_r = rho[i]   * cmat[i]
-    ustar_[i] = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
-    pstar_[i] = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
-end
-
-
-@generic_kernel function acoustic_GAD_minmod!_kernel(s::Int, dt::T, dx::T, ustar::V, pstar::V,
-        rho::V, u::V, pmat::V, cmat::V, ustar_1::V, pstar_1::V) where {T, V <: AbstractArray{T}}
-    @kernel_options(add_time, async, dynamic_label)
-
-    i = @index_2D_lin()
-
-    r_u_m = (ustar_1[i+s] -      u[i]) / (ustar_1[i] -    u[i-s] + 1e-6)
-    r_p_m = (pstar_1[i+s] -   pmat[i]) / (pstar_1[i] - pmat[i-s] + 1e-6)
-    r_u_p = (   u[i-s] - ustar_1[i-s]) / (   u[i] -   ustar_1[i] + 1e-6)
-    r_p_p = (pmat[i-s] - pstar_1[i-s]) / (pmat[i] -   pstar_1[i] + 1e-6)
-
-    # TODO : make the limiter a parameter
-    r_u_m = max(0., min(1., r_u_m))
-    r_p_m = max(0., min(1., r_p_m))
-    r_u_p = max(0., min(1., r_u_p))
-    r_p_p = max(0., min(1., r_p_p))
-
-    dm_l = rho[i-s] * dx
-    dm_r = rho[i]   * dx
-    rc_l = rho[i-s] * cmat[i-s]
-    rc_r = rho[i]   * cmat[i]
-    Dm   = (dm_l + dm_r) / 2
-    θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
-    
-    ustar[i] = ustar_1[i] + θ * (r_u_p * (   u[i] - ustar_1[i]) - r_u_m * (ustar_1[i] -    u[i-s]))
-    pstar[i] = pstar_1[i] + θ * (r_p_p * (pmat[i] - pstar_1[i]) - r_p_m * (pstar_1[i] - pmat[i-s]))
-end
-
-
-@generic_kernel function acoustic_GAD_minmod_single_f!_kernel(s::Int, dt::T, dx::T, 
+@generic_kernel function acoustic_GAD_minmod!_kernel(s::Int, dt::T, dx::T, 
         ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, dynamic_label)
 
@@ -626,6 +578,7 @@ end
     r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
     r_p₊ = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
 
+    # TODO : make the limiter a parameter
     r_u₋ = max(0., min(1., r_u₋))
     r_p₋ = max(0., min(1., r_p₋))
     r_u₊ = max(0., min(1., r_u₊))
@@ -637,54 +590,6 @@ end
 
     rc_l = rho[i-s] * cmat[i-s]
     rc_r = rho[i]   * cmat[i]
-    θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
-    
-    ustar[i] = ustar_i + θ * (r_u₊ * (   u[i] - ustar_i) - r_u₋ * (ustar_i -    u[i-s]))
-    pstar[i] = pstar_i + θ * (r_p₊ * (pmat[i] - pstar_i) - r_p₋ * (pstar_i - pmat[i-s]))
-end
-
-
-
-@generic_kernel function acoustic_GAD_minmod_single!_kernel(s::Int, dt::T, dx::T, 
-        ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V) where {T, V <: AbstractArray{T}}
-    @kernel_options(add_time, async, dynamic_label)
-
-    i = @index_2D_lin()
-
-    i = i - s
-    rc_l₋ = rho[i-s] * cmat[i-s]
-    rc_r₋ = rho[i]   * cmat[i]
-    ustar_i₋ = (rc_l₋*   u[i-s] + rc_r₋*   u[i] +             (pmat[i-s] - pmat[i])) / (rc_l₋ + rc_r₋)
-    pstar_i₋ = (rc_r₋*pmat[i-s] + rc_l₋*pmat[i] + rc_l₋*rc_r₋*(   u[i-s] -    u[i])) / (rc_l₋ + rc_r₋)
-
-    i = i + s
-    rc_l = rho[i-s] * cmat[i-s]
-    rc_r = rho[i]   * cmat[i]
-    ustar_i = (rc_l*   u[i-s] + rc_r*   u[i] +           (pmat[i-s] - pmat[i])) / (rc_l + rc_r)
-    pstar_i = (rc_r*pmat[i-s] + rc_l*pmat[i] + rc_l*rc_r*(   u[i-s] -    u[i])) / (rc_l + rc_r)
-
-    i = i + s
-    rc_l₊ = rho[i-s] * cmat[i-s]
-    rc_r₊ = rho[i]   * cmat[i]
-    ustar_i₊ = (rc_l₊*   u[i-s] + rc_r₊*   u[i] +             (pmat[i-s] - pmat[i])) / (rc_l₊ + rc_r₊)
-    pstar_i₊ = (rc_r₊*pmat[i-s] + rc_l₊*pmat[i] + rc_l₊*rc_r₊*(   u[i-s] -    u[i])) / (rc_l₊ + rc_r₊)
-
-    # Second order GAD acoustic solver on the current cell
-    i = i - s
-    
-    r_u₋ = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
-    r_p₋ = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
-    r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
-    r_p₊ = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
-
-    r_u₋ = max(0., min(1., r_u₋))
-    r_p₋ = max(0., min(1., r_p₋))
-    r_u₊ = max(0., min(1., r_u₊))
-    r_p₊ = max(0., min(1., r_p₊))
-
-    dm_l = rho[i-s] * dx
-    dm_r = rho[i]   * dx
-    Dm   = (dm_l + dm_r) / 2
     θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
     
     ustar[i] = ustar_i + θ * (r_u₊ * (   u[i] - ustar_i) - r_u₋ * (ustar_i -    u[i-s]))
@@ -942,27 +847,8 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
         if params.scheme == :Godunov
             step_label = "acoustic_$(label)!"
             return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
-        elseif params.scheme == :Godunov_f
-            step_label = "acoustic_f_$(label)!"
-            return acoustic_f!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
-        elseif params.scheme == :GAD_minmod_single_f
-            step_label = "acoustic_GAD_f_$(label)!"
-            return acoustic_GAD_minmod_single_f!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
-        elseif params.scheme == :GAD_minmod_single
-            step_label = "acoustic_GAD_$(label)!"
-            return acoustic_GAD_minmod_single!(params, data, step_label, range, dt, u; dependencies)
         else
-            # 1st order
-            # Add one column/row on both sides since the second order solver relies on the first order fluxes
-            # of the neighbouring cells.
-            range_1st_order = inflate_dir(range, params.current_axis)
-
-            step_label = "acoustic_$(label)!"
-            dependencies = acoustic!(params, data, step_label, range_1st_order, data.ustar_1, data.pstar_1, u; dependencies)
-
             params.scheme != :GAD_minmod && error("Only the GAD scheme with minmod limiter is supported right now") # TODO : fix this
-
-            # 2nd order
             step_label = "acoustic_GAD_$(label)!"
             return acoustic_GAD_minmod!(params, data, step_label, range, dt, u; dependencies)
         end
@@ -991,8 +877,7 @@ end
 #
 
 function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; x, y, rho, umat, vmat, pmat, cmat, Emat, 
-       ustar, pstar, ustar_1, pstar_1, domain_mask) = data
+    (; x, y, rho, umat, vmat, pmat, cmat, Emat, ustar, pstar, domain_mask) = data
     (; test, nghost, nbcell, nx, ny, row_length, cart_coords, global_grid) = params
 
     if test == :Sod || test == :Sod_y || test == :Sod_circ
@@ -1088,8 +973,6 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         cmat[i] = 1.  # Set to 1 as a max speed of 0 will create NaNs
         ustar[i] = 0.
         pstar[i] = 0.
-        ustar_1[i] = 0.
-        pstar_1[i] = 0.
     end
 
     return
@@ -1303,7 +1186,7 @@ end
 
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; cmat, umat, vmat, domain_mask, tmp_rho) = data
+    (; cmat, umat, vmat, domain_mask, work_array_1) = data
     (; cfl, Dt, ideb, ifin, global_grid) = params
     @indexing_vars(params)
 
@@ -1323,14 +1206,14 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
         # TODO : fix this
         if params.projection != :none
             gpu_dtCFL_reduction_euler! = gpu_dtCFL_reduction_euler_kernel!(params.device, params.block_size)
-            gpu_dtCFL_reduction_euler!(dx, dy, tmp_rho, umat, vmat, cmat, domain_mask;
+            gpu_dtCFL_reduction_euler!(dx, dy, work_array_1, umat, vmat, cmat, domain_mask;
                 ndrange=length(cmat), dependencies) |> wait
-            dt = reduce(min, tmp_rho)
+            dt = reduce(min, work_array_1)
         else
             gpu_dtCFL_reduction_lagrange! = gpu_dtCFL_reduction_lagrange_kernel!(params.device, params.block_size)
-            gpu_dtCFL_reduction_lagrange!(tmp_rho, cmat, domain_mask;
+            gpu_dtCFL_reduction_lagrange!(work_array_1, cmat, domain_mask;
                 ndrange=length(cmat), dependencies) |> wait
-            dt = reduce(min, tmp_rho) * min(dx, dy)
+            dt = reduce(min, work_array_1) * min(dx, dy)
         end
     elseif params.projection != :none
         if params.use_gpu
@@ -1447,14 +1330,14 @@ function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T
         dependencies = boundaryConditions!(params, data, host_array, axis; dependencies)
     end
 
-    (; tmp_rho, tmp_urho, tmp_vrho, tmp_Erho) = data
+    (; work_array_1, work_array_2, work_array_3, work_array_4) = data
     domain_ranges = compute_domain_ranges(params)
     advection_range = full_domain_projection_advection(domain_ranges)
 
-    advection_ρ  = tmp_rho
-    advection_uρ = tmp_urho
-    advection_vρ = tmp_vrho
-    advection_Eρ = tmp_Erho
+    advection_ρ  = work_array_1
+    advection_uρ = work_array_2
+    advection_vρ = work_array_3
+    advection_Eρ = work_array_4
 
     if params.projection == :euler
         event = first_order_euler_remap!(params, data, advection_range, dt,
