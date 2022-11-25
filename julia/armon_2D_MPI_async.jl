@@ -533,6 +533,27 @@ limiter(r::T, ::SuperbeeLimiter) where T = max(zero(T), min(2r, one(T)), min(r, 
 # Kernels
 # 
 
+function acoustic_Godunov(ρᵢ::T, ρᵢ₋₁::T, cᵢ::T, cᵢ₋₁::T, uᵢ::T, uᵢ₋₁::T, pᵢ::T, pᵢ₋₁::T) where T
+    rc_l = ρᵢ₋₁ * cᵢ₋₁
+    rc_r = ρᵢ   * cᵢ
+    ustarᵢ = (rc_l * uᵢ₋₁ + rc_r * uᵢ +               (pᵢ₋₁ - pᵢ)) / (rc_l + rc_r)
+    pstarᵢ = (rc_r * pᵢ₋₁ + rc_l * pᵢ + rc_l * rc_r * (uᵢ₋₁ - uᵢ)) / (rc_l + rc_r)
+    return ustarᵢ, pstarᵢ
+end
+
+
+@generic_kernel function acoustic_f!_kernel(s::Int, ustar_::V, pstar_::V, 
+        rho::V, u::V, pmat::V, cmat::V) where V
+    @kernel_options(add_time, async, dynamic_label)
+
+    i = @index_2D_lin()
+    ustar_[i], pstar_[i] = acoustic_Godunov(
+        rho[i], rho[i-s], cmat[i], cmat[i-s],
+          u[i],   u[i-s], pmat[i], pmat[i-s]
+    )
+end
+
+
 @generic_kernel function acoustic!_kernel(s::Int, ustar_::V, pstar_::V, 
         rho::V, u::V, pmat::V, cmat::V) where V
     @kernel_options(add_time, async, dynamic_label)
@@ -574,9 +595,58 @@ end
 end
 
 
-@generic_kernel function acoustic_GAD_minmod_single_kernel!_kernel(
-        s::Int, dt::T, dx::T, ustar::V, pstar::V,
-        rho::V, u::V, pmat::V, cmat::V, ustar_1::V, pstar_1::V)
+@generic_kernel function acoustic_GAD_minmod_single_f!_kernel(s::Int, dt::T, dx::T, 
+        ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V) where {T, V <: AbstractArray{T}}
+    @kernel_options(add_time, async, dynamic_label)
+
+    i = @index_2D_lin()
+
+    # First order acoustic solver on the left cell
+    ustar_i₋, pstar_i₋ = acoustic_Godunov(
+        rho[i-s], rho[i-2s], cmat[i-s], cmat[i-2s],
+          u[i-s],   u[i-2s], pmat[i-s], pmat[i-2s]
+    )
+
+    # First order acoustic solver on the current cell
+    ustar_i, pstar_i = acoustic_Godunov(
+        rho[i], rho[i-s], cmat[i], cmat[i-s],
+          u[i],   u[i-s], pmat[i], pmat[i-s]
+    )
+
+    # First order acoustic solver on the right cell
+    ustar_i₊, pstar_i₊ = acoustic_Godunov(
+        rho[i+s], rho[i], cmat[i+s], cmat[i],
+          u[i+s],   u[i], pmat[i+s], pmat[i]
+    )
+
+    # Second order GAD acoustic solver on the current cell
+    
+    r_u₋ = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
+    r_p₋ = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
+    r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
+    r_p₊ = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
+
+    r_u₋ = max(0., min(1., r_u₋))
+    r_p₋ = max(0., min(1., r_p₋))
+    r_u₊ = max(0., min(1., r_u₊))
+    r_p₊ = max(0., min(1., r_p₊))
+
+    dm_l = rho[i-s] * dx
+    dm_r = rho[i]   * dx
+    Dm   = (dm_l + dm_r) / 2
+
+    rc_l = rho[i-s] * cmat[i-s]
+    rc_r = rho[i]   * cmat[i]
+    θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
+    
+    ustar[i] = ustar_i + θ * (r_u₊ * (   u[i] - ustar_i) - r_u₋ * (ustar_i -    u[i-s]))
+    pstar[i] = pstar_i + θ * (r_p₊ * (pmat[i] - pstar_i) - r_p₋ * (pstar_i - pmat[i-s]))
+end
+
+
+
+@generic_kernel function acoustic_GAD_minmod_single!_kernel(s::Int, dt::T, dx::T, 
+        ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, dynamic_label)
 
     i = @index_2D_lin()
@@ -599,25 +669,26 @@ end
     ustar_i₊ = (rc_l₊*   u[i-s] + rc_r₊*   u[i] +             (pmat[i-s] - pmat[i])) / (rc_l₊ + rc_r₊)
     pstar_i₊ = (rc_r₊*pmat[i-s] + rc_l₊*pmat[i] + rc_l₊*rc_r₊*(   u[i-s] -    u[i])) / (rc_l₊ + rc_r₊)
 
+    # Second order GAD acoustic solver on the current cell
     i = i - s
     
-    r_u_m = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
-    r_p_m = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
-    r_u_p = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
-    r_p_p = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
+    r_u₋ = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
+    r_p₋ = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
+    r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
+    r_p₊ = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
 
-    r_u_m = max(0., min(1., r_u_m))
-    r_p_m = max(0., min(1., r_p_m))
-    r_u_p = max(0., min(1., r_u_p))
-    r_p_p = max(0., min(1., r_p_p))
+    r_u₋ = max(0., min(1., r_u₋))
+    r_p₋ = max(0., min(1., r_p₋))
+    r_u₊ = max(0., min(1., r_u₊))
+    r_p₊ = max(0., min(1., r_p₊))
 
     dm_l = rho[i-s] * dx
     dm_r = rho[i]   * dx
     Dm   = (dm_l + dm_r) / 2
     θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
     
-    ustar[i] = ustar_i + θ * (r_u_p * (   u[i] - ustar_i) - r_u_m * (ustar_i -    u[i-s]))
-    pstar[i] = pstar_i + θ * (r_p_p * (pmat[i] - pstar_i) - r_p_m * (pstar_i - pmat[i-s]))
+    ustar[i] = ustar_i + θ * (r_u₊ * (   u[i] - ustar_i) - r_u₋ * (ustar_i -    u[i-s]))
+    pstar[i] = pstar_i + θ * (r_p₊ * (pmat[i] - pstar_i) - r_p₋ * (pstar_i - pmat[i-s]))
 end
 
 
@@ -635,7 +706,7 @@ end
 
 @generic_kernel function update_bizarrium_EOS!_kernel(
         rho::V, umat::V, vmat::V, Emat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
-    @kernel_options(add_time, async, dynamic_label, debug)
+    @kernel_options(add_time, async, dynamic_label)
 
     i = @index_2D_lin()
 
@@ -871,6 +942,12 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
         if params.scheme == :Godunov
             step_label = "acoustic_$(label)!"
             return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
+        elseif params.scheme == :Godunov_f
+            step_label = "acoustic_f_$(label)!"
+            return acoustic_f!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
+        elseif params.scheme == :GAD_minmod_single_f
+            step_label = "acoustic_GAD_f_$(label)!"
+            return acoustic_GAD_minmod_single_f!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
         elseif params.scheme == :GAD_minmod_single
             step_label = "acoustic_GAD_$(label)!"
             return acoustic_GAD_minmod_single!(params, data, step_label, range, dt, u; dependencies)
