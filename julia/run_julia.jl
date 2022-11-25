@@ -8,6 +8,7 @@ using .VTune
 
 scheme = :GAD_minmod
 riemann = :acoustic
+riemann_limiter = :minmod
 iterations = 4
 nghost = 2
 cfl = 0.6
@@ -99,6 +100,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--riemann"
         global riemann = Symbol(replace(ARGS[i+1], '-' => '_'))
+        global i += 1
+    elseif arg == "--riemann-limiter"
+        global riemann_limiter = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
     elseif arg == "--time"
         global maxtime = parse(Float64, ARGS[i+1])
@@ -463,7 +467,7 @@ if use_MPI
                 axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
                 use_ccall, use_threading, use_simd, interleaving, use_gpu, 
                 use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, projection,
+            return ArmonParameters(; ieee_bits, riemann, scheme, projection, riemann_limiter,
                 nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 transpose_dims, axis_splitting, 

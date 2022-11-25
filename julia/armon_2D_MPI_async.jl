@@ -42,6 +42,31 @@ using .VTune
 @enum Axis X_axis Y_axis
 
 #
+# Limiters
+#
+
+abstract type Limiter end
+
+struct NoLimiter       <: Limiter end
+struct MinmodLimiter   <: Limiter end
+struct SuperbeeLimiter <: Limiter end
+
+limiter(_::T, ::NoLimiter)       where T = one(T)
+limiter(r::T, ::MinmodLimiter)   where T = max(zero(T), min(one(T), r))
+limiter(r::T, ::SuperbeeLimiter) where T = max(zero(T), min(2r, one(T)), min(r, 2*one(T)))
+
+limiter_from_name(::Val{:no_limiter}) = NoLimiter()
+limiter_from_name(::Val{:minmod})     = MinmodLimiter()
+limiter_from_name(::Val{:superbee})   = SuperbeeLimiter()
+
+limiter_from_name(::Val{s}) where s = error("Unknown limiter name: '$s'")
+limiter_from_name(s::Symbol) = limiter_from_name(Val(s))
+
+Base.show(io::IO, ::NoLimiter)       = print(io, "No limiter")
+Base.show(io::IO, ::MinmodLimiter)   = print(io, "Minmod limiter")
+Base.show(io::IO, ::SuperbeeLimiter) = print(io, "Superbee limiter")
+
+#
 # Parameters
 # 
 
@@ -50,6 +75,7 @@ mutable struct ArmonParameters{Flt_T}
     test::Symbol
     riemann::Symbol
     scheme::Symbol
+    riemann_limiter::Limiter
     
     # Domain parameters
     nghost::Int
@@ -128,6 +154,7 @@ end
 function ArmonParameters(;
         ieee_bits = 64,
         test = :Sod, riemann = :acoustic, scheme = :GAD_minmod, projection = :euler,
+        riemann_limiter = :minmod,
         nghost = 2, nx = 10, ny = 10, 
         cfl = 0.6, Dt = 0., cst_dt = false, dt_on_even_cycles = false,
         transpose_dims = false, axis_splitting = :Sequential,
@@ -202,6 +229,12 @@ function ArmonParameters(;
         device = CPU()
     end
 
+    if riemann_limiter isa Symbol
+        riemann_limiter = limiter_from_name(riemann_limiter)
+    elseif !(riemann_limiter isa Limiter)
+        error("Expected a Limiter type or a symbol, got: $riemann_limiter")
+    end
+
     # MPI
     if use_MPI
         rank = MPI.Comm_rank(COMM)
@@ -271,7 +304,7 @@ function ArmonParameters(;
     end
     
     return ArmonParameters{flt_type}(
-        test, riemann, scheme,
+        test, riemann, scheme, riemann_limiter,
         nghost, nx, ny, dx,
         cfl, Dt, cst_dt, dt_on_even_cycles,
         axis_splitting, projection,
@@ -329,7 +362,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - ieee_bits:  ", sizeof(T) * 8)
     println()
     println(" - test:       ", p.test)
-    println(" - riemann:    ", p.riemann)
+    println(" - riemann:    ", p.riemann, ", ", p.riemann_limiter)
     println(" - scheme:     ", p.scheme)
     println(" - splitting:  ", p.axis_splitting)
     println(" - cfl:        ", p.cfl)
@@ -509,20 +542,6 @@ macro i(i, j)
 end
 
 #
-# Limiters
-#
-
-abstract type Limiter end
-
-struct NoLimiter       <: Limiter end
-struct MinmodLimiter   <: Limiter end
-struct SuperbeeLimiter <: Limiter end
-
-limiter(_::T, ::NoLimiter)       where T = one(T)
-limiter(r::T, ::MinmodLimiter)   where T = max(zero(T), min(one(T), r))
-limiter(r::T, ::SuperbeeLimiter) where T = max(zero(T), min(2r, one(T)), min(r, 2*one(T)))
-
-#
 # Kernels
 # 
 
@@ -583,6 +602,56 @@ end
     r_p₋ = max(0., min(1., r_p₋))
     r_u₊ = max(0., min(1., r_u₊))
     r_p₊ = max(0., min(1., r_p₊))
+
+    dm_l = rho[i-s] * dx
+    dm_r = rho[i]   * dx
+    Dm   = (dm_l + dm_r) / 2
+
+    rc_l = rho[i-s] * cmat[i-s]
+    rc_r = rho[i]   * cmat[i]
+    θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
+    
+    ustar[i] = ustar_i + θ * (r_u₊ * (   u[i] - ustar_i) - r_u₋ * (ustar_i -    u[i-s]))
+    pstar[i] = pstar_i + θ * (r_p₊ * (pmat[i] - pstar_i) - r_p₋ * (pstar_i - pmat[i-s]))
+end
+
+
+@generic_kernel function acoustic_GAD!_kernel(s::Int, dt::T, dx::T, 
+        ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V,
+        ::LimiterType) where {T, V <: AbstractArray{T}, LimiterType <: Limiter}
+    @kernel_options(add_time, async, dynamic_label)
+
+    i = @index_2D_lin()
+
+    # First order acoustic solver on the left cell
+    ustar_i₋, pstar_i₋ = acoustic_Godunov(
+        rho[i-s], rho[i-2s], cmat[i-s], cmat[i-2s],
+          u[i-s],   u[i-2s], pmat[i-s], pmat[i-2s]
+    )
+
+    # First order acoustic solver on the current cell
+    ustar_i, pstar_i = acoustic_Godunov(
+        rho[i], rho[i-s], cmat[i], cmat[i-s],
+          u[i],   u[i-s], pmat[i], pmat[i-s]
+    )
+
+    # First order acoustic solver on the right cell
+    ustar_i₊, pstar_i₊ = acoustic_Godunov(
+        rho[i+s], rho[i], cmat[i+s], cmat[i],
+          u[i+s],   u[i], pmat[i+s], pmat[i]
+    )
+
+    # Second order GAD acoustic solver on the current cell
+    
+    r_u₋ = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
+    r_p₋ = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
+    r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
+    r_p₊ = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
+
+    r_u₋ = limiter(r_u₋, LimiterType())
+    r_p₋ = limiter(r_p₋, LimiterType())
+    r_u₊ = limiter(r_u₊, LimiterType())
+    r_p₊ = limiter(r_p₊, LimiterType())
 
     dm_l = rho[i-s] * dx
     dm_r = rho[i]   * dx
@@ -847,6 +916,9 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
         if params.scheme == :Godunov
             step_label = "acoustic_$(label)!"
             return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
+        elseif params.scheme == :GAD_lim
+            step_label = "acoustic_GAD_$(label)!"
+            return acoustic_GAD!(params, data, step_label, range, dt, u, params.riemann_limiter; dependencies)
         else
             params.scheme != :GAD_minmod && error("Only the GAD scheme with minmod limiter is supported right now") # TODO : fix this
             step_label = "acoustic_GAD_$(label)!"

@@ -660,12 +660,22 @@ function transform_kernel(func::Expr)
     push!(main_def[:kwargs], :($(Expr(:kw, :dependencies, :(NoneEvent())))))
 
     # Build the parameter list needed to call the CPU or GPU kernel
-    args = map(splitarg, Iterators.flatten((args, def[:kwargs]))) .|> first
+    call_args = map(Iterators.flatten((args, def[:kwargs]))) do arg
+        arg_def = splitarg(arg)
+        arg_name = arg_def[1]
+        if isnothing(arg_name)
+            # Singleton type argument: `::SomeType` -> `SomeType()`
+            arg_type = arg_def[2]
+            return :($arg_type())
+        else
+            return arg_name
+        end
+    end
 
     # Build the kernel call expressions
-    cpu_call = Expr(:call, cpu_def[:name], :params, loop_params_names..., args..., :threading, :simd)
+    cpu_call = Expr(:call, cpu_def[:name], :params, loop_params_names..., call_args..., :threading, :simd)
     # Equivalent to: gpu_kernel_func(loop_params_names..., args...; ndrange, dependencies)
-    gpu_call = Expr(:call, :gpu_kernel_func, Expr(:parameters, :ndrange, :dependencies), gpu_loop_params_names..., args...)
+    gpu_call = Expr(:call, :gpu_kernel_func, Expr(:parameters, :ndrange, :dependencies), gpu_loop_params_names..., call_args...)
 
     # Add time measurements if needed
     if options[:add_time]
