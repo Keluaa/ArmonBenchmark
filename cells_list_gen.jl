@@ -9,7 +9,7 @@ end
 
 log_space(min_log, step_log, max_log) = 10 .^ (min_log:step_log:max_log)
 to_domain_dims(cells, s::Specs) = cells .^ (1 / s.dim) .|> round .|> Int
-closest_multiple(x, m) = round(x / m) * m
+closest_multiple(x, m) = Int(round(x / m) * m)
 filter_max_mem!(cells, s::Specs) = filter!((c) -> (c^s.dim * s.val_bytes * s.vars < s.mem), cells)
 to_domain_string(cells, s::Specs) = join((join(repeat(["$i"], s.dim), ',') for i in cells), s.dim > 1 ? "; " : ", ")
 
@@ -46,6 +46,6 @@ function spread_cells(max_cells;
     filter_max_mem!(cells, specs)
 
     println("From $(first(min_cells)) to $(max_cells) in $(dim)D on $(max_mem / 1e9) GB spread over $(processes) processes on $(devices) $(device):")
-
-    to_domain_string(cells, specs)
+    println(to_domain_string(cells, specs))
+    return cells
 end

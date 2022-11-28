@@ -512,7 +512,8 @@ function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
                 measure.use_simd,
                 measure.dimension,
                 measure.async_comms,
-                measure.jl_mpi_impl
+                measure.jl_mpi_impl,
+                measure.armon_params,
             )
         )
     else
