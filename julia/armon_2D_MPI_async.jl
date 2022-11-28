@@ -555,7 +555,7 @@ function acoustic_Godunov(ρᵢ::T, ρᵢ₋₁::T, cᵢ::T, cᵢ₋₁::T, uᵢ
 end
 
 
-@generic_kernel function acoustic!_kernel(s::Int, ustar_::V, pstar_::V, 
+@generic_kernel function acoustic!(s::Int, ustar_::V, pstar_::V, 
         rho::V, u::V, pmat::V, cmat::V) where V
     @kernel_options(add_time, async, dynamic_label)
 
@@ -567,7 +567,7 @@ end
 end
 
 
-@generic_kernel function acoustic_GAD!_kernel(s::Int, dt::T, dx::T, 
+@generic_kernel function acoustic_GAD!(s::Int, dt::T, dx::T, 
         ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V,
         ::LimiterType) where {T, V <: AbstractArray{T}, LimiterType <: Limiter}
     @kernel_options(add_time, async, dynamic_label)
@@ -617,7 +617,7 @@ end
 end
 
 
-@generic_kernel function update_perfect_gas_EOS!_kernel(gamma::T, 
+@generic_kernel function update_perfect_gas_EOS!(gamma::T, 
         rho::V, Emat::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, dynamic_label)
 
@@ -629,7 +629,7 @@ end
 end
 
 
-@generic_kernel function update_bizarrium_EOS!_kernel(
+@generic_kernel function update_bizarrium_EOS!(
         rho::V, umat::V, vmat::V, Emat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, dynamic_label)
 
@@ -672,7 +672,7 @@ end
 end
 
 
-@generic_kernel function cell_update!_kernel(s::Int, dx::T, dt::T, 
+@generic_kernel function cell_update!(s::Int, dx::T, dt::T, 
         ustar::V, pstar::V, rho::V, u::V, Emat::V, domain_mask::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, label=cellUpdate!)
 
@@ -685,7 +685,7 @@ end
 end
 
 
-@generic_kernel function cell_update_lagrange!_kernel(ifin_::Int, s::Int, dt::T, 
+@generic_kernel function cell_update_lagrange!(ifin_::Int, s::Int, dt::T, 
         x_::V, ustar::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, label=cell_update!)
 
@@ -699,7 +699,7 @@ end
 end
 
 
-@generic_kernel function euler_projection!_kernel(s::Int, dx::T, dt::T,
+@generic_kernel function euler_projection!(s::Int, dx::T, dt::T,
         ustar::V, rho::V, umat::V, vmat::V, Emat::V,
         advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, label=euler_remap)
@@ -720,7 +720,7 @@ end
 end
 
 
-@generic_kernel function first_order_euler_remap!_kernel(s::Int, dt::T,
+@generic_kernel function first_order_euler_remap!(s::Int, dt::T,
         ustar::V, rho::V, umat::V, vmat::V, Emat::V,
         advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, label=euler_remap_1st)
@@ -740,7 +740,7 @@ end
 end
 
 
-@generic_kernel function second_order_euler_remap!_kernel(s::Int, dx::T, dt::T,
+@generic_kernel function second_order_euler_remap!(s::Int, dx::T, dt::T,
         ustar::V, rho::V, umat::V, vmat::V, Emat::V,
         advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, label=euler_remap_2nd)
@@ -776,7 +776,7 @@ end
 end
 
 
-@generic_kernel function boundaryConditions!_kernel(stride::Int, i_start::Int, d::Int,
+@generic_kernel function boundaryConditions!(stride::Int, i_start::Int, d::Int,
         u_factor::T, v_factor::T, rho::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, label=boundaryConditions!, no_threading)
 
@@ -793,7 +793,7 @@ end
 end
 
 
-@generic_kernel function read_border_array!_kernel(side_length::Int, nghost::Int,
+@generic_kernel function read_border_array!(side_length::Int, nghost::Int,
         rho::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V, Emat::V, value_array::V) where V
     @kernel_options(add_time, async, label=border_array, no_threading)
 
@@ -813,7 +813,7 @@ end
 end
 
 
-@generic_kernel function write_border_array!_kernel(side_length::Int, nghost::Int,
+@generic_kernel function write_border_array!(side_length::Int, nghost::Int,
         rho::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V, Emat::V, value_array::V) where V
     @kernel_options(add_time, async, label=border_array, no_threading)
 

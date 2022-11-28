@@ -472,14 +472,8 @@ end
 
 function transform_kernel(func::Expr)
     def = splitdef(func)
-    kernel_func_name = def[:name]
-
-    kernel_pos = findlast("_kernel", String(kernel_func_name))
-    if isnothing(kernel_pos)
-        error("The kernel function name should end with '_kernel'")
-    end
-
-    func_name = String(kernel_func_name)[1:first(kernel_pos)-1] |> Symbol
+    func_name = def[:name]
+    kernel_func_name = Symbol(func_name, "_kernel")
 
     loop_index_name = gensym(:loop_index)
 
@@ -776,10 +770,8 @@ macro was used:
 Using KA.jl's `@Const` to annotate arguments is supported, but they will be present only in the GPU
 kernel definition.
 
-The given function's name must end with "_kernel". For main function's name, the "_kernel" appendix
-is removed, e.g. to call a function named `f_kernel()`, you need to use `f()`.
-
-Further customisation of the kernel and main function can be obtained using `@kernel_options`.
+Further customisation of the kernel and main function can be obtained using `@kernel_options` and
+`@kernel_init`.
 
 ```julia
 @generic_kernel f_kernel(A)
