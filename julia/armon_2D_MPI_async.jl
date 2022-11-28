@@ -212,23 +212,6 @@ function ArmonParameters(;
         error("The dimensions of the global domain ($nx x $ny) are not divisible by the number of processors ($px x $py)")
     end
 
-    # GPU
-    if use_gpu
-        if device == :CUDA
-            CUDA.allowscalar(false)
-            device = CUDADevice()
-        elseif device == :ROCM
-            AMDGPU.allowscalar(false)
-            device = ROCDevice()
-        elseif device == :CPU
-            device = CPU()  # Useful in some cases for debugging
-        else
-            error("Unknown GPU device: $device")
-        end
-    else
-        device = CPU()
-    end
-
     if riemann_limiter isa Symbol
         riemann_limiter = limiter_from_name(riemann_limiter)
     elseif !(riemann_limiter isa Limiter)
@@ -266,6 +249,24 @@ function ArmonParameters(;
 
     root_rank = 0
     is_root = rank == root_rank
+
+    # GPU
+    if use_gpu
+        if device == :CUDA
+            CUDA.allowscalar(false)
+            device = CUDADevice()
+        elseif device == :ROCM
+            AMDGPU.allowscalar(false)
+            device = ROCDevice()
+        elseif device == :CPU
+            is_root && @warn "`use_gpu=true` but the device is set to the CPU. Therefore no kernel will run on a GPU." maxlog=1
+            device = CPU()  # Useful in some cases for debugging
+        else
+            error("Unknown GPU device: $device")
+        end
+    else
+        device = CPU()
+    end
 
     # Dimensions of the global domain
     g_nx = nx
@@ -566,56 +567,6 @@ end
 end
 
 
-@generic_kernel function acoustic_GAD_minmod!_kernel(s::Int, dt::T, dx::T, 
-        ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V) where {T, V <: AbstractArray{T}}
-    @kernel_options(add_time, async, dynamic_label)
-
-    i = @index_2D_lin()
-
-    # First order acoustic solver on the left cell
-    ustar_i₋, pstar_i₋ = acoustic_Godunov(
-        rho[i-s], rho[i-2s], cmat[i-s], cmat[i-2s],
-          u[i-s],   u[i-2s], pmat[i-s], pmat[i-2s]
-    )
-
-    # First order acoustic solver on the current cell
-    ustar_i, pstar_i = acoustic_Godunov(
-        rho[i], rho[i-s], cmat[i], cmat[i-s],
-          u[i],   u[i-s], pmat[i], pmat[i-s]
-    )
-
-    # First order acoustic solver on the right cell
-    ustar_i₊, pstar_i₊ = acoustic_Godunov(
-        rho[i+s], rho[i], cmat[i+s], cmat[i],
-          u[i+s],   u[i], pmat[i+s], pmat[i]
-    )
-
-    # Second order GAD acoustic solver on the current cell
-    
-    r_u₋ = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
-    r_p₋ = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
-    r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
-    r_p₊ = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
-
-    # TODO : make the limiter a parameter
-    r_u₋ = max(0., min(1., r_u₋))
-    r_p₋ = max(0., min(1., r_p₋))
-    r_u₊ = max(0., min(1., r_u₊))
-    r_p₊ = max(0., min(1., r_p₊))
-
-    dm_l = rho[i-s] * dx
-    dm_r = rho[i]   * dx
-    Dm   = (dm_l + dm_r) / 2
-
-    rc_l = rho[i-s] * cmat[i-s]
-    rc_r = rho[i]   * cmat[i]
-    θ    = 1/2 * (1 - (rc_l + rc_r) / 2 * (dt / Dm))
-    
-    ustar[i] = ustar_i + θ * (r_u₊ * (   u[i] - ustar_i) - r_u₋ * (ustar_i -    u[i-s]))
-    pstar[i] = pstar_i + θ * (r_p₊ * (pmat[i] - pstar_i) - r_p₋ * (pstar_i - pmat[i-s]))
-end
-
-
 @generic_kernel function acoustic_GAD!_kernel(s::Int, dt::T, dx::T, 
         ustar::V, pstar::V, rho::V, u::V, pmat::V, cmat::V,
         ::LimiterType) where {T, V <: AbstractArray{T}, LimiterType <: Limiter}
@@ -910,22 +861,21 @@ end
 # 
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, u::V, range::DomainRange, label::Symbol;
+        dt::T, range::DomainRange, label::Symbol;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+    u = params.current_axis == X_axis ? data.umat : data.vmat
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
             step_label = "acoustic_$(label)!"
             return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
-        elseif params.scheme == :GAD_lim
+        elseif params.scheme == :GAD
             step_label = "acoustic_GAD_$(label)!"
             return acoustic_GAD!(params, data, step_label, range, dt, u, params.riemann_limiter; dependencies)
         else
-            params.scheme != :GAD_minmod && error("Only the GAD scheme with minmod limiter is supported right now") # TODO : fix this
-            step_label = "acoustic_GAD_$(label)!"
-            return acoustic_GAD_minmod!(params, data, step_label, range, dt, u; dependencies)
+            error("Unknown acoustic scheme: ", params.scheme)
         end
     else
-        error("The choice of Riemann solver is not recognized: ", params.riemann)
+        error("Unknown Riemann solver: ", params.riemann)
     end
 end
 
@@ -1199,17 +1149,21 @@ end
 
 function exchange_with_neighbour(params::ArmonParameters{T}, array::V, neighbour_rank::Int,
         cart_comm::MPI.Comm) where {T, V <: AbstractArray{T}}
-    @perf_task "comms" "MPI_sendrecv" @time_expr_a "boundaryConditions!_MPI" MPI.Sendrecv!(array, neighbour_rank, 0, array, neighbour_rank, 0, cart_comm)
+    @perf_task "comms" "MPI_sendrecv" @time_expr_a "boundaryConditions!_MPI" MPI.Sendrecv!(array, 
+        neighbour_rank, 0, array, neighbour_rank, 0, cart_comm)
 end
 
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::W, axis::Axis; 
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; neighbours, cart_comm, cart_coords) = params
-    # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: https://www.open-mpi.org/faq/?category=runcuda
+    # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: 
+    #   https://www.open-mpi.org/faq/?category=runcuda
     # TODO : use CUDA/ROCM-aware MPI
-    # TODO : use 4 views for each side for each variable ? (2 will be contigous, 2 won't) <- pre-calculate them!
-    # TODO : try to mix the comms: send to left and receive from right, then vice-versa. Maybe it can speed things up?    
+    # TODO : use 4 views for each side for each variable ? (2 will be contigous, 2 won't) 
+    #   <- pre-calculate them!
+    # TODO : try to mix the comms: send to left and receive from right, then vice-versa. 
+    #  Maybe it can speed things up?    
 
     # We only exchange the ghost domains along the current axis.
     # even x/y coordinate in the cartesian process grid:
@@ -1256,7 +1210,7 @@ end
 # Time step computation
 #
 
-function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
+function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; cmat, umat, vmat, domain_mask, work_array_1) = data
     (; cfl, Dt, ideb, ifin, global_grid) = params
@@ -1328,29 +1282,27 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
 
     if !isfinite(dt) || dt ≤ 0
         return dt  # Let it crash
-    elseif dta == 0  # First cycle
-        if Dt != 0
-            return Dt
-        else
-            return cfl * dt
-        end
+    elseif prev_dt == 0
+        # First cycle: use the initial time step if defined
+        return Dt != 0 ? Dt : cfl * dt
     else
         # CFL condition and maximum increase per cycle of the time step
-        return convert(T, min(cfl * dt, 1.05 * dta))
+        return convert(T, min(cfl * dt, 1.05 * prev_dt))
     end
 end
 
 
-function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, dta::T;
+function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    @perf_task "loop" "dtCFL" local_dt::T = @time_expr_c dtCFL(params, data, dta; dependencies)
+    @perf_task "loop" "dtCFL" local_dt::T = @time_expr_c dtCFL(params, data, prev_dt; dependencies)
 
     if params.cst_dt || !params.use_MPI
         return local_dt
     end
 
     # Reduce all local_dts and broadcast the result to all processes
-    @perf_task "comms" "MPI_dt" @time_expr_c "dt_Allreduce_MPI" dt = MPI.Allreduce(local_dt, MPI.Op(min, T), params.cart_comm)
+    @perf_task "comms" "MPI_dt" @time_expr_c "dt_Allreduce_MPI" dt = MPI.Allreduce(
+        local_dt, MPI.Op(min, T), params.cart_comm)
     return dt
 end
 
@@ -1358,8 +1310,8 @@ end
 # Lagrangian cell update
 # 
 
-function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
-        u::V, x::V; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ideb, ifin) = params
 
     if params.single_comm_per_axis_pass
@@ -1373,8 +1325,10 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T,
         last_i = ifin
     end
 
+    u = params.current_axis == X_axis ? data.umat : data.vmat
     cell_update!(params, data, first_i:last_i, dt, u; dependencies)
     if params.projection == :none
+        x = params.current_axis == X_axis ? data.x : data.y
         cell_update_lagrange!(params, data, first_i:last_i, last_i, dt, x; dependencies)
     end
 
@@ -1426,35 +1380,22 @@ function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T
 end
 
 #
-# Transposition parameters
+# Axis indexing parameters
 #
 
-function update_axis_parameters(params::ArmonParameters{T}, data::ArmonData{V}, 
-        axis::Axis) where {T, V <: AbstractArray{T}}
+function update_axis_parameters(params::ArmonParameters{T}, axis::Axis) where T
     (; row_length, global_grid) = params
     (g_nx, g_ny) = global_grid
 
     params.current_axis = axis
 
-    last_i::Int = params.ifin + 2
-    
     if axis == X_axis
         params.s = 1
         params.dx = 1. / g_nx
-
-        axis_positions::V = data.x
-        axis_velocities::V = data.umat
     else  # axis == Y_axis
         params.s = row_length
         params.dx = 1. / g_ny
-        
-        axis_positions = data.y
-        axis_velocities = data.vmat
-
-        last_i += row_length  # include one more row to compute the fluxes at the top
     end
-
-    return last_i, axis_positions, axis_velocities
 end
 
 #
@@ -1860,8 +1801,8 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
     
     cycle  = 0
     t::T   = 0.
-    dta::T = 0.
-    dt::T  = 0.
+    next_dt::T = 0.
+    prev_dt::T = 0.
     total_cycles_time::T = 0.
 
     t1 = time_ns()
@@ -1874,117 +1815,129 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         host_array = Vector{T}()
     end
 
+    if params.async_comms
+        # Disable multi-threading when computing the outer domains, since Polyester cannot run
+        # mutliple loops at the same time.
+        outer_params = copy(params)
+        outer_params.use_threading = false
+    else
+        outer_params = params
+    end
+
     if silent <= 1
         initial_mass, initial_energy = conservation_vars(params, data)
     end
 
-    last_i::Int, x_::V, u::V = update_axis_parameters(params, data, params.current_axis)
+    update_axis_parameters(params, params.current_axis)
     domain_ranges = compute_domain_ranges(params)
 
-    EOS_up_to_date = false  # p, c and g are not initialized by `init_test`
     prev_event = NoneEvent()
 
+    # Finalize the initialisation by calling the EOS on the entire domain
+    update_EOS!(params, data, full_domain(domain_ranges), :full) |> wait
+    step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, params.current_axis) && @goto stop
+
+    # Main solver loop
     while t < maxtime && cycle < maxcycle
         cycle_start = time_ns()
         
         if !dt_on_even_cycles || iseven(cycle)
-            if !EOS_up_to_date
-                update_EOS!(params, data, full_domain(domain_ranges), :full; dependencies=prev_event) |> wait
-                step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, params.current_axis) && @goto stop
-                prev_event = NoneEvent()
-                EOS_up_to_date = true
+            next_dt = dtCFL_MPI(params, data, prev_dt; dependencies=prev_event)
+            prev_event = NoneEvent()
+            
+            if is_root && (!isfinite(next_dt) || next_dt <= 0.)
+                error("Invalid dt for cycle $cycle: $next_dt")
             end
 
-            dt = dtCFL_MPI(params, data, dta; dependencies=prev_event)
-            prev_event = NoneEvent()
-
-            if is_root && (!isfinite(dt) || dt <= 0.)
-                error("Invalid dt at cycle $cycle: $dt")
+            if cycle == 0
+                prev_dt = next_dt
             end
         end
 
         for (axis, dt_factor) in split_axes(params, cycle)
-            last_i, x_, u = update_axis_parameters(params, data, axis)
+            update_axis_parameters(params, axis)
             domain_ranges = compute_domain_ranges(params)
             
-            @perf_task "loop" "comms+fluxes" @time_expr_c "comms+fluxes" if params.async_comms
-                error("oops")
+            @perf_task "loop" "EOS+comms+fluxes" @time_expr_c "EOS+comms+fluxes" if params.async_comms
                 @sync begin
                     @async begin
-                        if !EOS_up_to_date 
-                            event_2 = update_EOS!(params, data, inner_domain(domain_ranges), :inner; dependencies=prev_event)
-                        else
-                            event_2 = prev_event
-                        end
-
-                        event_2 = numericalFluxes!(params, data, dt * dt_factor, u, inner_fluxes_domain(domain_ranges), :inner; dependencies=event_2)
+                        event_2 = update_EOS!(params, data, 
+                            inner_domain(domain_ranges), :inner; dependencies=prev_event)
+                        event_2 = numericalFluxes!(params, data, prev_dt * dt_factor, 
+                            inner_fluxes_domain(domain_ranges), :inner; dependencies=event_2)
                         wait(event_2)
                     end
 
-                    bc_params = copy(params)
-                    bc_params.use_threading = false  # TODO : check if this is still necessary
                     @async begin
-                        if !EOS_up_to_date
-                            event_1 = update_EOS!(params, data, outer_lb_domain(domain_ranges), :outer; dependencies=prev_event)
-                            event_1 = update_EOS!(params, data, outer_rt_domain(domain_ranges), :outer; dependencies=event_1)
-                        else
-                            event_1 = prev_event
-                        end
+                        event_1 = update_EOS!(outer_params, data, 
+                            outer_lb_domain(domain_ranges), :outer; dependencies=prev_event)
+                        event_1 = update_EOS!(outer_params, data, 
+                            outer_rt_domain(domain_ranges), :outer; dependencies=event_1)
 
-                        event_1 = boundaryConditions!(bc_params, data, host_array, axis; dependencies=event_1)
+                        event_1 = boundaryConditions!(outer_params, data, host_array, axis; 
+                            dependencies=event_1)
 
-                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_lb_domain(domain_ranges), :outer; dependencies=event_1)
-                        event_1 = numericalFluxes!(bc_params, data, dt * dt_factor, u, outer_fluxes_rt_domain(domain_ranges), :outer; dependencies=event_1)
+                        event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
+                            outer_fluxes_lb_domain(domain_ranges), :outer; dependencies=event_1)
+                        event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
+                            outer_fluxes_rt_domain(domain_ranges), :outer; dependencies=event_1)
                         wait(event_1)
                     end
                 end
 
+                step_checkpoint(params, data, cpu_data, "EOS+comms+fluxes", cycle, axis) && @goto stop
                 event = NoneEvent()
             else
-                if !EOS_up_to_date
-                    event = update_EOS!(params, data, full_domain(domain_ranges), :full; dependencies=prev_event)
-                    step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, axis; dependencies=event) && @goto stop
-                else
-                    event = prev_event
-                end
+                event = update_EOS!(params, data, full_domain(domain_ranges), :full; 
+                    dependencies=prev_event)
+                step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, axis; 
+                    dependencies=event) && @goto stop
                 
                 event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
-                step_checkpoint(params, data, cpu_data, "boundaryConditions!", cycle, axis; dependencies=event) && @goto stop
+                step_checkpoint(params, data, cpu_data, "boundaryConditions!", cycle, axis; 
+                    dependencies=event) && @goto stop
                 
-                event = numericalFluxes!(params, data, dt * dt_factor, u, full_fluxes_domain(domain_ranges), :full; dependencies=event)
-                step_checkpoint(params, data, cpu_data, "numericalFluxes!", cycle, axis; dependencies=event) && @goto stop
+                event = numericalFluxes!(params, data, prev_dt * dt_factor, 
+                    full_fluxes_domain(domain_ranges), :full; dependencies=event)
+                step_checkpoint(params, data, cpu_data, "numericalFluxes!", cycle, axis;
+                    dependencies=event) && @goto stop
                 
                 params.measure_time && wait(event)
             end
 
-            @perf_task "loop" "cellUpdate" event = cellUpdate!(params, data, dt * dt_factor, u, x_; dependencies=event)
-            step_checkpoint(params, data, cpu_data, "cellUpdate!", cycle, axis; dependencies=event) && @goto stop
+            @perf_task "loop" "cellUpdate" event = cellUpdate!(params, data, prev_dt * dt_factor;
+                dependencies=event)
+            step_checkpoint(params, data, cpu_data, "cellUpdate!", cycle, axis; 
+                dependencies=event) && @goto stop
 
-            @perf_task "loop" "euler_proj" event = projection_remap!(params, data, dt * dt_factor; dependencies=event)
-            step_checkpoint(params, data, cpu_data, "projection_remap!", cycle, axis; dependencies=event) && @goto stop
+            @perf_task "loop" "euler_proj" event = projection_remap!(params, data,
+                prev_dt * dt_factor; dependencies=event)
+            step_checkpoint(params, data, cpu_data, "projection_remap!", cycle, axis;
+                dependencies=event) && @goto stop
             
             prev_event = event
-            EOS_up_to_date = false
         end
 
         if !is_warming_up()
             total_cycles_time += time_ns() - cycle_start
         end
 
-        dta = dt
         cycle += 1
-        t += dt
 
         if is_root
             if silent <= 1
                 current_mass, current_energy = conservation_vars(params, data)
                 ΔM = abs(initial_mass - current_mass)
                 ΔE = abs(initial_energy - current_energy)
-                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %.6f, |ΔE| = %.6f\n", cycle, dt, t, ΔM, ΔE)
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %.6f, |ΔE| = %.6f\n",
+                    cycle, prev_dt, t, ΔM, ΔE)
             end
         elseif silent <= 1
             conservation_vars(params, data)
         end
+
+        t += prev_dt
+        prev_dt = next_dt
 
         if cycle == 5
             t_warmup = time_ns()
@@ -2006,7 +1959,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
 
     if is_root
         if params.compare
-            # ignore timing errors
+            # ignore timing errors when comparing
         elseif cycle <= 5 && maxcycle > 5
             error("More than 5 cycles are needed to compute the grind time, got: $cycle")
         elseif t2 < t_warmup
@@ -2021,11 +1974,11 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
             println("Grind time:  ", round(grind_time / 1e3, digits=5),        " µs/cell/cycle")
             println("Cells/sec:   ", round(1 / grind_time * 1e3, digits=5),    " Mega cells/sec")
             println("Cycles:      ", cycle)
-            println("Last Δt:     ", @sprintf("%.18f", dt),                    " sec")
+            println("Last cycle:  ", @sprintf("%.18f", t), " sec, Δt=", @sprintf("%.18f", next_dt), " sec")
         end
     end
 
-    return dt, cycle, convert(T, 1 / grind_time), total_cycles_time
+    return next_dt, cycle, convert(T, 1 / grind_time), total_cycles_time
 end
 
 # 
@@ -2056,7 +2009,8 @@ function armon(params::ArmonParameters{T}) where T
         is_root && println("\nProcesses info:")
         rank > 0 && MPI.Recv(Bool, rank-1, 1, COMM)
         @printf(" - %2d/%-2d, local: %2d/%-2d, coords: (%2d,%-2d), cores: %3d to %3d\n", 
-            rank, proc_size, local_rank, local_size, cart_coords[1], cart_coords[2], minimum(getcpuids()), maximum(getcpuids()))
+            rank, proc_size, local_rank, local_size, cart_coords[1], cart_coords[2], 
+            minimum(getcpuids()), maximum(getcpuids()))
         rank < proc_size-1 && MPI.Send(true, rank+1, 1, COMM)
     end
 
@@ -2070,12 +2024,13 @@ function armon(params::ArmonParameters{T}) where T
     
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
-    @perf_task "init" "alloc" data = ArmonData(T, params.nbcell, max(params.nx, params.ny) * params.nghost * 7)
+    @perf_task "init" "alloc" data = ArmonData(T, params.nbcell, params.comm_array_size)
 
     @perf_task "init" "init_test" @pretty_time init_test(params, data)
 
     if params.use_gpu
-        device_array = params.device == CUDADevice() ? CuArray : params.device == ROCDevice() ? ROCArray : Array
+        device_array = params.device == CUDADevice() ? CuArray :
+                       params.device == ROCDevice() ? ROCArray : Array
         copy_time = @elapsed d_data = data_to_gpu(data, device_array)
         (is_root && silent <= 2) && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
@@ -2114,7 +2069,8 @@ function armon(params::ArmonParameters{T}) where T
             println("\nTime for each step of the $axis:          ( axis%) (total%)")
             for (step_label, step_time) in sort(collect(time_contrib_axis))
                 @printf(" - %-25s %10.5f ms (%5.2f%%) (%5.2f%%)\n", 
-                    step_label, step_time / 1e6, step_time / axis_total_time * 100, step_time / total_time * 100)
+                    step_label, step_time / 1e6, step_time / axis_total_time * 100, 
+                    step_time / total_time * 100)
             end
             @printf(" => %-24s %10.5f ms          (%5.2f%%)\n", "Axis total time:", 
                 axis_total_time / 1e6, axis_total_time / total_time * 100)

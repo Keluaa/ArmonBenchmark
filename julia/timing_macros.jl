@@ -1,5 +1,4 @@
 
-
 in_warmup_cycle = false
 set_warmup(b::Bool) = in_warmup_cycle = b
 is_warming_up()::Bool = in_warmup_cycle

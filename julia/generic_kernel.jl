@@ -274,7 +274,7 @@ Cannot be used alongside `@index_1D_lin()`.
 macro index_2D_lin() kernel_macro_error() end
 
 
-""""
+"""
     @iter_idx()
 
 Indexing macro to use in a `@generic_kernel` function. 
@@ -565,9 +565,16 @@ function transform_kernel(func::Expr)
     end
 
     # Compute the switches before calling the cpu kernel
-    setup_cpu_call = quote
-        threading = params.use_threading ? KernelWithThreading() : KernelWithoutThreading()
-        simd      = params.use_simd      ? KernelWithSIMD()      : KernelWithoutSIMD()
+    if options[:no_threading]
+        setup_cpu_call = quote
+            threading = KernelWithoutThreading()
+            simd      = params.use_simd      ? KernelWithSIMD()      : KernelWithoutSIMD()
+        end
+    else
+        setup_cpu_call = quote
+            threading = params.use_threading ? KernelWithThreading() : KernelWithoutThreading()
+            simd      = params.use_simd      ? KernelWithSIMD()      : KernelWithoutSIMD()
+        end 
     end
 
     # -- GPU --
@@ -698,17 +705,6 @@ function transform_kernel(func::Expr)
         gpu_call = Expr(:macrocall, gpu_timing_macro, LineNumberNode(@__LINE__, @__FILE__), label, gpu_call)
     end
 
-    # Disable multi-threading on the CPU if needed
-    if options[:no_threading]
-        cpu_call = quote
-            let __tmp_use_threading = params.use_threading
-                params.use_threading = false
-                $cpu_call
-                params.use_threading = __tmp_use_threading
-            end
-        end
-    end
-    
     # Define the body of the main function
     main_def[:body] = quote
         $params_unpack
