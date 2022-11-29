@@ -474,6 +474,7 @@ function transform_kernel(func::Expr)
     def = splitdef(func)
     func_name = def[:name]
     kernel_func_name = Symbol(func_name, "_kernel")
+    def[:name] = kernel_func_name
 
     loop_index_name = gensym(:loop_index)
 
@@ -484,10 +485,13 @@ function transform_kernel(func::Expr)
         return last(arg.args)
     end
 
-    is_row_length_in_args = false
-    for arg in def[:args]
-        if first(splitarg(arg)) === :row_length
-            is_row_length_in_args = true
+    is_T_in_where = false
+    is_V_in_where = false
+    for expr in def[:whereparams]
+        if expr === :T
+            is_T_in_where = true
+        elseif expr isa Expr && @capture(expr, V <: AbstractArray{T})
+            is_V_in_where = true
         end
     end
 
@@ -576,7 +580,6 @@ function transform_kernel(func::Expr)
     gpu_def = deepcopy(def)
 
     var_global_lin = gensym(:I_gl_lin)
-    var_global_ntuple = gensym(:I_gl_ntuple)
     var_1D_lin = gensym(:I_1D_lin)
     var_2D_lin = gensym(:I_2D_lin)
 
@@ -588,42 +591,42 @@ function transform_kernel(func::Expr)
 
     use_1D_lin = :lin_1D in used_indexing_types
     use_2D_lin = :lin_2D in used_indexing_types
-    use_global_lin = :iter_idx in used_indexing_types || use_1D_lin
-    use_global_ntuple = use_2D_lin
+    use_global_lin = :iter_idx in used_indexing_types || use_1D_lin || use_2D_lin
 
     # KernelAbstractions parses only the first layer statements of the kernel body, and doesn't 
     # recurse into it. Therefore in order to properly initialize the `@index` macros we store into
-    # tmp varaiables the result of the `@index` macro used in the loop body.
+    # tmp variables the result of the `@index` macro used in the loop body. Those variables can then
+    # be accessed from everywhere in the kernel body.
     indexing_init = quote
         $(use_global_lin    ? :($var_global_lin    = @index(Global, Linear)) : Expr(:block))
-        $(use_global_ntuple ? :($var_global_ntuple = @index(Global, NTuple)) : Expr(:block))
         $(use_1D_lin        ? :($var_1D_lin = $var_global_lin + i_0)         : Expr(:block))
-        $(use_2D_lin        ? :(
-            $var_2D_lin = $var_global_ntuple[1] * row_length + $var_global_ntuple[2] + i_0
-        ) : Expr(:block))
+        $(use_2D_lin ? :(
+                $var_2D_lin = let
+                    # We don't use multi-dimensional kernels since they are very in
+                    ix, iy = divrem($var_global_lin, __ranges_info[4])
+                    j = __ranges_info[1] + ix * __ranges_info[2] - 1  # first index in of the row
+                    i = __ranges_info[3] + iy + j  # cell index
+                    i
+                end
+            ) : Expr(:block)
+        )
     end
     pushfirst!(gpu_def[:body].args, indexing_init.args..., init_expr)
 
     # Adjust the GPU parameters
-    # Note: For the initial index `i_0`, we substract 1 because of how the main and inner ranges are
-    # defined, and substract 1+row_length because of the fact that the index returned by the `@index`
-    # starts at 1 and not 0.
     if indexing_type == :lin_1D
+        # Note: For the initial index `i_0`, we substract 1 because of how the main and inner ranges 
+        # are defined, and substract 1 because of the fact that the index returned by the `@index` 
+        # starts at 1 and not 0.
         gpu_loop_params = (:(i_0::Int),)
         gpu_loop_params_names = (:(first(loop_range) - 2),)
         gpu_ndrange = :(length(loop_range))
-        gpu_params_unpack = Expr(:block)
     elseif indexing_type == :lin_2D
-        # Don't add 'row_length' to the GPU kernel parameters if it is already present
-        if is_row_length_in_args
-            gpu_loop_params = (:(i_0::Int),)
-            gpu_loop_params_names = (:(first(main_range) + first(inner_range) - row_length - 2),)
-        else
-            gpu_loop_params = (:(i_0::Int), :(row_length::Int))
-            gpu_loop_params_names = (:(first(main_range) + first(inner_range) - row_length - 2), :row_length)
-        end
-        gpu_params_unpack = :((; row_length) = params)
-        gpu_ndrange = :((length(main_range), length(inner_range)))
+        gpu_loop_params = (:(__ranges_info::NTuple{4, Int}),)
+        gpu_loop_params_names = (:(
+            (first(main_range), step(main_range), first(inner_range), length(inner_range))
+        ),)
+        gpu_ndrange = :(length(main_range) * length(inner_range))
     end
 
     pushfirst!(gpu_def[:args], gpu_loop_params...)
@@ -647,11 +650,14 @@ function transform_kernel(func::Expr)
     main_args, data_args = pack_struct_fields(args, ArmonData)
     main_args, params_args = pack_struct_fields(main_args, ArmonParameters)
 
+    params_type = is_T_in_where ? :(ArmonParameters{T}) : :(ArmonParameters)
+    data_type   = is_V_in_where ? :(ArmonData{V})       : :(ArmonData)
+
     if isempty(data_args)
-        main_def[:args] = [:(params::ArmonParameters), main_loop_arg, main_args...]
+        main_def[:args] = [:(params::$params_type), main_loop_arg, main_args...]
         data_unpack = Expr(:block)
     else
-        main_def[:args] = [:(params::ArmonParameters), :(data::ArmonData), main_loop_arg, main_args...]
+        main_def[:args] = [:(params::$params_type), :(data::$data_type), main_loop_arg, main_args...]
         data_unpack = :((; $(data_args...)) = data)
     end
 
@@ -705,7 +711,6 @@ function transform_kernel(func::Expr)
         $data_unpack
         $main_loop_arg_unpack
         if params.use_gpu
-            $gpu_params_unpack
             gpu_kernel_func = $kernel_func_name(params.device, params.block_size)  # Get the right KernelAbstraction function...
             ndrange = $(gpu_ndrange)
             return $(gpu_call)  # ...then call it
@@ -735,8 +740,8 @@ function transform_kernel(func::Expr)
 end
 
 
-
 # TODO : parameter: fold=<struct> to fold the paramerters of the kernel into a `(; <params>) = <struct>` expression
+#  + take care of the T and V in where params
 """
     @generic_kernel(function definition)
 

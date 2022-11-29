@@ -1709,13 +1709,13 @@ end
 
 
 function step_checkpoint(params::ArmonParameters{T}, 
-        data::ArmonData{V}, cpu_data::Union{Nothing, ArmonData{W}},
+        data::ArmonData{V}, cpu_data::ArmonData{W},
         step_label::String, cycle::Int, axis::Union{Axis, Nothing};
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     if params.compare
         wait(dependencies)
 
-        if !isnothing(cpu_data) && W != V
+        if W != V
             data_from_gpu(cpu_data, data)
         else
             cpu_data = data
@@ -1796,7 +1796,7 @@ end
 # 
 
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
-        cpu_data::Union{ArmonData{W}, Nothing}) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        cpu_data::ArmonData{W}) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; maxtime, maxcycle, nx, ny, silent, animation_step, is_root, dt_on_even_cycles) = params
     
     cycle  = 0
@@ -2038,7 +2038,7 @@ function armon(params::ArmonParameters{T}) where T
 
         data_from_gpu(data, d_data)
     else
-        @pretty_time dt, cycles, cells_per_sec, total_time = time_loop(params, data, nothing)
+        @pretty_time dt, cycles, cells_per_sec, total_time = time_loop(params, data, data)
     end
 
     if params.write_output
