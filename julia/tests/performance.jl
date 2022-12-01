@@ -84,7 +84,7 @@ end
 
 @testset "Performance" begin
 
-    check_julia_options()
+    check_julia_options(get_device_info(:CPU)[:cores])
     setup_cpu_threads()
 
     # Entire solver

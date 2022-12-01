@@ -18,7 +18,7 @@ Tests available:
  - kernels        Compilation and correctness of indexing in generic kernels (CPU & GPU)
  - convergence    Convergence to the refenrence solutions
  - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
- - perf           Checks for any regression in performance
+ - performance    Checks for any regression in performance
  - mpi            Equivalence with the single domain case and asynchronous communications
 
 Separate test multiple sets with a comma.
@@ -80,6 +80,7 @@ function do_tests(tests_to_do; verbose=true)
                 error("Unknown test set: $test")
             end
 
+            # TODO : test domains (and remove the file in the 'julia' dir)
             # TODO : suceptibility test comparing a result with different rounding modes
             # TODO : test lagrangian only mode
         end

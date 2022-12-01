@@ -35,7 +35,7 @@ const KERNELS = [
 ]
 
 
-function check_julia_options()
+function check_julia_options(num_cores)
     options = Base.JLOptions()
 
     if options.opt_level < 3 
@@ -44,6 +44,10 @@ function check_julia_options()
 
     if options.check_bounds != 2
         error("Automatic bounds checking must be disabled, restart Julia with '--check-bounds=no'")
+    end
+
+    if Threads.nthreads() != num_cores
+        error("Performance tests must use all available physical cores, restart Julia with '-t $num_cores'")
     end
 end
 
