@@ -400,6 +400,17 @@ function Base.copy(p::ArmonParameters{T}) where T
     return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
 end
 
+
+function get_device_array(params::ArmonParameters)
+    if params.device == CUDADevice()
+        return CuArray
+    elseif params.device == ROCDevice()
+        return ROCArray
+    else  # params.device == CPU()
+        return Array
+    end
+end
+
 #
 # Data
 #
@@ -427,6 +438,11 @@ struct ArmonData{V}
     work_array_4::V
     domain_mask::V
     tmp_comm_array::V
+end
+
+
+function ArmonData(params::ArmonParameters{T}) where T
+    return ArmonData(T, params.nbcell, params.comm_array_size)
 end
 
 
@@ -490,6 +506,18 @@ function data_from_gpu(host_data::ArmonData{V}, device_data::ArmonData{W}) where
     copyto!(host_data.gmat, device_data.gmat)
     copyto!(host_data.ustar, device_data.ustar)
     copyto!(host_data.pstar, device_data.pstar)
+end
+
+
+function memory_required_for(params::ArmonParameters{T}) where T
+    return memory_required_for(params.nbcell, params.comm_array_size, T)
+end
+
+
+function memory_required_for(N, communication_array_size, float_type)
+    field_count = fieldcount(ArmonData{AbstractArray{float_type}})
+    floats = (field_count - 1) * N + communication_array_size
+    return floats * sizeof(float_type)
 end
 
 #
@@ -2024,14 +2052,11 @@ function armon(params::ArmonParameters{T}) where T
     
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
-    @perf_task "init" "alloc" data = ArmonData(T, params.nbcell, params.comm_array_size)
-
+    @perf_task "init" "alloc" data = ArmonData(params)
     @perf_task "init" "init_test" @pretty_time init_test(params, data)
 
     if params.use_gpu
-        device_array = params.device == CUDADevice() ? CuArray :
-                       params.device == ROCDevice() ? ROCArray : Array
-        copy_time = @elapsed d_data = data_to_gpu(data, device_array)
+        copy_time = @elapsed d_data = data_to_gpu(data, get_device_array(params))
         (is_root && silent <= 2) && @printf("Time for copy to device: %.3g sec\n", copy_time)
 
         @pretty_time dt, cycles, cells_per_sec, total_time = time_loop(params, d_data, data)
