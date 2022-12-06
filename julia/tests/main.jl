@@ -37,14 +37,14 @@ filter!(!isempty, main_options)
 main_options = main_options .|> Symbol |> union
 
 if :all in main_options
-    main_options = Set((:quality, :stability, :convergence, :kernels, :gpu, :performance, :mpi))
+    main_options = [:quality, :stability, :convergence, :kernels, :gpu, :performance, :mpi]
 elseif :short in main_options
-    main_options = Set((:quality, :stability, :convergence, :kernels))
+    main_options = [:quality, :stability, :convergence, :kernels]
 end
 
 if :verbose in main_options
     verbose = true
-    delete!(main_options, :verbose)
+    deleteat!(main_options, findall(x -> x == :verbose, main_options))
 else
     verbose = false
 end
@@ -65,7 +65,6 @@ function do_tests(tests_to_do; verbose=true)
     println("Testing: ", join(tests_to_do, ", "))
 
     tmp_print = Test.TESTSET_PRINT_ENABLE[]
-    Test.TESTSET_PRINT_ENABLE[] = false
 
     ts = @testset "Armon tests" begin
         for test in tests_to_do
@@ -84,6 +83,10 @@ function do_tests(tests_to_do; verbose=true)
             # TODO : suceptibility test comparing a result with different rounding modes
             # TODO : test lagrangian only mode
         end
+
+        # Disable printing at the end so that we can print the results as we like without hiding any
+        # errors.
+        Test.TESTSET_PRINT_ENABLE[] = false
     end
 
     Test.TESTSET_PRINT_ENABLE[] = tmp_print

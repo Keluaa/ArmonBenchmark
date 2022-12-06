@@ -90,6 +90,15 @@ macro time_event_a(expr)        return build_time_expr(extract_function_name(exp
 macro time_expr_a(expr)         return build_time_expr(extract_function_name(expr), false, expr; exclude_from_total=true, use_wait=false) end
 
 
+@static if VERSION >= v"1.9"
+    compile_time_before_ns() = Base.cumulative_compile_time_ns()[1]
+    compile_time_after_ns() = Base.cumulative_compile_time_ns()[1]
+else
+    compile_time_before_ns() = Base.cumulative_compile_time_ns_before()
+    compile_time_after_ns() = Base.cumulative_compile_time_ns_after()
+end
+
+
 # Equivalent to `@time` but with a better output
 macro pretty_time(expr)
     function_name = extract_function_name(expr)
@@ -98,11 +107,11 @@ macro pretty_time(expr)
             # Same structure as `@time` (see `@macroexpand @time`), using some undocumented functions.
             gc_info_before = Base.gc_num()
             time_before = Base.time_ns()
-            compile_time_before = Base.cumulative_compile_time_ns_before()
+            compile_time_before = compile_time_before_ns()
 
             $(expr)
 
-            compile_time_after = Base.cumulative_compile_time_ns_after()
+            compile_time_after = compile_time_after_ns()
             time_after = Base.time_ns()
             gc_info_after = Base.gc_num()
             

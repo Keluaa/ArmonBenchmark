@@ -42,6 +42,12 @@ using .VTune
 @enum Axis X_axis Y_axis
 
 #
+# GPU device
+#
+
+GPUDevice = Union{Device, ROCDevice}  # ROCKernels uses AMDGPU's ROCDevice, unlike CUDAKernels and KernelsAbstractions...
+
+#
 # Limiters
 #
 
@@ -121,7 +127,7 @@ mutable struct ArmonParameters{Flt_T}
     use_threading::Bool
     use_simd::Bool
     use_gpu::Bool
-    device::Device
+    device::GPUDevice
     block_size::Int
 
     # MPI

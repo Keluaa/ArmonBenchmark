@@ -2,8 +2,8 @@
 using TOML
 using ThreadPinning
 using KernelAbstractions
-import .Armon: ArmonData, memory_required_for, init_test, data_to_gpu
-import .Armon: @indexing_vars, @i, DomainRange, compute_domain_ranges, full_domain, get_device_array
+import .Armon: ArmonData, memory_required_for, init_test, data_to_gpu, MinmodLimiter
+import .Armon: @indexing_vars, @i, DomainRange, compute_domain_ranges, full_domain, get_device_array, linear_range
 
 
 include("device_info.jl")
@@ -19,23 +19,23 @@ const KERNEL_REPEATS = 100
 
 # (name, run on a single row or not, lambda to launch the kernel)
 const KERNELS = [
-    ("acoustic!",                  false, (p, d, r, _ , deps) -> Armon.acoustic!(                 p, d, r, d.ustar, d.pstar, d.umat; dependencies=deps) ),
-    ("acoustic_GAD!",              false, (p, d, r, dt, deps) -> Armon.acoustic_GAD!(             p, d, r, dt, d.umat;               dependencies=deps) ),
-    ("update_perfect_gas_EOS!",    false, (p, d, r, _ , deps) -> Armon.update_perfect_gas_EOS!(   p, d, r, 7/5;                      dependencies=deps) ),
-    ("update_bizarrium_EOS!",      false, (p, d, r, _ , deps) -> Armon.update_bizarrium_EOS!(     p, d, r;                           dependencies=deps) ),
-    ("cell_update!",               false, (p, d, r, dt, deps) -> Armon.cell_update!(              p, d, r, dt, d.umat;               dependencies=deps) ),
-    ("cell_update_lagrange!",      false, (p, d, r, dt, deps) -> Armon.cell_update_lagrange!(     p, d, r, p.ifin, dt, d.x;          dependencies=deps) ),
+    ("acoustic!",                  false, (p, d, r, _ , deps) -> Armon.acoustic!(                 p, d, "label", r, d.ustar, d.pstar, d.umat;    dependencies=deps) ),
+    ("acoustic_GAD!",              false, (p, d, r, dt, deps) -> Armon.acoustic_GAD!(             p, d, "label", r, dt, d.umat, MinmodLimiter(); dependencies=deps) ),
+    ("update_perfect_gas_EOS!",    false, (p, d, r, _ , deps) -> Armon.update_perfect_gas_EOS!(   p, d, "label", r, 7/5;                         dependencies=deps) ),
+    ("update_bizarrium_EOS!",      false, (p, d, r, _ , deps) -> Armon.update_bizarrium_EOS!(     p, d, "label", r;                              dependencies=deps) ),
+    ("cell_update!",               false, (p, d, r, dt, deps) -> Armon.cell_update!(              p, d, linear_range(r), dt, d.umat;             dependencies=deps) ),
+    ("cell_update_lagrange!",      false, (p, d, r, dt, deps) -> Armon.cell_update_lagrange!(     p, d, linear_range(r), p.ifin, dt, d.x;        dependencies=deps) ),
     ("euler_projection!",          false, (p, d, r, dt, deps) -> Armon.euler_projection!(         p, d, r, dt, d.work_array_1, d.work_array_2, d.work_array_3, d.work_array_4; dependencies=deps)                ),
     ("first_order_euler_remap!",   false, (p, d, r, dt, deps) -> Armon.first_order_euler_remap!(  p, d, r, dt, d.work_array_1, d.work_array_2, d.work_array_3, d.work_array_4; dependencies=deps)                ),
     ("second_order_euler_remap!",  false, (p, d, r, dt, deps) -> Armon.second_order_euler_remap!( p, d, r, dt, d.work_array_1, d.work_array_2, d.work_array_3, d.work_array_4; dependencies=deps)                ),
     ("boundaryConditions! left",   true,  (p, d, _, _ , deps) -> Armon.boundaryConditions!(       p, d, 1:p.ny, p.row_length, p.index_start + p.idx_row #= @i(0,1) =#,            1, -1., 1.; dependencies=deps) ),
     ("boundaryConditions! bottom", true,  (p, d, _, _ , deps) -> Armon.boundaryConditions!(       p, d, 1:p.nx,            1, p.index_start + p.idx_col #= @i(1,0) =#, p.row_length,  1., 1.; dependencies=deps) ),
-    ("read_border_array!",         true,  (p, d, r, _ , deps) -> Armon.read_border_array!(        p, d, r, nx, d.tmp_comm_array;     dependencies=deps) ),
-    ("write_border_array!",        true,  (p, d, r, _ , deps) -> Armon.write_border_array!(       p, d, r, nx, d.tmp_comm_array;     dependencies=deps) ),
+    ("read_border_array!",         true,  (p, d, r, _ , deps) -> Armon.read_border_array!(        p, d, r, p.nx, d.tmp_comm_array;                 dependencies=deps) ),
+    ("write_border_array!",        true,  (p, d, r, _ , deps) -> Armon.write_border_array!(       p, d, r, p.nx, d.tmp_comm_array;                 dependencies=deps) ),
 ]
 
 
-function check_julia_options(num_cores)
+function check_julia_options(cpu_info)
     options = Base.JLOptions()
 
     if options.opt_level < 3 
@@ -46,8 +46,9 @@ function check_julia_options(num_cores)
         error("Automatic bounds checking must be disabled, restart Julia with '--check-bounds=no'")
     end
 
-    if Threads.nthreads() != num_cores
-        error("Performance tests must use all available physical cores, restart Julia with '-t $num_cores'")
+    num_cores_per_socket = cpu_info[:cores] / cpu_info[:sockets]  # We suppose this is a symetric node
+    if Threads.nthreads() != num_cores_per_socket
+        error("Performance tests must use all available physical cores on a single socket, restart Julia with '-t $num_cores_per_socket'")
     end
 end
 
@@ -73,7 +74,7 @@ function write_performance_data(device_type::Symbol, data)
     tmp_file_name = file_name * "_TMP"
     try
         open(tmp_file_name, "w") do file
-            TOML.print(file, data)
+            TOML.print(file, data; sorted=true)
         end
         mv(tmp_file_name, file_name; force=true)
     catch
@@ -86,7 +87,7 @@ end
 function get_perf_data_for_device(device_type::Symbol, device_info)
     perf_data = read_performance_data(device_type)
     info_hash = hash(device_info)
-    device_perf_data = get(perf_data, info_hash, nothing)
+    device_perf_data = get(perf_data, repr(info_hash), nothing)
     return isnothing(device_perf_data) ? nothing : device_perf_data["performance"]
 end
 
@@ -138,7 +139,7 @@ end
 
 function measure_solver_performance(params)
     cells_per_sec = armon(params)[3]
-    return cells_per_sec
+    return round(cells_per_sec; sigdigits=4)
 end
 
 
@@ -148,6 +149,11 @@ function setup_kernel_tests(params, memory_available)
     
     data = ArmonData(params)
     init_test(params, data)
+
+    if !params.use_MPI
+        # Resize the communication array for the halo exchange kernels
+        resize!(data.tmp_comm_array, max(params.nx, params.ny) * params.nghost * 7)
+    end
 
     if params.use_gpu
         data = data_to_gpu(data, get_device_array(params))
@@ -159,7 +165,7 @@ end
 
 function measure_kernel_performance(params::ArmonParameters{T}, data::ArmonData{V}, 
         kernel_lambda, single_row_kernel) where {T, V <: AbstractArray{T}}
-    (; row_length, nghost) = params
+    (; row_length, nghost, nx) = params
     @indexing_vars(params)
 
     if single_row_kernel
@@ -175,7 +181,14 @@ function measure_kernel_performance(params::ArmonParameters{T}, data::ArmonData{
     dt = T(1e-6)
     event = NoneEvent()
 
-    kernel_lambda(params, data, range, dt, event) |> wait  # Compile the kernel
+    # Compile the kernel and make sure it runs as fast as possible
+    # Kernels which weren't used during the solver's performance measurement can take a few
+    # iterations to be as fast as possible (reason unknown).
+    for _ in 1:KERNEL_REPEATS
+        event = kernel_lambda(params, data, range, dt, event)
+    end
+    wait(event)
+
     kernel_time = @elapsed begin
         for _ in 1:KERNEL_REPEATS
             event = kernel_lambda(params, data, range, dt, event)
@@ -183,5 +196,5 @@ function measure_kernel_performance(params::ArmonParameters{T}, data::ArmonData{
         wait(event)  # Wait for the last one since on GPU kernel launches are asynchronous
     end
 
-    return kernel_time / KERNEL_REPEATS
+    return round(kernel_time / KERNEL_REPEATS; sigdigits=4)
 end

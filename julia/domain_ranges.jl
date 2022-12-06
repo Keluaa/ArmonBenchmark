@@ -55,6 +55,8 @@ function inflate_dir(dr::DomainRange, dir::Axis, n::Int = 1)
     end
 end
 
+linear_range(dr::DomainRange) = (first(dr.col) + first(dr.row) - 1):(last(dr.col) + last(dr.row) - 1)
+
 #
 # DomainRanges: represents the different sub-domains of a domain for a sweep along a direction
 #

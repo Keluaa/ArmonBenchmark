@@ -8,7 +8,14 @@ function get_device_perf_info(device_type)
     device_info = get_device_info(device_type)
     device_perf_data = get_perf_data_for_device(device_type, device_info)
     unknown_device = isnothing(device_perf_data)
-    unknown_device && @warn "There is no reference results for this $device_type" maxlog=1
+    if unknown_device
+        device_info_list = map(p -> join(p, ": "), collect(pairs(device_info)))
+        device_info_str = join(device_info_list, "\n")
+        device_info_hash = repr(hash(device_info))
+        @warn "There is no reference results for this $device_type.\n\
+               Device info:\n$device_info_str\n\
+               hash: $device_info_hash" maxlog=1
+    end
     memory_available = device_info[:memory] * 1e9
     return device_perf_data, memory_available
 end
@@ -31,8 +38,8 @@ end
 function encouragements(name, context, new_perf, ref_perf, is_time)
     # Display the message only for improvements bigger than 5%
     is_big_improvement = if is_time
-        # Time should decrease
-        new_perf < ref_perf && !isapprox(new_perf, ref_perf; rtol=0.05)
+        # Time should decrease (+ 2µs of absolute (in)tolerance)
+        new_perf < ref_perf && !isapprox(new_perf, ref_perf; atol=3e-6, rtol=0.05)
     else
         # Performance must increase
         new_perf > ref_perf && !isapprox(new_perf, ref_perf; rtol=0.05)
@@ -42,8 +49,10 @@ function encouragements(name, context, new_perf, ref_perf, is_time)
         gain = abs(new_perf - ref_perf) / ref_perf
         gain = round(gain * 100; digits=1)
 
-        new_str = @sprintf("%.1g", new_perf)
-        ref_str = @sprintf("%.1g", ref_perf)
+        unit = is_time ? "sec" : "Gc/sec"
+
+        new_str = @sprintf("%.3g %s", new_perf, unit)
+        ref_str = @sprintf("%.3g %s", ref_perf, unit)
 
         @info "The performance of the $name improved by $gain% for $context ($ref_str → $new_str)!\n\
                Remember to update the refenrence data."
@@ -69,13 +78,18 @@ function test_kernels_performance(params, data, kernels_perf_data, skip_test, co
     @testset "$(kernel_info[1])" for kernel_info in KERNELS
         (kernel_name, single_row, kernel_lambda) = kernel_info
 
-        ref_time = get(kernels_perf_data, kernel_name, nothing)
-        unknown_kernel = isnothing(ref_time)
-        unknown_kernel && @warn "Missing '$kernel_name' kernel entry in the performance data for this device"
+        if !isnothing(kernels_perf_data)
+            ref_time = get(kernels_perf_data, kernel_name, nothing)
+            unknown_kernel = isnothing(ref_time)
+            unknown_kernel && @warn "Missing '$kernel_name' kernel entry in the performance data for this device"
+        else
+            ref_time = nothing
+            unknown_kernel = true
+        end
 
         @test begin
             kernel_time = measure_kernel_performance(params, data, kernel_lambda, single_row)
-            ok = kernel_time < ref_time || isapprox(ref_time, kernel_time; rtol=0.05)
+            ok = kernel_time < ref_time || isapprox(ref_time, kernel_time; atol=2e-6, rtol=0.05)
             ok && encouragements("'$kernel_name' kernel", context_str, kernel_time, ref_time, true)
         end skip=(skip_test || unknown_kernel)
     end
@@ -84,7 +98,7 @@ end
 
 @testset "Performance" begin
 
-    check_julia_options(get_device_info(:CPU)[:cores])
+    check_julia_options(get_device_info(:CPU))
     setup_cpu_threads()
 
     # Entire solver
@@ -110,7 +124,7 @@ end
 
             params = get_performance_params(:Sod, Float64, device_type, size)
             missing_ref_data, kernels_perf_data = get_kernels_ref_perf(device_perf_data, size)
-            skip_test |= missing_ref_data
+            skip_test = missing_ref_data
 
             if skip_test
                 data = nothing
@@ -121,4 +135,6 @@ end
             test_kernels_performance(params, data, kernels_perf_data, skip_test, context_str)
         end
     end
+
+    println("done with the performance")
 end

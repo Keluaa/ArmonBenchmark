@@ -1,0 +1,97 @@
+[0x3cac9f29d0e272cd]
+cache_sizes = "L1 = 32768, L2 = 524288, L3 = 16777216"
+commit = "54eea91e2cd4e5f6312125f73f2f16ee360b862d"
+cores = 128
+date = "02-12-2022"
+freq = 2600.0
+memory = 269.5
+name = "AMD EPYC 7H12 64-Core Processor"
+numa_nodes = 8
+sockets = 2
+
+    [0x3cac9f29d0e272cd.performance.big.kernels]
+    "acoustic!" = 0.04325
+    "acoustic_GAD!" = 0.04469
+    "boundaryConditions! bottom" = 1.587e-5
+    "boundaryConditions! left" = 0.0007764
+    "cell_update!" = 0.04908
+    "cell_update_lagrange!" = 0.01623
+    "euler_projection!" = 0.04976
+    "first_order_euler_remap!" = 0.07058
+    "read_border_array!" = 0.0003915
+    "second_order_euler_remap!" = 0.07542
+    "update_bizarrium_EOS!" = 0.07746
+    "update_perfect_gas_EOS!" = 0.05453
+    "write_border_array!" = 0.0003871
+
+    [0x3cac9f29d0e272cd.performance.big.solver]
+    Bizarrium = 0.1518
+    Sod_circ = 0.1634
+
+    [0x3cac9f29d0e272cd.performance.small.kernels]
+    "acoustic!" = 7.355e-5
+    "acoustic_GAD!" = 0.0003385
+    "boundaryConditions! bottom" = 9.037e-5
+    "boundaryConditions! left" = 0.000125
+    "cell_update!" = 7.763e-5
+    "cell_update_lagrange!" = 2.808e-5
+    "euler_projection!" = 0.0001015
+    "first_order_euler_remap!" = 5.373e-5
+    "read_border_array!" = 3.525e-5
+    "second_order_euler_remap!" = 0.000536
+    "update_bizarrium_EOS!" = 0.0007203
+    "update_perfect_gas_EOS!" = 0.0001001
+    "write_border_array!" = 3.488e-5
+
+    [0x3cac9f29d0e272cd.performance.small.solver]
+    Bizarrium = 0.2348
+    Sod_circ = 0.2934
+
+[0xee8f3f2b29ecfd7e]
+cache_sizes = "L1 = 32768, L2 = 524288, L3 = 33554432"
+commit = "54eea91e2cd4e5f6312125f73f2f16ee360b862d"
+cores = 128
+date = "02-12-2022"
+freq = 2450
+memory = 269.5
+name = "AMD EPYC 7763 64-Core Processor"
+numa_nodes = 4
+sockets = 2
+
+    [0xee8f3f2b29ecfd7e.performance.big.kernels]
+    "acoustic!" = 0.04294
+    "acoustic_GAD!" = 0.04762
+    "boundaryConditions! bottom" = 2.158e-5
+    "boundaryConditions! left" = 0.000386
+    "cell_update!" = 0.04858
+    "cell_update_lagrange!" = 0.01452
+    "euler_projection!" = 0.05115
+    "first_order_euler_remap!" = 0.07105
+    "read_border_array!" = 0.0001905
+    "second_order_euler_remap!" = 0.08023
+    "update_bizarrium_EOS!" = 0.05723
+    "update_perfect_gas_EOS!" = 0.0539
+    "write_border_array!" = 0.0002646
+
+    [0xee8f3f2b29ecfd7e.performance.big.solver]
+    Bizarrium = 0.1628
+    Sod_circ = 0.1628
+
+    [0xee8f3f2b29ecfd7e.performance.small.kernels]
+    "acoustic!" = 0.0001052
+    "acoustic_GAD!" = 0.0003464
+    "boundaryConditions! bottom" = 8.311e-5
+    "boundaryConditions! left" = 0.0001036
+    "cell_update!" = 9.928e-5
+    "cell_update_lagrange!" = 2.563e-5
+    "euler_projection!" = 8.869e-5
+    "first_order_euler_remap!" = 0.0001146
+    "read_border_array!" = 1.942e-5
+    "second_order_euler_remap!" = 0.0004235
+    "update_bizarrium_EOS!" = 0.0004332
+    "update_perfect_gas_EOS!" = 0.0001072
+    "write_border_array!" = 1.796e-5
+
+    [0xee8f3f2b29ecfd7e.performance.small.solver]
+    Bizarrium = 0.2878
+    Sod_circ = 0.311

@@ -40,11 +40,19 @@ function get_gpu_info()
 end
 
 
+function get_cpu_max_freq()
+    cpu_max_freq = "CPU max MHz"
+    max_freq_str = readchomp(pipeline(`lscpu`, `grep $(cpu_max_freq)`))
+    max_freq_str = strip(max_freq_str[length(cpu_max_freq)+2:end])
+    return parse(Float64, max_freq_str)
+end
+
+
 function get_cpu_info()
     info = Sys.cpu_info()[1]
 
     name = info.model
-    freq = info.speed
+    freq = get_cpu_max_freq()
     memory = Sys.total_memory() / 1e9
     cores = num_physical_cores()
     numa_nodes = num_numa_nodes()
