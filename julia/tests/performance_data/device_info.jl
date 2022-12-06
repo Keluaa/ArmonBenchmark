@@ -24,10 +24,12 @@ function get_gpu_info()
         name = CUDA.name(device)
         memory = CUDA.totalmem(device) |> Int
     elseif gpu_type == :ROCM
-        agent = AMDGPU.get_default_agent()
+        device = AMDGPU.Runtime.get_default_device()
         type = "ROCm"
-        name = AMDGPU.get_name(agent)
-        memory = maximum(AMDGPU.pool_size.(mem_pools(agent))) |> Int
+        name = AMDGPU.Runtime.name(device)
+        memory_pools = AMDGPU.Runtime.memory_pools(device)
+        main_memory_pool = first(memory_pools)
+        memory = AMDGPU.pool_size(main_memory_pool) |> Int
     end
 
     memory = round(memory / 1e9; digits=1)

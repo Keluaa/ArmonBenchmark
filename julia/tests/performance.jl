@@ -96,6 +96,8 @@ function test_kernels_performance(params, data, kernels_perf_data, skip_test, co
 end
 
 
+# TODO : test the performance of dtCFL
+
 @testset "Performance" begin
 
     check_julia_options(get_device_info(:CPU))
