@@ -1,4 +1,6 @@
 
+cd(@__DIR__)
+
 if !@isdefined(Armon)
     include("../armon_2D_MPI_async.jl")
 end
@@ -8,24 +10,24 @@ using Test
 
 
 if isinteractive()
-    menu = 
-"""
-Tests available:
- - all            All tests below
- - short          Equivalent to 'code, stability, convergence, kernels'
- - code           Code quality
- - stability      Type stability
- - kernels        Compilation and correctness of indexing in generic kernels (CPU & GPU)
- - convergence    Convergence to the refenrence solutions
- - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
- - performance    Checks for any regression in performance
- - mpi            Equivalence with the single domain case and asynchronous communications
+    menu = """
+    Tests available:
+     - all            All tests below
+     - short          Equivalent to 'code, stability, domains, convergence, kernels'
+     - code           Code quality
+     - stability      Type stability
+     - domains        Domain 2D indexing
+     - kernels        Compilation and correctness of indexing in generic kernels (CPU & GPU)
+     - convergence    Convergence to the refenrence solutions
+     - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
+     - performance    Checks for any regression in performance
+     - MPI            Equivalence with the single domain case and asynchronous communications
 
-Separate test multiple sets with a comma.
+    Separate test multiple sets with a comma.
 
-Additionally, putting 'verbose' in the list of tests will display the entire tree of tests results.
+    Additionally, putting 'verbose' in the list of tests will display the entire tree of tests results.
 
-Choice: """
+    Choice: """
     printstyled(stdout, menu; color=:light_green)
     raw_main_options = readline()
 else
@@ -37,9 +39,9 @@ filter!(!isempty, main_options)
 main_options = main_options .|> Symbol |> union
 
 if :all in main_options
-    main_options = [:quality, :stability, :convergence, :kernels, :gpu, :performance, :mpi]
+    main_options = [:quality, :stability, :domains, :convergence, :kernels, :gpu, :performance, :mpi]
 elseif :short in main_options
-    main_options = [:quality, :stability, :convergence, :kernels]
+    main_options = [:quality, :stability, :domains, :convergence, :kernels]
 end
 
 if :verbose in main_options
@@ -54,7 +56,7 @@ function override_verbosity(ts::Test.DefaultTestSet, verbose::Bool)
     ts.verbose = verbose
     for sub_ts in ts.results
         if sub_ts isa Test.DefaultTestSet
-            override_verbosity(ts, verbose)
+            override_verbosity(sub_ts, verbose)
         end
     end
     return ts
@@ -66,10 +68,13 @@ function do_tests(tests_to_do; verbose=true)
 
     tmp_print = Test.TESTSET_PRINT_ENABLE[]
 
+    Test.TESTSET_PRINT_ENABLE[] = true
+
     ts = @testset "Armon tests" begin
         for test in tests_to_do
             if     test == :quality        include("code_quality.jl")
             elseif test == :stability      include("type_stability.jl")
+            elseif test == :domains        include("domains.jl")
             elseif test == :convergence    include("convergence.jl")
             elseif test == :kernels        include("kernels.jl")
             elseif test == :gpu            include("gpu.jl")
@@ -79,7 +84,6 @@ function do_tests(tests_to_do; verbose=true)
                 error("Unknown test set: $test")
             end
 
-            # TODO : test domains (and remove the file in the 'julia' dir)
             # TODO : suceptibility test comparing a result with different rounding modes
             # TODO : test lagrangian only mode
         end

@@ -1126,7 +1126,7 @@ function read_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, valu
         error("Unknown side: $side")
     end
 
-    range = DomainRange((main_range, inner_range))
+    range = DomainRange(main_range, inner_range)
     event = read_border_array!(params, data, range, side_length, tmp_comm_array; dependencies)
 
     if params.use_gpu
@@ -1174,7 +1174,7 @@ function write_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, val
         event = dependencies
     end
 
-    range = DomainRange((main_range, inner_range))
+    range = DomainRange(main_range, inner_range)
     event = write_border_array!(params, data, range, side_length, tmp_comm_array; dependencies=event)
 
     return event
@@ -1474,7 +1474,7 @@ function compute_domain_ranges(params::ArmonParameters)
     # Full range
     col_range = @i(1,1):row_length:@i(1,ny)
     row_range = 1:nx
-    full_range = DomainRange((col_range, row_range))
+    full_range = DomainRange(col_range, row_range)
     
     # Inner range
 
@@ -1488,7 +1488,7 @@ function compute_domain_ranges(params::ArmonParameters)
         row_range = 1:nx
     end
 
-    inner_range = DomainRange((col_range, row_range))
+    inner_range = DomainRange(col_range, row_range)
 
     # Outer range: left/bottom
 
@@ -1502,7 +1502,7 @@ function compute_domain_ranges(params::ArmonParameters)
         row_range = 1:nx
     end
     
-    outer_lb_range = DomainRange((col_range, row_range))
+    outer_lb_range = DomainRange(col_range, row_range)
 
     # Outer range: right/top
     if current_axis == X_axis
@@ -1514,23 +1514,23 @@ function compute_domain_ranges(params::ArmonParameters)
         col_range = @i(1,ny-nghost+1):row_length:@i(1,ny)
         row_range = 1:nx
     end
-    outer_rt_range = DomainRange((col_range, row_range))
+    outer_rt_range = DomainRange(col_range, row_range)
 
     if params.single_comm_per_axis_pass
         r = params.extra_ring_width
 
         # Add 'r' columns/rows on each of the 4 sides
-        full_range  = DomainRange((inflate(full_range.col,  r), inflate(full_range.row,  r)))
-        inner_range = DomainRange((inflate(inner_range.col, r), inflate(inner_range.row, r)))
+        full_range  = DomainRange(inflate(full_range.col,  r), inflate(full_range.row,  r))
+        inner_range = DomainRange(inflate(inner_range.col, r), inflate(inner_range.row, r))
         
         if current_axis == X_axis
             # Shift the outer domain to the left and right by 'r' cells, and add 'r' rows at the top and bottom
-            outer_lb_range = DomainRange((inflate(outer_lb_range.col, r), shift(outer_lb_range.row, -r)))
-            outer_rt_range = DomainRange((inflate(outer_rt_range.col, r), shift(outer_rt_range.row,  r)))
+            outer_lb_range = DomainRange(inflate(outer_lb_range.col, r), shift(outer_lb_range.row, -r))
+            outer_rt_range = DomainRange(inflate(outer_rt_range.col, r), shift(outer_rt_range.row,  r))
         else
             # Shift the outer domain to the top and bottom by 'r' cells, and add 'r' columns at the left and right
-            outer_lb_range = DomainRange((shift(outer_lb_range.col, -r), inflate(outer_lb_range.row, r)))
-            outer_rt_range = DomainRange((shift(outer_rt_range.col,  r), inflate(outer_rt_range.row, r)))
+            outer_lb_range = DomainRange(shift(outer_lb_range.col, -r), inflate(outer_lb_range.row, r))
+            outer_rt_range = DomainRange(shift(outer_rt_range.col,  r), inflate(outer_rt_range.row, r))
         end
     end
 

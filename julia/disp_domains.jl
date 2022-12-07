@@ -7,19 +7,15 @@ function disp_array_domain_ranges(params::Armon.ArmonParameters, drs::Armon.Doma
     outer_lb = fluxes ? Armon.outer_fluxes_lb_domain(drs) : Armon.outer_lb_domain(drs)
     outer_rt = fluxes ? Armon.outer_fluxes_rt_domain(drs) : Armon.outer_rt_domain(drs)
 
-    inner_ranges    = [   inner.row .+ (c - 1) for c in inner.col   ]
-    outer_lb_ranges = [outer_lb.row .+ (c - 1) for c in outer_lb.col]
-    outer_rt_ranges = [outer_rt.row .+ (c - 1) for c in outer_rt.col]
-
     t = zeros(Int, params.nbcell)
     for i in 1:params.nbcell
-        if any(in.(i, inner_ranges))
+        if i in inner
             t[i] += 1
         end
-        if any(in.(i, outer_lb_ranges))
+        if i in outer_lb
             t[i] += 2
         end
-        if any(in.(i, outer_rt_ranges))
+        if i in outer_rt
             t[i] += 4
         end
     end

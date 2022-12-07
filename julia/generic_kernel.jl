@@ -529,7 +529,7 @@ function transform_kernel(func::Expr)
         loop_params = (:(main_range::OrdinalRange{Int}), :(inner_range::OrdinalRange{Int}))
         loop_params_names = (:main_range, :inner_range)
         main_loop_arg = :(range::DomainRange)
-        main_loop_arg_unpack = :((main_range, inner_range) = range)
+        main_loop_arg_unpack = :((main_range, inner_range) = (range.col, range.row))
     else
         error("There is no indexing macro explicitly used in the kernel, therefore the CPU loop cannot be created")
     end

@@ -1,4 +1,6 @@
 
+import Base: oneto, length, size, axes, isempty, first, last, in
+
 #
 # Range utilities
 #
@@ -16,46 +18,47 @@ inflate(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):(last(r
 # DomainRange: Two dimensional range to index a 2D array stored with contigous rows
 #
 
-DomainRange = @NamedTuple{col::StepRange{Int, Int}, row::StepRange{Int, Int}}
+struct DomainRange
+    col::StepRange{Int, Int}
+    row::StepRange{Int, Int}
+end
 
-shift(dr::DomainRange,   n::Int = 1) = DomainRange((dr.col, shift(dr.row, n)))
-prepend(dr::DomainRange, n::Int = 1) = DomainRange((dr.col, prepend(dr.row, n)))
-expand(dr::DomainRange,  n::Int = 1) = DomainRange((dr.col, expand(dr.row, n)))
-inflate(dr::DomainRange, n::Int = 1) = DomainRange((dr.col, inflate(dr.row, n)))
+length(dr::DomainRange) = length(dr.col) * length(dr.row)
+size(dr::DomainRange) = (length(dr.col), length(dr.row))
+axes(dr::DomainRange) = (oneto(length(dr.col)), oneto(length(dr.row)))
 
-function shift_dir(dr::DomainRange, dir::Axis, n::Int = 1)
+isempty(dr::DomainRange) = length(dr) == 0
+
+first(dr::DomainRange) = first(dr.col) + first(dr.row) - 1
+last(dr::DomainRange)  = last(dr.col)  + last(dr.row)  - 1
+
+function in(x::Integer, dr::DomainRange)
+    first(dr) <= x <= last(dr) || return false
+    ix = x - first(dr.col) + 1
+    id = fld(ix, step(dr.col))
+    ix -= id * step(dr.col)
+    return ix in dr.row
+end
+
+shift(dr::DomainRange,   n::Int = 1) = DomainRange(dr.col, shift(dr.row, n))
+prepend(dr::DomainRange, n::Int = 1) = DomainRange(dr.col, prepend(dr.row, n))
+expand(dr::DomainRange,  n::Int = 1) = DomainRange(dr.col, expand(dr.row, n))
+inflate(dr::DomainRange, n::Int = 1) = DomainRange(dr.col, inflate(dr.row, n))
+
+@inline function apply_along_direction(dr::DomainRange, dir::Axis, f, args...)
     if dir == X_axis
-        return DomainRange((dr.col, shift(dr.row, n)))
+        return DomainRange(dr.col, f(dr.row, args...))
     else
-        return DomainRange((shift(dr.col, n), dr.row))
+        return DomainRange(f(dr.col, args...), dr.row)
     end
 end
 
-function prepend_dir(dr::DomainRange, dir::Axis, n::Int = 1)
-    if dir == X_axis
-        return DomainRange((dr.col, prepend(dr.row, n)))
-    else
-        return DomainRange((prepend(dr.col, n), dr.row))
-    end
-end
+shift_dir(dr::DomainRange, dir::Axis, n::Int = 1)   = apply_along_direction(dr, dir, shift, n)
+prepend_dir(dr::DomainRange, dir::Axis, n::Int = 1) = apply_along_direction(dr, dir, prepend, n)
+expand_dir(dr::DomainRange, dir::Axis, n::Int = 1)  = apply_along_direction(dr, dir, expand, n)
+inflate_dir(dr::DomainRange, dir::Axis, n::Int = 1) = apply_along_direction(dr, dir, inflate, n)
 
-function expand_dir(dr::DomainRange, dir::Axis, n::Int = 1)
-    if dir == X_axis
-        return DomainRange((dr.col, inflate(dr.row, n)))
-    else
-        return DomainRange((inflate(dr.col, n), dr.row))
-    end
-end
-
-function inflate_dir(dr::DomainRange, dir::Axis, n::Int = 1)
-    if dir == X_axis
-        return DomainRange((dr.col, inflate(dr.row, n)))
-    else
-        return DomainRange((inflate(dr.col, n), dr.row))
-    end
-end
-
-linear_range(dr::DomainRange) = (first(dr.col) + first(dr.row) - 1):(last(dr.col) + last(dr.row) - 1)
+linear_range(dr::DomainRange) = first(dr):last(dr)
 
 #
 # DomainRanges: represents the different sub-domains of a domain for a sweep along a direction
