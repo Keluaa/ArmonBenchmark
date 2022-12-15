@@ -47,7 +47,7 @@ cells_list = []
 
 limit_to_max_mem = false
 
-use_MPI = false
+use_MPI = true
 verbose_MPI = false
 file_MPI_dump = ""
 proc_domains = [(1, 1)]
