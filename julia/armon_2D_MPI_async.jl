@@ -14,7 +14,7 @@ using CUDAKernels
 export ArmonParameters, armon
 
 # TODO LIST
-# better test implementation (common sturcture, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
+# better test implementation (common structure, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
 # use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
 # Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
@@ -149,7 +149,7 @@ mutable struct ArmonParameters{Flt_T}
     # Asynchronicity
     async_comms::Bool
 
-    # Tests & Comparaison
+    # Tests & Comparison
     compare::Bool
     is_ref::Bool
     comparison_tolerance::Float64
@@ -627,7 +627,7 @@ end
     )
 
     # Second order GAD acoustic solver on the current cell
-    
+
     r_u₋ = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
     r_p₋ = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
     r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
@@ -731,7 +731,6 @@ end
         x_[i+s] += dt * ustar[i+s]
     end
 end
-
 
 @generic_kernel function euler_projection!(s::Int, dx::T, dt::T,
         ustar::V, rho::V, umat::V, vmat::V, Emat::V,
@@ -963,7 +962,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         if params.maxtime == 0
             params.maxtime = 80e-6
         end
-    
+
         if params.cfl == 0
             params.cfl = 0.6
         end
@@ -994,7 +993,7 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         ix = ((i-1) % row_length) - nghost
         iy = ((i-1) ÷ row_length) - nghost
 
-        # Global indexes, used only to know to compute the position of the cell
+        # Global indexes, used only to know to compute the position of the cell
         g_ix = ix + pos_x
         g_iy = iy + pos_y
 
@@ -1017,11 +1016,11 @@ function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <
         if one_more_ring
             domain_mask[i] = (
                 (-r ≤   ix < nx+r && -r ≤   iy < ny+r)  # Include as well a ring of ghost cells...
-             && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
+             && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
              && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
-            ) ? 1. : 0
+            ) ? 1 : 0
         else
-            domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1. : 0
+            domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1 : 0
         end
 
         # Set to zero to make sure no non-initialized values changes the result
@@ -1082,7 +1081,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, sid
         if test == :Sod_y || test == :Sod_circ
             v_factor = -1.
         end
-        
+
         stride = 1
         i_start = @i(1,0)
         loop_range = 1:nx
@@ -1194,7 +1193,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, hos
     # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: 
     #   https://www.open-mpi.org/faq/?category=runcuda
     # TODO : use CUDA/ROCM-aware MPI
-    # TODO : use 4 views for each side for each variable ? (2 will be contigous, 2 won't) 
+    # TODO : use 4 views for each side for each variable ? (2 will be contiguous, 2 won't)
     #   <- pre-calculate them!
     # TODO : try to mix the comms: send to left and receive from right, then vice-versa. 
     #  Maybe it can speed things up?    
@@ -1348,6 +1347,7 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ideb, ifin) = params
 
+    # TODO : use the new ranges functions to achieve this
     if params.single_comm_per_axis_pass
         (; nx, ny) = params
         @indexing_vars(params)
@@ -1381,13 +1381,13 @@ function slope_minmod(uᵢ₋::T, uᵢ::T, uᵢ₊::T, r₋::T, r₊::T) where T
 end
 
 
-function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
-        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::V, 
+        dt::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     params.projection == :none && return
-    
-    if !params.single_comm_per_axis_pass
-        # Additionnal communications phase needed to get the new values of the lagrangian cells
-        dependencies = boundaryConditions!(params, data, host_array, axis; dependencies)
+
+    if params.use_MPI && !params.single_comm_per_axis_pass
+        # Additional communications phase needed to get the new values of the lagrangian cells
+        dependencies = boundaryConditions!(params, data, host_array, params.current_axis; dependencies)
     end
 
     (; work_array_1, work_array_2, work_array_3, work_array_4) = data
@@ -1475,15 +1475,15 @@ function compute_domain_ranges(params::ArmonParameters)
     col_range = @i(1,1):row_length:@i(1,ny)
     row_range = 1:nx
     full_range = DomainRange(col_range, row_range)
-    
+
     # Inner range
 
     if current_axis == X_axis
-        # Parse the cells row by row, excluding 'nghost' columns at the left and right
+        # Parse the cells row by row, excluding 'nghost' columns at the left and right
         col_range = @i(1,1):row_length:@i(1,ny)
         row_range = nghost+1:nx-nghost
     else
-        # Parse the cells row by row, excluding 'nghost' rows at the top and bottom
+        # Parse the cells row by row, excluding 'nghost' rows at the top and bottom
         col_range = @i(1,nghost+1):row_length:@i(1,ny-nghost)
         row_range = 1:nx
     end
@@ -1493,11 +1493,11 @@ function compute_domain_ranges(params::ArmonParameters)
     # Outer range: left/bottom
 
     if current_axis == X_axis
-        # Parse the cells row by row, for the first 'nghost' columns on the left
+        # Parse the cells row by row, for the first 'nghost' columns on the left
         col_range = @i(1,1):row_length:@i(1,ny)
         row_range = 1:nghost
     else
-        # Parse the cells row by row, for the first 'nghost' rows at the bottom
+        # Parse the cells row by row, for the first 'nghost' rows at the bottom
         col_range = @i(1,1):row_length:@i(1,nghost)
         row_range = 1:nx
     end
@@ -1506,11 +1506,11 @@ function compute_domain_ranges(params::ArmonParameters)
 
     # Outer range: right/top
     if current_axis == X_axis
-        # Parse the cells row by row, for the last 'nghost' columns on the right
+        # Parse the cells row by row, for the last 'nghost' columns on the right
         col_range = @i(1,1):row_length:@i(1,ny)
         row_range = nx-nghost+1:nx
     else
-        # Parse the cells row by row, for the last 'nghost' rows at the top
+        # Parse the cells row by row, for the last 'nghost' rows at the top
         col_range = @i(1,ny-nghost+1):row_length:@i(1,ny)
         row_range = 1:nx
     end
@@ -1522,7 +1522,7 @@ function compute_domain_ranges(params::ArmonParameters)
         # Add 'r' columns/rows on each of the 4 sides
         full_range  = DomainRange(inflate(full_range.col,  r), inflate(full_range.row,  r))
         inner_range = DomainRange(inflate(inner_range.col, r), inflate(inner_range.row, r))
-        
+
         if current_axis == X_axis
             # Shift the outer domain to the left and right by 'r' cells, and add 'r' rows at the top and bottom
             outer_lb_range = DomainRange(inflate(outer_lb_range.col, r), shift(outer_lb_range.row, -r))
@@ -1576,7 +1576,7 @@ function write_result_single_file(params::ArmonParameters{T}, data::ArmonData{V}
     if is_root
         # Write the dimensions of the file domain to some utility files for easy gnuplot-ing
         (g_nx, g_ny) = global_grid
-        
+
         open(output_file_path * "_DIM_X", "w") do f
             println(f, g_nx)
         end
@@ -1600,7 +1600,7 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
     output_file_path = joinpath(output_dir, file_name)
 
     if is_root
-        # Advanced globing to remove all files sharing the same file name
+        # Advanced globing to remove all files sharing the same file name
         remove_all_outputs = "rm -f $(output_file_path)_*([0-9])x*([0-9])"
         run(`bash -O extglob -c $remove_all_outputs`)
     end
@@ -1671,7 +1671,7 @@ function read_sub_domain_file!(params::ArmonParameters{T}, data::ArmonData{V},
     (cx, cy) = cart_coords
 
     f = open("$(comp_file_path)_$(cx)x$(cy)", "r")
-   
+
     vars_to_read = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
 
     if params.write_ghosts
@@ -1780,7 +1780,7 @@ end
 function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, Emat, domain_mask, x, y) = data
     (; ideb, ifin, dx, row_length) = params
-    
+
     if params.use_gpu
         if params.projection == :none
             total_mass = @inbounds reduce(+, @views (
@@ -1832,7 +1832,7 @@ end
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         cpu_data::ArmonData{W}) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; maxtime, maxcycle, nx, ny, silent, animation_step, is_root, dt_on_even_cycles) = params
-    
+
     cycle  = 0
     t::T   = 0.
     next_dt::T = 0.
@@ -1874,11 +1874,11 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
     # Main solver loop
     while t < maxtime && cycle < maxcycle
         cycle_start = time_ns()
-        
+
         if !dt_on_even_cycles || iseven(cycle)
             next_dt = dtCFL_MPI(params, data, prev_dt; dependencies=prev_event)
             prev_event = NoneEvent()
-            
+
             if is_root && (!isfinite(next_dt) || next_dt <= 0.)
                 error("Invalid dt for cycle $cycle: $next_dt")
             end
@@ -1891,7 +1891,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         for (axis, dt_factor) in split_axes(params, cycle)
             update_axis_parameters(params, axis)
             domain_ranges = compute_domain_ranges(params)
-            
+
             @perf_task "loop" "EOS+comms+fluxes" @time_expr_c "EOS+comms+fluxes" if params.async_comms
                 @sync begin
                     @async begin
@@ -1926,16 +1926,16 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                     dependencies=prev_event)
                 step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, axis; 
                     dependencies=event) && @goto stop
-                
+
                 event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
                 step_checkpoint(params, data, cpu_data, "boundaryConditions!", cycle, axis; 
                     dependencies=event) && @goto stop
-                
+
                 event = numericalFluxes!(params, data, prev_dt * dt_factor, 
                     full_fluxes_domain(domain_ranges), :full; dependencies=event)
                 step_checkpoint(params, data, cpu_data, "numericalFluxes!", cycle, axis;
                     dependencies=event) && @goto stop
-                
+
                 params.measure_time && wait(event)
             end
 
@@ -1944,11 +1944,11 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
             step_checkpoint(params, data, cpu_data, "cellUpdate!", cycle, axis; 
                 dependencies=event) && @goto stop
 
-            @perf_task "loop" "euler_proj" event = projection_remap!(params, data,
+            @perf_task "loop" "euler_proj" event = projection_remap!(params, data, host_array,
                 prev_dt * dt_factor; dependencies=event)
             step_checkpoint(params, data, cpu_data, "projection_remap!", cycle, axis;
                 dependencies=event) && @goto stop
-            
+
             prev_event = event
         end
 
@@ -1961,9 +1961,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         if is_root
             if silent <= 1
                 current_mass, current_energy = conservation_vars(params, data)
-                ΔM = abs(initial_mass - current_mass)
-                ΔE = abs(initial_energy - current_energy)
-                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %.6f, |ΔE| = %.6f\n",
+                ΔM = abs(initial_mass - current_mass)     / initial_mass   * 100
+                ΔE = abs(initial_energy - current_energy) / initial_energy * 100
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %8.6f%%, |ΔE| = %8.6f%%\n",
                     cycle, prev_dt, t, ΔM, ΔE)
             end
         elseif silent <= 1
@@ -1977,7 +1977,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
             t_warmup = time_ns()
             set_warmup(false)
         end
-        
+
         if animation_step != 0 && (cycle - 1) % animation_step == 0
             write_result(params, data, joinpath("anim", params.output_file) * "_" *
                 @sprintf("%03d", (cycle - 1) ÷ animation_step))
@@ -2034,7 +2034,7 @@ function armon(params::ArmonParameters{T}) where T
 
     if params.use_MPI && silent < 3
         (; rank, proc_size, cart_coords) = params
-    
+
         # Local info
         node_local_comm = MPI.Comm_split_type(COMM, MPI.COMM_TYPE_SHARED, rank)
         local_rank = MPI.Comm_rank(node_local_comm)
@@ -2055,7 +2055,7 @@ function armon(params::ArmonParameters{T}) where T
             mkdir("anim")
         end
     end
-    
+
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
     @perf_task "init" "alloc" data = ArmonData(params)
@@ -2093,7 +2093,7 @@ function armon(params::ArmonParameters{T}) where T
         # Print the time of each step for each axis
         for (axis, time_contrib_axis) in sort(collect(axis_time_contrib); lt=(a, b)->(a[1] < b[1]))
             isempty(time_contrib_axis) && continue
-            
+
             axis_total_time = mapreduce(x->x[2], +, collect(time_contrib_axis))
             axis_time[axis] = axis_total_time
 

@@ -15,7 +15,7 @@ inflate(r::AbstractUnitRange, n::Int = 1) = (first(r)-n):(last(r)+n)
 inflate(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):(last(r)+step(r)*n)
 
 #
-# DomainRange: Two dimensional range to index a 2D array stored with contigous rows
+# DomainRange: Two dimensional range to index a 2D array stored with contiguous rows
 #
 
 struct DomainRange
@@ -78,7 +78,7 @@ outer_lb_domain(dr::DomainRanges) = dr.outer_lb
 outer_rt_domain(dr::DomainRanges) = dr.outer_rt
 
 # For fluxes only, we shift the computation to the right/top by one column/row since the flux at
-# index 'i' is the flux between the cells 'i-s' and 'i', but we also need the fluxes on the other
+# index 'i' is the flux between the cells 'i-s' and 'i', but we also need the fluxes on the other
 # side, between the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed 
 # later, but only on outer right side.
 
