@@ -137,8 +137,7 @@ function parse_measure_params(file_line_parser)
     axis_splitting = ["Sequential"]
     common_armon_params = [
         "--write-output", "0",
-        "--verbose", "2",
-        "--euler", "0"
+        "--verbose", "2"
     ]
     name = nothing
     repeats = 1
@@ -458,17 +457,17 @@ needs_recompilation(params::BackendParams, prev_params::BackendParams)::Bool = t
 
 function needs_recompilation(params::CppParams, prev_params::CppParams)::Bool
     return params.dimension != prev_params.dimension ||
-           params.use_simd != prev_params.use_simd ||
+           params.use_simd  != prev_params.use_simd  ||
            params.ieee_bits != prev_params.ieee_bits ||
-           params.compiler != prev_params.compiler
+           params.compiler  != prev_params.compiler
 end
 
 
 function needs_recompilation(params::KokkosParams, prev_params::KokkosParams)::Bool
-    return params.block_size != prev_params.block_size ||
-           params.use_simd != prev_params.use_simd ||
+    return params.dimension != prev_params.dimension ||
+           params.use_simd  != prev_params.use_simd  ||
            params.ieee_bits != prev_params.ieee_bits ||
-           params.compiler != prev_params.compiler
+           params.compiler  != prev_params.compiler
 end
 
 
@@ -824,7 +823,7 @@ function run_backend(measure::MeasureParams, params::Union{CppParams, KokkosPara
                 push!(armon_options, string(cells[1]))
             else
                 push!(armon_options, join(cells, ','))
-                push!(armon_options, "--transpose", string(Int(transpose_dims)), "--splitting", axis_splitting)
+                push!(armon_options, "--splitting", axis_splitting)
             end
             
             append!(armon_options, armon_base_options)

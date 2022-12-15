@@ -3,6 +3,8 @@ using Printf
 using Dates
 
 @enum Device CPU CUDA ROCM
+@enum Backend Julia Kokkos
+@enum Compiler GCC Clang ICC
 
 
 mutable struct MeasureParams
@@ -19,13 +21,19 @@ mutable struct MeasureParams
     one_job_per_cell::Bool
 
     # Backend params
+    backends::Vector{Backend}
+    compilers::Vector{Compiler}
     threads::Vector{Int}
     use_simd::Vector{Int}
     jl_proc_bind::Vector{String}
     jl_places::Vector{String}
+    omp_proc_bind::Vector{String}
+    omp_places::Vector{String}
     dimension::Vector{Int}
     async_comms::Vector{Bool}
     jl_mpi_impl::Vector{String}
+    ieee_bits::Vector{Int}
+    block_sizes::Vector{Int}
 
     # Armon params
     cells_list::Vector{Int}
@@ -70,15 +78,32 @@ struct IntiParams
 end
 
 
-struct JuliaParams
+abstract type BackendParams end 
+
+
+struct JuliaParams <: BackendParams
+    options::Tuple{Vector{String}, String, String}
     jl_places::String
     jl_proc_bind::String
     threads::Int
+    ieee_bits::Int
+    block_size::Int
     use_simd::Int
     dimension::Int
     async_comms::Bool
     jl_mpi_impl::String
+end
+
+
+struct KokkosParams <: BackendParams
     options::Tuple{Vector{String}, String, String}
+    omp_places::String
+    omp_proc_bind::String
+    threads::Int
+    ieee_bits::Int
+    use_simd::Int
+    dimension::Int
+    compiler::Compiler
 end
 
 
@@ -96,7 +121,7 @@ max_inti_cores = 128  # Maximum number of cores in a node
 required_modules = ["cuda", "rocm", "hwloc", "mpi"]
 
 julia_script_path = "./julia/run_julia.jl"
-julia_tmp_script_output_file = "./tmp_script_output.txt"
+kokkos_script_path = "./kokkos/run_kokkos.jl"
 
 data_dir = "./data/"
 plot_scripts_dir = "./plot_scripts/"
@@ -174,7 +199,9 @@ $(!isnothing(next_script) ? "ccc_msub $next_script" : "echo 'All done.'")
 """
 
 
-function parse_measure_params(file_line_parser)    
+function parse_measure_params(file_line_parser)
+    backends = [Julia]
+    compilers = [GCC]
     device = CPU
     node = "a100"
     distributions = ["block"]
@@ -185,9 +212,13 @@ function parse_measure_params(file_line_parser)
     add_reference_job = false
     one_job_per_cell = false
     threads = [4]
+    ieee_bits = [64]
+    block_sizes = [1024]
     use_simd = [true]
     jl_places = ["cores"]
     jl_proc_bind = ["close"]
+    omp_places = ["cores"]
+    omp_proc_bind = ["close"]
     dimension = [1]
     async_comms = [false]
     jl_mpi_impl = ["async"]
@@ -233,8 +264,20 @@ function parse_measure_params(file_line_parser)
             error("Missing '=' at line $(i)")
         end
 
-        option, value = split(line, '=')
-        if option == "device"
+        option, value = split(line, '=') .|> strip
+        if option == "backends"
+            raw_backends = split(value, ',') .|> strip .|> lowercase
+            backends = []
+            for raw_backend in raw_backends
+                if raw_backend == "julia"
+                    push!(backends, Julia)
+                elseif raw_backend == "kokkos"
+                    push!(backends, Kokkos)
+                else
+                    error("Unknown backend: $raw_backend, at line $i")
+                end
+            end
+        elseif option == "device"
             if value == "CPU"
                 device = CPU
             elseif value == "CUDA"
@@ -242,7 +285,21 @@ function parse_measure_params(file_line_parser)
             elseif value == "ROCM"
                 device = ROCM
             else
-                error("Unknown device: $(value), at line $(i)")
+                error("Unknown device: $value, at line $i")
+            end
+        elseif option == "compilers"
+            raw_compilers = split(value, ',') .|> strip .|> lowercase
+            compilers = []
+            for raw_compiler in raw_compilers
+                if raw_compiler == "gcc"
+                    push!(compilers, GCC)
+                elseif raw_compiler == "clang"
+                    push!(compilers, Clang)
+                elseif raw_compiler == "icc"
+                    push!(compilers, ICC)
+                else
+                    error("Unknown compiler: $raw_compiler, at line $i")
+                end
             end
         elseif option == "node"
             node = value
@@ -262,12 +319,20 @@ function parse_measure_params(file_line_parser)
             one_job_per_cell = parse(Bool, value)
         elseif option == "threads"
             threads = parse.(Int, split(value, ','))
+        elseif option == "block_sizes"
+            block_sizes = parse.(Int, split(value, ','))
+        elseif option == "ieee_bits"
+            ieee_bits = parse.(Int, split(value, ','))
         elseif option == "use_simd"
             use_simd = parse.(Int, split(value, ','))
         elseif option == "jl_places"
             jl_places = split(value, ',')
         elseif option == "jl_proc_bind"
             jl_proc_bind = split(value, ',')
+        elseif option == "omp_places"
+            omp_places = split(value, ',')
+        elseif option == "omp_proc_bind"
+            omp_proc_bind = split(value, ',')
         elseif option == "dim"
             dimension = parse.(Int, split(value, ','))
         elseif option == "async_comms"
@@ -325,7 +390,7 @@ function parse_measure_params(file_line_parser)
         elseif option == "time_MPI_plot"
             time_MPI_plot = parse(Bool, value)
         else
-            error("Unknown option: $(option), at line $(i)")
+            error("Unknown option: $option, at line $i")
         end
     end
 
@@ -394,11 +459,12 @@ function parse_measure_params(file_line_parser)
 
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         create_sub_job_chain, add_reference_job, one_job_per_cell,
-        threads, use_simd, jl_proc_bind, jl_places, 
-        dimension, async_comms, jl_mpi_impl, cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
+        backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
+        dimension, async_comms, jl_mpi_impl, ieee_bits, block_sizes,
+        cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         transpose_dims, axis_splitting, params_and_legends,
-        name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose, use_max_threads, 
-        cst_cells_per_process, limit_to_max_mem,
+        name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose,
+        use_max_threads, cst_cells_per_process, limit_to_max_mem,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file)
 end
@@ -499,37 +565,47 @@ function build_inti_combinaisons(measure::MeasureParams)
 end
 
 
-function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams)
+function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams, backend::Backend)
     if measure.use_max_threads
         process_per_node = inti_params.processes ÷ inti_params.node_count
         threads_per_process = max_inti_cores ÷ process_per_node
+        threads = [threads_per_process]
+    else
+        threads = measure.threads
+    end
+
+    if backend == Julia
         return Iterators.map(
             params->JuliaParams(params...),
             Iterators.product(
+                measure.armon_params,
                 measure.jl_places,
                 measure.jl_proc_bind,
-                [threads_per_process],
+                threads,
+                measure.ieee_bits,
+                measure.block_sizes,
                 measure.use_simd,
                 measure.dimension,
                 measure.async_comms,
                 measure.jl_mpi_impl,
+            )
+        )
+    elseif backend == Kokkos
+        return Iterators.map(
+            params->KokkosParams(params...),
+            Iterators.product(
                 measure.armon_params,
+                measure.omp_places,
+                measure.omp_proc_bind,
+                threads,
+                measure.ieee_bits,
+                measure.use_simd,
+                measure.dimension,
+                measure.compilers,
             )
         )
     else
-        return Iterators.map(
-            params->JuliaParams(params...),    
-            Iterators.product(
-                measure.jl_places,
-                measure.jl_proc_bind,
-                measure.threads,
-                measure.use_simd,
-                measure.dimension,
-                measure.async_comms,
-                measure.jl_mpi_impl,
-                measure.armon_params,
-            )
-        )
+        error("Unknown backend: $backend")
     end
 end
 
@@ -706,6 +782,92 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
 end
 
 
+function run_backend(measure::MeasureParams, params::KokkosParams, inti_params::IntiParams, base_file_name::String)
+    if inti_params.processes > 1
+        error("The Kokkos backend doesn't support MPI yet")
+    end
+
+    if measure.limit_to_max_mem
+        @warn "The Kokkos backend doesn't support the 'limit_to_max_mem'" maxlog=1
+    end
+
+    if measure.time_histogram
+        @warn "The Kokkos backend doesn't support the 'time_histogram'" maxlog=1
+    end
+
+    armon_options = Any["julia"]
+    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
+    push!(armon_options, kokkos_script_path)
+
+    if measure.device == CUDA
+        append!(armon_options, ["--gpu", "CUDA"])
+    elseif measure.device == ROCM
+        append!(armon_options, ["--gpu", "ROCM"])
+    else
+        # no option needed for CPU
+    end
+
+    if params.dimension == 1
+        cells_list = measure.cells_list
+    else
+        cells_list = measure.domain_list
+    end
+
+    if measure.cst_cells_per_process
+        # Scale the cells by the number of processes
+        if params.dimension == 1
+            cells_list .*= inti_params.processes
+        else
+            # We need to distribute the factor along each axis, while keeping the divisibility of 
+            # the cells count, since it will be divided by the number of processes along each axis.
+            # Therefore we make the new values multiples of 64, but this is still not perfect.
+            scale_factor = inti_params.processes^(1/params.dimension)
+            cells_list = cells_list .* scale_factor
+            cells_list .-= [cells .% 64 for cells in cells_list]
+            cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
+
+            if any(any(cells .≤ 0) for cells in cells_list)
+                error("Cannot scale the cell list by the number of processes: $cells_list")
+            end
+        end
+    end
+
+    if params.dimension == 1
+        cells_list_str = join(cells_list, ',')
+    else
+        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
+    end
+
+    append!(armon_options, armon_base_options)
+    append!(armon_options, [
+        "--dim", params.dimension,
+        "--use-simd", params.use_simd,
+        "--ieee", params.ieee_bits,
+        "--tests", join(measure.tests_list, ','),
+        "--cells-list", cells_list_str,
+        "--num-threads", params.threads,
+        "--threads-places", params.omp_places,
+        "--threads-proc-bind", params.omp_proc_bind,
+        "--data-file", base_file_name,
+        "--gnuplot-script", measure.gnuplot_script,
+        "--repeats", measure.repeats,
+        "--verbose", (measure.verbose ? 2 : 3),
+        "--compiler", params.compiler
+    ])
+    
+    if params.dimension > 1
+        append!(armon_options, [
+            "--splitting", join(measure.axis_splitting, ',')
+        ])
+    end
+
+    additionnal_options, _, _ = params.options
+    append!(armon_options, additionnal_options)
+
+    return armon_options
+end
+
+
 function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti_params::IntiParams)
     armon_options = [
         "julia", "-t", params.threads
@@ -769,7 +931,67 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
         end
     end
 
-    additionnal_options, _ = params.options
+    additionnal_options, _, _ = params.options
+    append!(armon_options, additionnal_options)
+
+    return armon_options
+end
+
+
+function run_backend_reference(measure::MeasureParams, params::KokkosParams, inti_params::IntiParams)
+    if inti_params.processes > 1
+        error("The Kokkos backend doesn't support MPI yet")
+    end
+
+    if measure.limit_to_max_mem
+        @warn "The Kokkos backend doesn't support the 'limit_to_max_mem'" maxlog=1
+    end
+
+    if measure.time_histogram
+        @warn "The Kokkos backend doesn't support the 'time_histogram'" maxlog=1
+    end
+
+    armon_options = ["julia"]
+    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
+    push!(armon_options, kokkos_script_path)
+
+    if measure.device == CUDA
+        append!(armon_options, ["--gpu", "CUDA"])
+    elseif measure.device == ROCM
+        append!(armon_options, ["--gpu", "ROCM"])
+    else
+        # no option needed for CPU
+    end
+
+    if params.dimension == 1
+        cells_list = [1000]
+        cells_list_str = join(cells_list, ',')
+    else
+        cells_list = params.dimension == 2 ? [[360,360]] : [[60,60,60]]
+        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
+    end
+
+    append!(armon_options, armon_base_options)
+    append!(armon_options, [
+        "--dim", params.dimension,
+        "--use-simd", params.use_simd,
+        "--ieee", 64,
+        "--cycle", 1,
+        "--tests", measure.tests_list[1],
+        "--cells-list", cells_list_str,
+        "--threads-places", params.omp_places,
+        "--threads-proc-bind", params.omp_proc_bind,
+        "--repeats", 1,
+        "--verbose", 5
+    ])
+
+    if params.dimension > 1
+        append!(armon_options, [
+            "--splitting", measure.axis_splitting[1]
+        ])
+    end
+
+    additionnal_options, _, _ = params.options
     append!(armon_options, additionnal_options)
 
     return armon_options
@@ -778,7 +1000,7 @@ end
 
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, node_count::Int,
-        threads::Int, use_simd::Int, dimension::Int)
+        threads::Int, use_simd::Int, dimension::Int, backend::Backend)
     # Build a file name based on the measurement name and the parameters that don't have a single value
     name = data_dir * measure.name * "/"
 
@@ -821,25 +1043,9 @@ function build_data_file_base_name(measure::MeasureParams,
         legend *= ", $(threads) Threads"
     end
 
-    return name, legend
-end
-
-
-function build_data_file_base_name_omp_params(name::String, legend::String, measure::MeasureParams,
-        omp_schedule::String, omp_proc_bind::String, omp_places::String)
-    if length(measure.omp_schedule) > 1
-        name *= "_$(omp_schedule)"
-        legend *= ", $(omp_schedule)"
-    end
-
-    if length(measure.omp_proc_bind) > 1
-        name *= "_$(omp_proc_bind)"
-        legend *= ", bind: $(omp_proc_bind)"
-    end
-
-    if length(measure.omp_places) > 1
-        name *= "_$(omp_places)"
-        legend *= ", places: $(omp_places)"
+    if length(measure.backends) > 1
+        name *= "_$(backend)"
+        legend *= ", $(backend)"
     end
 
     return name, legend
@@ -849,7 +1055,7 @@ end
 function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
         node_count::Int, params::JuliaParams)
     name, legend = build_data_file_base_name(measure, processes, distribution, node_count, params.threads, 
-                                             params.use_simd, params.dimension)
+                                             params.use_simd, params.dimension, Julia)
 
     if length(measure.jl_proc_bind) > 1
         name *= "_$(params.jl_proc_bind)"
@@ -870,6 +1076,38 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
     if length(measure.jl_mpi_impl) > 1
         name *= "_$(params.jl_mpi_impl)"
         legend *= ", MPI $(params.jl_mpi_impl)"
+    end
+
+    if !isempty(params.options[2])
+        legend *= ", " * params.options[2]
+    end
+
+    if !isempty(params.options[3])
+        name *= "_" * params.options[3]
+    end
+    
+    return name * "_", legend
+end
+
+
+function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
+        node_count::Int, params::KokkosParams)
+    name, legend = build_data_file_base_name(measure, processes, distribution, node_count, params.threads, 
+                                             params.use_simd, params.dimension, Kokkos)
+
+    if length(measure.omp_proc_bind) > 1
+        name *= "_$(params.omp_proc_bind)"
+        legend *= ", bind: $(params.omp_proc_bind)"
+    end
+
+    if length(measure.omp_places) > 1
+        name *= "_$(params.omp_places)"
+        legend *= ", places: $(params.omp_places)"
+    end
+
+    if length(measure.compilers) > 1
+        name *= "_$(params.compiler)"
+        legend *= ", $(params.compiler)"
     end
 
     if !isempty(params.options[2])
@@ -915,7 +1153,7 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
         # Marker style for the plot
         point_type = 5
         
-        for parameters in parse_combinaisons(measure, inti_params)
+        for backend in measure.backends, parameters in parse_combinaisons(measure, inti_params, backend)
             comb_i += 1
             erase_files = comb_i > skip_first
             
@@ -1000,40 +1238,64 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
 end
 
 
-function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_params::IntiParams, i::Int)
-    if julia_params.threads * inti_params.processes > max_inti_cores * inti_params.node_count
-        println("Skipping running $(inti_params.processes) Julia processes with $(julia_params.threads) threads on $(inti_params.node_count) nodes.")
+backend_disp_name(::JuliaParams) = "Julia"
+backend_disp_name(::KokkosParams) = "C++ Kokkos"
+
+
+function run_backend_msg(measure::MeasureParams, julia_params::JuliaParams, inti_params::IntiParams)
+    """Running Julia with:
+    - $(julia_params.threads) threads
+    - threads binding: $(julia_params.jl_proc_bind), places: $(julia_params.jl_places)
+    - $(julia_params.use_simd == 1 ? "with" : "without") SIMD
+    - $(julia_params.dimension)D
+    - $(julia_params.async_comms ? "a" : "")synchronous communications
+    - MPI $(julia_params.jl_mpi_impl) implementation
+    - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
+    - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
+   """
+end
+
+
+function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, inti_params::IntiParams)
+    """Running C++ Kokkos backend with:
+     - $(kokkos_params.threads) threads
+     - threads binding: $(kokkos_params.omp_proc_bind), places: $(kokkos_params.omp_places)
+     - $(kokkos_params.use_simd == 1 ? "with" : "without") SIMD
+     - $(kokkos_params.dimension)D
+     - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
+     - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
+    """
+end
+
+
+function run_measure(measure::MeasureParams, backend_params::BackendParams, inti_params::IntiParams, i::Int)
+    backend_name = backend_disp_name(backend_params)
+    num_threads = backend_params.threads
+
+    if num_threads * inti_params.processes > max_inti_cores * inti_params.node_count
+        println("Skipping running $(inti_params.processes) $(backend_name) processes with $(num_threads) threads on $(inti_params.node_count) nodes.")
         return nothing, nothing
     end
 
     if !isnothing(measure.process_grid_ratios) && !any(map(Base.Fix1(check_ratio_for_grid, inti_params.processes), measure.process_grid_ratios))
-        println("Skipping running $(inti_params.processes) Julia processes since none of the given grid ratios can entirely divide $(inti_params.processes)")
+        println("Skipping running $(inti_params.processes) $(backend_name) processes since none of the given grid ratios can entirely divide $(inti_params.processes)")
         return nothing, nothing
     end
 
     base_file_name, _ = build_data_file_base_name(measure, 
-        inti_params.processes, inti_params.distribution, inti_params.node_count, julia_params)
-    armon_options = run_backend(measure, julia_params, inti_params, base_file_name)
+        inti_params.processes, inti_params.distribution, inti_params.node_count, backend_params)
+    armon_options = run_backend(measure, backend_params, inti_params, base_file_name)
 
-    println("""Running Julia with:
- - $(julia_params.threads) threads
- - threads binding: $(julia_params.jl_proc_bind), places: $(julia_params.jl_places)
- - $(julia_params.use_simd == 1 ? "with" : "without") SIMD
- - $(julia_params.dimension)D
- - $(julia_params.async_comms ? "a" : "")synchronous communications
- - MPI $(julia_params.jl_mpi_impl) implementation
- - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
- - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
-""")
-
+    println(run_backend_msg(measure, backend_params, inti_params))
+    
     if measure.create_sub_job_chain
         ref_cmd = nothing
         if measure.add_reference_job
-            ref_armon_options = run_backend_reference(measure, julia_params, inti_params)
+            ref_armon_options = run_backend_reference(measure, backend_params, inti_params)
             if isempty(measure.node)
                 ref_cmd = no_inti_cmd(ref_armon_options, inti_params.processes)
             else
-                inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+                inti_options = build_inti_options(measure, inti_params, num_threads)
                 ref_cmd = inti_cmd(ref_armon_options, inti_options)
             end
         end
@@ -1041,7 +1303,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
         if measure.one_job_per_cell
             # Split '--cells-list' into their own commands
             i = findfirst(v -> v == "--cells-list", armon_options)
-            cells_list = split(armon_options[i+1], julia_params.dimension == 1 ? "," : ";")
+            cells_list = split(armon_options[i+1], backend_params.dimension == 1 ? "," : ";")
             
             cmds = Cmd[]
             for cells in cells_list
@@ -1049,7 +1311,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
                 if isempty(measure.node)
                     cmd = no_inti_cmd(armon_options, inti_params.processes)
                 else
-                    inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+                    inti_options = build_inti_options(measure, inti_params, num_threads)
                     cmd = inti_cmd(armon_options, inti_options)
                 end
                 push!(cmds, cmd)
@@ -1058,7 +1320,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
             if isempty(measure.node)
                 cmd = no_inti_cmd(armon_options, inti_params.processes)
             else
-                inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+                inti_options = build_inti_options(measure, inti_params, num_threads)
                 cmd = inti_cmd(armon_options, inti_options)
             end
 
@@ -1070,7 +1332,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
         if isempty(measure.node)
             cmd = no_inti_cmd(armon_options, inti_params.processes)
         else
-            inti_options = build_inti_options(measure, inti_params, julia_params.threads)
+            inti_options = build_inti_options(measure, inti_params, num_threads)
             cmd = inti_cmd(armon_options, inti_options)
         end
     end
@@ -1091,7 +1353,7 @@ function run_measure(measure::MeasureParams, julia_params::JuliaParams, inti_par
 end
 
 
-job_command_type = Tuple{MeasureParams, IntiParams, JuliaParams, Vector{Cmd}, Union{Nothing, Cmd}}
+job_command_type = Tuple{MeasureParams, IntiParams, BackendParams, Vector{Cmd}, Union{Nothing, Cmd}}
 
 
 function make_submission_scripts(job_commands::Vector{job_command_type})
@@ -1101,7 +1363,7 @@ function make_submission_scripts(job_commands::Vector{job_command_type})
 
     # Save each command to a submission script, which will launch the next command after the job
     # completes.
-    for (i, (measure, inti_params, julia_params, commands, ref_command)) in enumerate(job_commands)
+    for (i, (measure, inti_params, backend_params, commands, ref_command)) in enumerate(job_commands)
         sub_script_name = sub_scripts_dir * measure.name * "_$i.sh"
         open(sub_script_name, "w") do sub_script_file
             if i < length(job_commands)
@@ -1113,7 +1375,7 @@ function make_submission_scripts(job_commands::Vector{job_command_type})
 
             print(sub_script_file, 
                 sub_script_content(measure.name, i, measure.node, 
-                    inti_params.node_count, inti_params.processes, julia_params.threads, measure.max_time,
+                    inti_params.node_count, inti_params.processes, backend_params.threads, measure.max_time,
                     ref_command, commands,
                     next_job_file_name))
         end
@@ -1188,7 +1450,7 @@ function main()
         comb_i = 0
         comb_c = 0
         for inti_params in build_inti_combinaisons(measure)
-            for julia_params in parse_combinaisons(measure, inti_params)
+            for backend in measure.backends, backend_params in parse_combinaisons(measure, inti_params, backend)
                 comb_i += 1
                 if i == start_at && comb_i <= skip_first
                     continue
@@ -1196,10 +1458,10 @@ function main()
                     @goto end_loop
                 end
 
-                commands, ref_command = run_measure(measure, julia_params, inti_params, i)
+                commands, ref_command = run_measure(measure, backend_params, inti_params, i)
 
                 if measure.create_sub_job_chain && !isnothing(commands)
-                    push!(job_commands, (measure, inti_params, julia_params, commands, ref_command))
+                    push!(job_commands, (measure, inti_params, backend_params, commands, ref_command))
                 end
 
                 comb_c += 1
