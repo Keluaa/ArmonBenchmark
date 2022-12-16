@@ -1262,6 +1262,7 @@ function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, in
      - threads binding: $(kokkos_params.omp_proc_bind), places: $(kokkos_params.omp_places)
      - $(kokkos_params.use_simd == 1 ? "with" : "without") SIMD
      - $(kokkos_params.dimension)D
+     - compiled with $(kokkos_params.compiler)
      - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
      - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
     """

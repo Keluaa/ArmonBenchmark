@@ -1869,7 +1869,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
 
     # Finalize the initialisation by calling the EOS on the entire domain
     update_EOS!(params, data, full_domain(domain_ranges), :full) |> wait
-    step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, params.current_axis) && @goto stop
+    step_checkpoint(params, data, cpu_data, "update_EOS", cycle, params.current_axis) && @goto stop
 
     # Main solver loop
     while t < maxtime && cycle < maxcycle
@@ -1924,16 +1924,16 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
             else
                 event = update_EOS!(params, data, full_domain(domain_ranges), :full; 
                     dependencies=prev_event)
-                step_checkpoint(params, data, cpu_data, "update_EOS!", cycle, axis; 
+                step_checkpoint(params, data, cpu_data, "update_EOS", cycle, axis; 
                     dependencies=event) && @goto stop
 
                 event = boundaryConditions!(params, data, host_array, axis; dependencies=event)
-                step_checkpoint(params, data, cpu_data, "boundaryConditions!", cycle, axis; 
+                step_checkpoint(params, data, cpu_data, "boundaryConditions", cycle, axis; 
                     dependencies=event) && @goto stop
 
                 event = numericalFluxes!(params, data, prev_dt * dt_factor, 
                     full_fluxes_domain(domain_ranges), :full; dependencies=event)
-                step_checkpoint(params, data, cpu_data, "numericalFluxes!", cycle, axis;
+                step_checkpoint(params, data, cpu_data, "numericalFluxes", cycle, axis;
                     dependencies=event) && @goto stop
 
                 params.measure_time && wait(event)
@@ -1941,12 +1941,12 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
 
             @perf_task "loop" "cellUpdate" event = cellUpdate!(params, data, prev_dt * dt_factor;
                 dependencies=event)
-            step_checkpoint(params, data, cpu_data, "cellUpdate!", cycle, axis; 
+            step_checkpoint(params, data, cpu_data, "cellUpdate", cycle, axis; 
                 dependencies=event) && @goto stop
 
             @perf_task "loop" "euler_proj" event = projection_remap!(params, data, host_array,
                 prev_dt * dt_factor; dependencies=event)
-            step_checkpoint(params, data, cpu_data, "projection_remap!", cycle, axis;
+            step_checkpoint(params, data, cpu_data, "projection_remap", cycle, axis;
                 dependencies=event) && @goto stop
 
             prev_event = event
