@@ -294,7 +294,7 @@ Gives options for `@generic_kernel` to adjust the resulting functions.
 
 The possible options are:
  - `debug`:
-        Prints the generated functions to stdout.
+        Prints the generated functions to stdout at compile time.
  - `add_time`: 
         Adds the execution time measurement macros to the calls to the kernel functions 
         (`@time_event`, `@time_expr`...).
@@ -310,6 +310,8 @@ The possible options are:
         as the label for the kernel.
  - `no_threading`:
         On the CPU kernel, disables multi-threading, leaving only SIMD.
+ - `no_gpu`:
+        Ignores `params.use_gpu` at runtime and only create the CPU kernel.
 
 ```julia
 @generic_kernel function add_kernel(a, b)
@@ -359,7 +361,8 @@ const default_kernel_options = Dict(
     :async => false,
     :dynamic_label => false,
     :label => nothing,
-    :no_threading => false
+    :no_threading => false,
+    :no_gpu => false,
 )
 
 
@@ -631,9 +634,13 @@ function transform_kernel(func::Expr)
 
     pushfirst!(gpu_def[:args], gpu_loop_params...)
 
-    # Define the GPU kernel with KernelAbstractions' @kernel
-    gpu_block = quote
-        @kernel $(combinedef(gpu_def))
+    if !options[:no_gpu]
+        # Define the GPU kernel with KernelAbstractions' @kernel
+        gpu_block = quote
+            @kernel $(combinedef(gpu_def))
+        end
+    else
+        gpu_block = Expr(:block)
     end
 
     # -- Wrapping function --
@@ -705,21 +712,37 @@ function transform_kernel(func::Expr)
         gpu_call = Expr(:macrocall, gpu_timing_macro, LineNumberNode(@__LINE__, @__FILE__), label, gpu_call)
     end
 
+    cpu_call_block = quote
+        wait(dependencies)  # The CPU side is synchronous
+        $setup_cpu_call
+        $cpu_call
+        return NoneEvent()
+    end
+
+    gpu_call_block = quote 
+        gpu_kernel_func = $kernel_func_name(params.device, params.block_size)  # Get the right KernelAbstraction function...
+        ndrange = $gpu_ndrange
+        return $gpu_call  # ...then call it
+    end
+
+    if options[:no_gpu]
+        call_block = cpu_call_block
+    else
+        call_block = quote 
+            if params.use_gpu
+                $gpu_call_block
+            else
+                $cpu_call_block
+            end
+        end
+    end
+
     # Define the body of the main function
     main_def[:body] = quote
         $params_unpack
         $data_unpack
         $main_loop_arg_unpack
-        if params.use_gpu
-            gpu_kernel_func = $kernel_func_name(params.device, params.block_size)  # Get the right KernelAbstraction function...
-            ndrange = $(gpu_ndrange)
-            return $(gpu_call)  # ...then call it
-        else
-            wait(dependencies)  # The CPU side is synchronous
-            $(setup_cpu_call)
-            $(cpu_call)
-            return NoneEvent()
-        end
+        $call_block
     end
 
     main_block = quote

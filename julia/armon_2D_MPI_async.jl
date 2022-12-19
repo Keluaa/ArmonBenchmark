@@ -14,8 +14,6 @@ using CUDAKernels
 export ArmonParameters, armon
 
 # TODO LIST
-# better test implementation (common structure, one test = f(x, y) -> rho, pmat, umat, vmat, Emat + boundary conditions + EOS)
-# use types and function overloads to define limiters and tests (in the hope that everything gets inlined)
 # center the positions of the cells in the output file
 # Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
@@ -73,12 +71,116 @@ Base.show(io::IO, ::MinmodLimiter)   = print(io, "Minmod limiter")
 Base.show(io::IO, ::SuperbeeLimiter) = print(io, "Superbee limiter")
 
 #
+# Test cases
+#
+
+abstract type TestCase end
+abstract type TwoStateTestCase <: TestCase end
+
+struct Sod       <: TwoStateTestCase end
+struct Sod_y     <: TwoStateTestCase end
+struct Sod_circ  <: TwoStateTestCase end
+struct Bizarrium <: TwoStateTestCase end
+struct Sedov{T <: AbstractFloat} <: TwoStateTestCase 
+    r::T
+end
+
+test_from_name(::Val{:Sod})       = Sod
+test_from_name(::Val{:Sod_y})     = Sod_y
+test_from_name(::Val{:Sod_circ})  = Sod_circ
+test_from_name(::Val{:Bizarrium}) = Bizarrium
+test_from_name(::Val{:Sedov})     = Sedov
+
+test_from_name(::Val{s}) where s = error("Unknown test case: '$s'")
+test_from_name(s::Symbol) = test_from_name(Val(s))
+
+Base.show(io::IO, ::Sod)       = print(io, "Sod shock tube")
+Base.show(io::IO, ::Sod_y)     = print(io, "Sod shock tube (along the Y axis)")
+Base.show(io::IO, ::Sod_circ)  = print(io, "Sod shock tube (cylindrical symmetry around the Z axis)")
+Base.show(io::IO, ::Bizarrium) = print(io, "Bizarrium")
+Base.show(io::IO, ::Sedov)     = print(io, "Sedov")
+
+test_region_high(x::T, _::T, ::Sod)       where T = x ≤ 0.5
+test_region_high(_::T, y::T, ::Sod_y)     where T = y ≤ 0.5
+test_region_high(x::T, y::T, ::Sod_circ)  where T = (x - T(0.5))^2 + (y - T(0.5))^2 ≤ T(0.125)
+test_region_high(x::T, _::T, ::Bizarrium) where T = x ≤ 0.5
+# test_region_high(x::T, y::T, s::Sedov{T}) where T = zero(0) ≤ x ≤ s.r && zero(T) ≤ y ≤ s.r
+# test_region_high(x::T, y::T, s::Sedov{T}) where T = 0.5 ≤ x ≤ 0.5 + s.r && 0.5 ≤ y ≤ 0.5 + s.r
+test_region_high(x::T, y::T, s::Sedov{T}) where T = (x - T(0.5))^2 + (y - T(0.5))^2 ≤ s.r^2
+
+default_CFL(::Union{Sod, Sod_y, Sod_circ}) = 0.95
+default_CFL(::Bizarrium) = 0.6
+default_CFL(::Sedov) = 0.5
+
+default_max_time(::Union{Sod, Sod_y, Sod_circ}) = 0.20
+default_max_time(::Bizarrium) = 80e-6
+default_max_time(::Sedov) = 1.0
+
+function init_test_params(::Union{Sod, Sod_y, Sod_circ})
+    return (
+        7/5,   # gamma
+        1.,    # high_ρ
+        0.125, # low_ρ
+        1.0,   # high_p
+        0.1,   # low_p
+        0.,    # high_u
+        0.,    # low_u
+        0.,    # high_v
+        0.,    # low_v
+    )
+end
+
+function init_test_params(::Bizarrium)
+    return (
+        2,                 # gamma
+        1.42857142857e+4,  # high_ρ
+        10000.,            # low_ρ
+        6.40939744478e+10, # high_p
+        312.5e6,           # low_p
+        0.,                # high_u
+        250.,              # low_u
+        0.,                # high_v
+        0.,                # low_v
+    )
+end
+
+function init_test_params(p::Sedov{T}) where T
+    return (
+        7/5,   # gamma
+        1.,    # high_ρ
+        1.,    # low_ρ
+        (1.4 - 1) * 0.851072 / (π * p.r^2), # high_p
+        1e-14, # low_p
+        0.,    # high_u
+        0.,    # low_u
+        0.,    # high_v
+        0.,    # low_v
+    )
+end
+
+function boundaryCondition(side::Symbol, ::Union{Sod, Bizarrium})
+    return (side == :left || side == :right) ? (-1, 1) : (1, 1)
+end
+
+function boundaryCondition(side::Symbol, ::Sod_y)
+    return (side == :left || side == :right) ? (1, 1) : (1, -1)
+end
+
+function boundaryCondition(side::Symbol, ::Sod_circ)
+    return (side == :left || side == :right) ? (-1, 1) : (1, -1)
+end
+
+function boundaryCondition(::Symbol, ::Sedov)
+    return (1, 1)
+end
+
+#
 # Parameters
-# 
+#
 
 mutable struct ArmonParameters{Flt_T}
     # Test problem type, riemann solver and solver scheme
-    test::Symbol
+    test::TestCase
     riemann::Symbol
     scheme::Symbol
     riemann_limiter::Limiter
@@ -224,6 +326,12 @@ function ArmonParameters(;
         error("Expected a Limiter type or a symbol, got: $riemann_limiter")
     end
 
+    if test isa Symbol
+        test = test_from_name(test)
+    elseif !(test isa TestCase)
+        error("Expected a TestCase type or a symbol, got: $test")
+    end
+
     # MPI
     if use_MPI
         rank = MPI.Comm_rank(COMM)
@@ -310,8 +418,8 @@ function ArmonParameters(;
         comm_array_size = 0
     end
     
-    return ArmonParameters{flt_type}(
-        test, riemann, scheme, riemann_limiter,
+    params = ArmonParameters{flt_type}(
+        Sod(), riemann, scheme, riemann_limiter,
         nghost, nx, ny, dx,
         cfl, Dt, cst_dt, dt_on_even_cycles,
         axis_splitting, projection,
@@ -330,6 +438,19 @@ function ArmonParameters(;
         async_comms,
         compare, is_ref, comparison_tolerance
     )
+
+    # Initialize the test
+    params.test = test(params)
+
+    if params.cfl == 0
+        params.cfl = default_CFL(params.test)
+    end
+
+    if params.maxtime == 0
+        params.maxtime = default_max_time(params.test)
+    end
+
+    return params
 end
 
 
@@ -720,15 +841,15 @@ end
 
 
 @generic_kernel function cell_update_lagrange!(ifin_::Int, s::Int, dt::T, 
-        x_::V, ustar::V) where {T, V <: AbstractArray{T}}
+        x_::V, ustar::V, domain_mask::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, label=cell_update!)
 
     i = @index_1D_lin()
 
-    x_[i] += dt * ustar[i]
+    x_[i] += dt * ustar[i] * domain_mask[i]
 
     if i == ifin_
-        x_[i+s] += dt * ustar[i+s]
+        x_[i+s] += dt * ustar[i+s] * domain_mask[i+s]
     end
 end
 
@@ -916,121 +1037,113 @@ end
 # Equations of State
 #
 
-function update_EOS!(params::ArmonParameters{T}, data::ArmonData{V}, range::DomainRange, 
-        label::Symbol; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function update_EOS!(params::ArmonParameters{T}, data::ArmonData, ::TestCase,
+        range::DomainRange, label::Symbol; dependencies=NoneEvent()) where T
     step_label = "update_EOS_$(label)!"
-    if params.test in (:Sod, :Sod_y, :Sod_circ)
-        gamma::T = 7/5
-        return update_perfect_gas_EOS!(params, data, step_label, range, gamma; dependencies)
-    elseif params.test == :Bizarrium
-        return update_bizarrium_EOS!(params, data, step_label, range; dependencies)
-    end
+    gamma::T = 7/5
+    return update_perfect_gas_EOS!(params, data, step_label, range, gamma; dependencies)
+end
+
+
+function update_EOS!(params::ArmonParameters, data::ArmonData, ::Bizarrium,
+        range::DomainRange, label::Symbol; dependencies=NoneEvent())
+    step_label = "update_EOS_$(label)!"
+    return update_bizarrium_EOS!(params, data, step_label, range; dependencies)
+end
+
+
+function update_EOS!(params::ArmonParameters, data::ArmonData,
+        range::DomainRange, label::Symbol; dependencies=NoneEvent())
+    return update_EOS!(params, data, params.test, range, label; dependencies)
 end
 
 #
 # Test initialisation
 #
 
-function init_test(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
-    (; x, y, rho, umat, vmat, pmat, cmat, Emat, ustar, pstar, domain_mask) = data
-    (; test, nghost, nbcell, nx, ny, row_length, cart_coords, global_grid) = params
+# Constructor for the tests
+(::Type{Test})(::ArmonParameters) where {Test <: TestCase} = Test()
 
-    if test == :Sod || test == :Sod_y || test == :Sod_circ
-        if params.maxtime == 0
-            params.maxtime = 0.20
-        end
+function (::Type{Sedov})(params::ArmonParameters{T}) where T
+    (g_nx, g_ny) = params.global_grid
+    Δx::T = one(T) / g_nx
+    Δy::T = one(T) / g_ny
+
+    r_Sedov::T = sqrt(Δx^2 + Δy^2) / sqrt(2)
+    # cell_ratio::T = (π * r_Sedov^2 / 4) / (Δx * Δy)
+    # r::T = r_Sedov * sqrt(cell_ratio)
+    r::T = r_Sedov
+
+    return Sedov{T}(r)
+end
+
+
+@generic_kernel function init_test(
+        row_length::Int, nghost::Int, nx::Int, ny::Int, 
+        cart_coords::NTuple{2, Int}, global_grid::NTuple{2, Int},
+        single_comm_per_axis_pass::Bool, extra_ring_width::Int,
+        x::V, y::V, rho::V, Emat::V, umat::V, vmat::V, 
+        domain_mask::V, pmat::V, cmat::V, ustar::V, pstar::V,
+        test::Test) where {T, V <: AbstractArray{T}, Test <: TwoStateTestCase}
+    @kernel_options(add_time, label=init_test, no_gpu)
+
+    i = @index_1D_lin()
+
+    @kernel_init begin
+        (cx, cy) = cart_coords
+        (g_nx, g_ny) = global_grid
+
+        # Position of the origin of this sub-domain
+        pos_x = cx * nx
+        pos_y = cy * ny
+
+        r = extra_ring_width
+
+        (gamma::T,
+            high_ρ::T, low_ρ::T,
+            high_p::T, low_p::T,
+            high_u::T, low_u::T, 
+            high_v::T, low_v::T) = init_test_params(test)
+    end
     
-        if params.cfl == 0
-            params.cfl = 0.95
-        end
+    ix = ((i-1) % row_length) - nghost
+    iy = ((i-1) ÷ row_length) - nghost
 
-        gamma::T   = 7/5
-        left_ρ::T  = 1.
-        right_ρ::T = 0.125
-        left_p::T  = 1.0
-        right_p::T = 0.1
-        right_u::T = 0.
+    # Global indexes, used only to know to compute the position of the cell
+    g_ix = ix + pos_x
+    g_iy = iy + pos_y
 
-        if test == :Sod
-            cond = (x_, y_) -> x_ ≤ 0.5
-        elseif test == :Sod_y
-            cond = (x_, y_) -> y_ ≤ 0.5
-        else
-            cond = (x_, y_) -> (x_ - 0.5)^2 + (y_ - 0.5)^2 ≤ 0.125
-        end
-    elseif test == :Bizarrium
-        if params.maxtime == 0
-            params.maxtime = 80e-6
-        end
+    x[i] = g_ix / g_nx
+    y[i] = g_iy / g_ny
 
-        if params.cfl == 0
-            params.cfl = 0.6
-        end
-
-        gamma   = 2
-        left_ρ  = 1.42857142857e+4
-        right_ρ = 10000.
-        left_p  = 6.40939744478e+10
-        right_p = 312.5e6
-        right_u = 250.
-
-        cond = (x_, y_) -> x_ ≤ 0.5
+    if test_region_high(x[i] + 1. / (2*g_nx), y[i] + 1. / (2*g_ny), test)
+        rho[i]  = high_ρ
+        Emat[i] = high_p / ((gamma - 1.) * rho[i])
+        umat[i] = high_u
+        vmat[i] = high_v
     else
-        error("Unknown test case: $test")
+        rho[i]  = low_ρ
+        Emat[i] = low_p / ((gamma - 1.) * rho[i])
+        umat[i] = low_u
+        vmat[i] = low_v
     end
 
-    (cx, cy) = cart_coords
-    (g_nx, g_ny) = global_grid
-
-    # Position of the origin of this sub-domain
-    pos_x = cx * nx
-    pos_y = cy * ny
-
-    one_more_ring = params.single_comm_per_axis_pass
-    r = params.extra_ring_width
-
-    @simd_threaded_loop for i in 1:nbcell
-        ix = ((i-1) % row_length) - nghost
-        iy = ((i-1) ÷ row_length) - nghost
-
-        # Global indexes, used only to know to compute the position of the cell
-        g_ix = ix + pos_x
-        g_iy = iy + pos_y
-
-        x[i] = g_ix / g_nx
-        y[i] = g_iy / g_ny
-
-        if cond(x[i] + 1. / (2*g_nx), y[i] + 1. / (2*g_ny))
-            rho[i]  = left_ρ
-            Emat[i] = left_p / ((gamma - 1.) * rho[i])
-            umat[i] = 0.
-        else
-            rho[i]  = right_ρ
-            Emat[i] = right_p / ((gamma - 1.) * rho[i])
-            umat[i] = right_u
-        end
-
-        vmat[i] = 0.
-
-        # Set the domain mask to 1 if the cell should be computed or 0 otherwise
-        if one_more_ring
-            domain_mask[i] = (
-                (-r ≤   ix < nx+r && -r ≤   iy < ny+r)  # Include as well a ring of ghost cells...
-             && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
-             && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
-            ) ? 1 : 0
-        else
-            domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1 : 0
-        end
-
-        # Set to zero to make sure no non-initialized values changes the result
-        pmat[i] = 0.
-        cmat[i] = 1.  # Set to 1 as a max speed of 0 will create NaNs
-        ustar[i] = 0.
-        pstar[i] = 0.
+    # Set the domain mask to 1 if the cell should be computed or 0 otherwise
+    if single_comm_per_axis_pass
+        domain_mask[i] = (
+               (-r ≤   ix < nx+r && -r ≤   iy < ny+r)  # Include as well a ring of ghost cells...
+            && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
+            && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
+        ) ? 1 : 0
+    else
+        domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1 : 0
     end
 
-    return
+    # Set to zero to make sure no non-initialized values changes the result
+    pmat[i] = 0.
+    cmat[i] = 1.  # Set to 1 as a max speed of 0 will create NaNs
+    ustar[i] = 0.
+    pstar[i] = 0.
 end
 
 #
@@ -1039,49 +1152,30 @@ end
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, side::Symbol;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; test, row_length, nx, ny) = params
+    (; row_length, nx, ny) = params
     @indexing_vars(params)
 
-    u_factor::T = 1.
-    v_factor::T = 1.
+    (u_factor::T, v_factor::T) = boundaryCondition(side, params.test)
+
     stride::Int = 1
     d::Int = 1
 
     if side == :left
-        if test == :Sod || test == :Sod_circ
-            u_factor = -1.
-        end
-
         stride = row_length
         i_start = @i(0,1)
         loop_range = 1:ny
         d = 1
-    
     elseif side == :right
-        if test == :Sod || test == :Sod_circ
-            u_factor = -1.
-        end
-
         stride = row_length
         i_start = @i(nx+1,1)
         loop_range = 1:ny
         d = -1
-
     elseif side == :top
-        if test == :Sod_y || test == :Sod_circ
-            v_factor = -1.
-        end
-
         stride = 1
         i_start = @i(1,ny+1)
         loop_range = 1:nx
         d = -row_length
-
     elseif side == :bottom
-        if test == :Sod_y || test == :Sod_circ
-            v_factor = -1.
-        end
-
         stride = 1
         i_start = @i(1,0)
         loop_range = 1:nx
@@ -1383,7 +1477,7 @@ end
 
 function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::V, 
         dt::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    params.projection == :none && return
+    params.projection == :none && return dependencies
 
     if params.use_MPI && !params.single_comm_per_axis_pass
         # Additional communications phase needed to get the new values of the lagrangian cells
@@ -1635,6 +1729,7 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
             end
             print(f, "\n")
         end
+        print(f, '\n')
     end
 
     close(f)
@@ -2059,7 +2154,7 @@ function armon(params::ArmonParameters{T}) where T
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
     @perf_task "init" "alloc" data = ArmonData(params)
-    @perf_task "init" "init_test" @pretty_time init_test(params, data)
+    @perf_task "init" "init_test" wait(init_test(params, data, 1:params.nbcell))
 
     if params.use_gpu
         copy_time = @elapsed d_data = data_to_gpu(data, get_device_array(params))
