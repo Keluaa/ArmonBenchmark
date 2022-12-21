@@ -228,6 +228,7 @@ mutable struct ArmonParameters{Flt_T}
     merge_files::Bool
     animation_step::Int
     measure_time::Bool
+    return_data::Bool
 
     # Performance
     use_ccall::Bool
@@ -282,7 +283,8 @@ function ArmonParameters(;
         use_MPI = true, px = 1, py = 1,
         single_comm_per_axis_pass = false, reorder_grid = true, 
         async_comms = true,
-        compare = false, is_ref = false, comparison_tolerance = 1e-10
+        compare = false, is_ref = false, comparison_tolerance = 1e-10,
+        return_data = false
     )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
@@ -444,7 +446,7 @@ function ArmonParameters(;
         maxtime, maxcycle,
         silent, output_dir, output_file,
         write_output, write_ghosts, output_precision, merge_files, animation_step,
-        measure_time,
+        measure_time, return_data,
         use_ccall, use_threading, use_simd, use_gpu, device, block_size,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
@@ -2243,7 +2245,11 @@ function armon(params::ArmonParameters{T}) where T
             total_time / 1e9, sync_total_time / 1e9, total_time / sync_total_time * 100)
     end
 
-    return dt, cycles, cells_per_sec, sorted_time_contrib, async_efficiency
+    if params.return_data
+        return data, dt, cycles, cells_per_sec, sorted_time_contrib, async_efficiency
+    else
+        return dt, cycles, cells_per_sec, sorted_time_contrib, async_efficiency
+    end
 end
 
 end
