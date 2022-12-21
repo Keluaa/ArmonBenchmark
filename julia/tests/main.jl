@@ -8,6 +8,8 @@ end
 using .Armon
 using Test
 
+include("reference_data/reference_functions.jl")
+
 
 if isinteractive()
     menu = """
@@ -22,9 +24,11 @@ if isinteractive()
      - conservation   Check that the energy and mass for each are kept constant throughout a lot of cycles.
      - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
      - performance    Checks for any regression in performance
+     - async          Checks that separating the domain and treating the boundary conditions asynchronously 
+                      doesn't introduce any variations in the result.
      - MPI            Equivalence with the single domain case and asynchronous communications
 
-    Separate test multiple sets with a comma.
+    Separate multiple test sets with a comma.
 
     Choice: """
     printstyled(stdout, menu; color=:light_green)
@@ -39,7 +43,7 @@ main_options = main_options .|> Symbol |> union
 
 if :all in main_options
     main_options = [:quality, :stability, :domains, :convergence, :conservation, :kernels, 
-                    :gpu, :performance, :mpi]
+                    :gpu, :performance, :async, :mpi]
 elseif :short in main_options
     main_options = [:quality, :stability, :domains, :convergence, :conservation, :kernels]
 end
@@ -58,6 +62,7 @@ function do_tests(tests_to_do)
             elseif test == :kernels        include("kernels.jl")
             elseif test == :gpu            include("gpu.jl")
             elseif test == :performance    include("performance.jl")
+            elseif test == :async          include("async.jl")
             elseif test == :mpi            include("mpi.jl")
             else
                 error("Unknown test set: $test")
@@ -65,7 +70,6 @@ function do_tests(tests_to_do)
 
             # TODO : suceptibility test comparing a result with different rounding modes
             # TODO : test lagrangian only mode
-            # TODO : async test, first test if 'single_comm_per_axis_pass' doesn't change any result, then async (if nthreads() > 1, else skip)
         end
     end
 

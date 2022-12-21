@@ -1,14 +1,10 @@
 
 import .Armon: @i, @indexing_vars, ArmonData, init_test, time_loop, conservation_vars
 
-include("reference_data/reference_functions.jl")
-
 
 @testset "Conservation" begin
     @testset "$test" for test in (:Sod, :Sod_y, :Sod_circ)
-        ref_params = get_reference_params(test, Float64)
-        ref_params.maxcycle = 10000
-        ref_params.maxtime = 10000
+        ref_params = get_reference_params(test, Float64; maxcycle=10000, maxtime=10000)
 
         data = ArmonData(Float64, ref_params.nbcell, ref_params.comm_array_size)
         init_test(ref_params, data)

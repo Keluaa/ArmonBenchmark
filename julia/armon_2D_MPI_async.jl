@@ -1833,7 +1833,7 @@ function compare_data(label::String, params::ArmonParameters{T},
         our_val = getfield(our_data, name)
 
         diff_mask = .~ isapprox.(ref_val, our_val; atol=comparison_tolerance)
-        !params.write_ghosts && diff_mask .*= our_data.domain_mask
+        !params.write_ghosts && (diff_mask .*= our_data.domain_mask)
         diff_count = sum(diff_mask)
 
         if diff_count > 0
@@ -1989,14 +1989,14 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         initial_mass, initial_energy = conservation_vars(params, data)
     end
 
-    update_axis_parameters(params, params.current_axis)
+    update_axis_parameters(params, first(split_axes(params, cycle))[1])
     domain_ranges = compute_domain_ranges(params)
 
     prev_event = NoneEvent()
 
     # Finalize the initialisation by calling the EOS on the entire domain
     update_EOS!(params, data, full_domain(domain_ranges), :full) |> wait
-    step_checkpoint(params, data, cpu_data, "update_EOS", cycle, params.current_axis) && @goto stop
+    step_checkpoint(params, data, cpu_data, "update_EOS_init", cycle, params.current_axis) && @goto stop
 
     # Main solver loop
     while t < maxtime && cycle < maxcycle

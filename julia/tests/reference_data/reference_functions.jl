@@ -4,16 +4,19 @@ using Test
 import .Armon: @i, @indexing_vars, ArmonData, init_test, time_loop, TestCase
 
 
-function get_reference_params(test::Symbol, type::Type)
-    ArmonParameters(; 
-        ieee_bits=sizeof(type)*8,
-        test, scheme=:GAD, projection=:euler_2nd, riemann_limiter=:minmod,
-        nghost=5, nx=100, ny=100, 
-        cfl=0,
-        maxcycle=1000, maxtime=0,
-        silent=5, write_output=false, measure_time=false,
-        use_MPI=false,
-        single_comm_per_axis_pass=false, async_comms=false)
+function get_reference_params(test::Symbol, type::Type; overriden_options...)
+    ref_options = Dict(
+        :ieee_bits => sizeof(type)*8,
+        :test => test, :scheme => :GAD, :projection => :euler_2nd, :riemann_limiter => :minmod,
+        :nghost => 5, :nx => 100, :ny => 100,
+        :cfl => 0,
+        :maxcycle => 1000, :maxtime => 0,  # Always run until reaching the default maximum time of the test
+        :silent => 5, :write_output => false, :measure_time => false,
+        :use_MPI => false,
+        :single_comm_per_axis_pass => false, :async_comms => false
+    )
+    merge!(ref_options, overriden_options)
+    ArmonParameters(; ref_options...)
 end
 
 
@@ -54,7 +57,8 @@ function write_reference_data(ref_params::ArmonParameters{T}, ref_file::IO, ref_
 end
 
 
-function read_reference_data(ref_params::ArmonParameters{T}, ref_file::IO, ref_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function read_reference_data(ref_params::ArmonParameters{T}, ref_file::IO, 
+        ref_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; nx, ny) = ref_params
     @indexing_vars(ref_params)
 
@@ -77,7 +81,8 @@ function read_reference_data(ref_params::ArmonParameters{T}, ref_file::IO, ref_d
 end
 
 
-function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycles::Int, data::ArmonData{V}, ref_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycles::Int, 
+        data::ArmonData{V}, ref_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; nx, ny) = ref_params
     @indexing_vars(ref_params)
     ref_file_name = get_reference_data_file_name(ref_params.test, T)

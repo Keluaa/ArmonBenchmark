@@ -6,8 +6,6 @@ using ROCKernels
 
 import .Armon: data_to_gpu, data_from_gpu
 
-include("reference_data/reference_functions.jl")
-
 
 function run_armon_gpu_reference(ref_params::ArmonParameters{T}, device_array) where T
     data = ArmonData(T, ref_params.nbcell, ref_params.comm_array_size)
@@ -20,9 +18,7 @@ end
 
 
 function cmp_gpu_with_reference_for(type, test, device, device_array)
-    ref_params = get_reference_params(test, type)
-    ref_params.use_gpu = true
-    ref_params.device = device
+    ref_params = get_reference_params(test, type; use_gpu=true, device)
     dt, cycles, data = run_armon_gpu_reference(ref_params, device_array)
     ref_data = ArmonData(type, ref_params.nbcell, ref_params.comm_array_size)
     return compare_with_reference_data(ref_params, dt, cycles, data, ref_data)
