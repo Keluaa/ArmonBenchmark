@@ -13,12 +13,13 @@ if isinteractive()
     menu = """
     Tests available:
      - all            All tests below
-     - short          Equivalent to 'code, stability, domains, convergence, kernels'
+     - short          Equivalent to 'code, stability, domains, convergence, conservation, kernels'
      - code           Code quality
      - stability      Type stability
      - domains        Domain 2D indexing
      - kernels        Compilation and correctness of indexing in generic kernels (CPU & GPU)
      - convergence    Convergence to the refenrence solutions
+     - conservation   Check that the energy and mass for each are kept constant throughout a lot of cycles.
      - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
      - performance    Checks for any regression in performance
      - MPI            Equivalence with the single domain case and asynchronous communications
@@ -37,9 +38,10 @@ filter!(!isempty, main_options)
 main_options = main_options .|> Symbol |> union
 
 if :all in main_options
-    main_options = [:quality, :stability, :domains, :convergence, :kernels, :gpu, :performance, :mpi]
+    main_options = [:quality, :stability, :domains, :convergence, :conservation, :kernels, 
+                    :gpu, :performance, :mpi]
 elseif :short in main_options
-    main_options = [:quality, :stability, :domains, :convergence, :kernels]
+    main_options = [:quality, :stability, :domains, :convergence, :conservation, :kernels]
 end
 
 
@@ -52,6 +54,7 @@ function do_tests(tests_to_do)
             elseif test == :stability      include("type_stability.jl")
             elseif test == :domains        include("domains.jl")
             elseif test == :convergence    include("convergence.jl")
+            elseif test == :conservation   include("conservation.jl")
             elseif test == :kernels        include("kernels.jl")
             elseif test == :gpu            include("gpu.jl")
             elseif test == :performance    include("performance.jl")
@@ -62,7 +65,6 @@ function do_tests(tests_to_do)
 
             # TODO : suceptibility test comparing a result with different rounding modes
             # TODO : test lagrangian only mode
-            # TODO : conservativity test, ΔE == ΔM == 0 after a lot of cycles (even after the shock bounces of the wall in the Sod test)
             # TODO : async test, first test if 'single_comm_per_axis_pass' doesn't change any result, then async (if nthreads() > 1, else skip)
         end
     end

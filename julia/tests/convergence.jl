@@ -14,7 +14,8 @@ end
 
 
 @testset "Convergence" begin
-    @testset "$test with $type" for type in (Float32, Float64), test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov)
+    @testset "$test with $type" for type in (Float32, Float64), 
+                                    test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov)
         @test begin
             differences_count = cmp_cpu_with_reference_for(type, test)
             differences_count == 0
