@@ -1,7 +1,7 @@
 
 using Printf
 using Test
-import .Armon: @i, @indexing_vars, ArmonData, init_test, time_loop
+import .Armon: @i, @indexing_vars, ArmonData, init_test, time_loop, TestCase
 
 
 function get_reference_params(test::Symbol, type::Type)
@@ -9,10 +9,11 @@ function get_reference_params(test::Symbol, type::Type)
         ieee_bits=sizeof(type)*8,
         test, scheme=:GAD, projection=:euler_2nd, riemann_limiter=:minmod,
         nghost=5, nx=100, ny=100, 
-        maxcycle=100, maxtime=1,
+        cfl=0,
+        maxcycle=1000, maxtime=0,
         silent=5, write_output=false, measure_time=false,
         use_MPI=false,
-        single_comm_per_axis_pass=true, async_comms=false)
+        single_comm_per_axis_pass=false, async_comms=false)
 end
 
 
@@ -24,8 +25,9 @@ function run_armon_reference(ref_params::ArmonParameters{T}) where T
 end
 
 
-function get_reference_data_file_name(test::Symbol, type::Type)
-    return joinpath(@__DIR__, "ref_$(test)_$(sizeof(type)*8)bits.csv")
+function get_reference_data_file_name(test::TestCase, type::Type)
+    test_name = typeof(test).name.name
+    return joinpath(@__DIR__, "ref_$(test_name)_$(sizeof(type)*8)bits.csv")
 end
 
 
@@ -47,6 +49,7 @@ function write_reference_data(ref_params::ArmonParameters{T}, ref_file::IO, ref_
             end
             println(ref_file)
         end
+        println(ref_file)
     end
 end
 
@@ -84,21 +87,19 @@ function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycl
         @test ref_dt ≈ dt atol=1e-13
         @test ref_cycles == cycles
     end
-    
-    different = false
+
+    differences_count = 0
     fields_to_compare = (:x, :y, :rho, :umat, :vmat, :pmat)
     for j in 1:ny
         row_range = @i(1,j):@i(nx,j)
         for field in fields_to_compare
             ref_row = @view getfield(ref_data, field)[row_range]
             cur_row = @view getfield(data, field)[row_range]
-            row_not_equal = !all(isapprox.(ref_row, cur_row; atol=1e-13))
-            different |= row_not_equal
-            row_not_equal && @debug begin
-                diff_count = sum(.~ isapprox.(ref_row, cur_row; atol=1e-13))
-                "Row $j has $diff_count differences in '$field' with the reference"
-            end
+            diff_count = sum(.~ isapprox.(ref_row, cur_row; atol=1e-13))
+            differences_count += diff_count
+            (diff_count > 0) && @debug "Row $j has $diff_count differences in '$field' with the reference"
         end
     end
-    return !different
+
+    return differences_count
 end

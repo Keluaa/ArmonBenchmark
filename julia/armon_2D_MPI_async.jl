@@ -104,9 +104,7 @@ test_region_high(x::T, _::T, ::Sod)       where T = x ≤ 0.5
 test_region_high(_::T, y::T, ::Sod_y)     where T = y ≤ 0.5
 test_region_high(x::T, y::T, ::Sod_circ)  where T = (x - T(0.5))^2 + (y - T(0.5))^2 ≤ T(0.125)
 test_region_high(x::T, _::T, ::Bizarrium) where T = x ≤ 0.5
-# test_region_high(x::T, y::T, s::Sedov{T}) where T = zero(0) ≤ x ≤ s.r && zero(T) ≤ y ≤ s.r
-# test_region_high(x::T, y::T, s::Sedov{T}) where T = 0.5 ≤ x ≤ 0.5 + s.r && 0.5 ≤ y ≤ 0.5 + s.r
-test_region_high(x::T, y::T, s::Sedov{T}) where T = (x - T(0.5))^2 + (y - T(0.5))^2 ≤ s.r^2
+test_region_high(x::T, y::T, s::Sedov{T}) where T = zero(0) ≤ x ≤ s.r && zero(T) ≤ y ≤ s.r
 
 default_CFL(::Union{Sod, Sod_y, Sod_circ}) = 0.95
 default_CFL(::Bizarrium) = 0.6
@@ -125,7 +123,7 @@ function init_test_params(::Union{Sod, Sod_y, Sod_circ})
         0.1,   # low_p
         0.,    # high_u
         0.,    # low_u
-        0.,    # high_v
+        0.,    # high_v
         0.,    # low_v
     )
 end
@@ -170,8 +168,14 @@ function boundaryCondition(side::Symbol, ::Sod_circ)
     return (side == :left || side == :right) ? (-1, 1) : (1, -1)
 end
 
-function boundaryCondition(::Symbol, ::Sedov)
-    return (1, 1)
+function boundaryCondition(side::Symbol, ::Sedov)
+    if side == :left
+        return (-1, 1)
+    elseif side == :bottom
+        return (1, -1)
+    else
+        return (1, 1)
+    end
 end
 
 #
@@ -208,6 +212,7 @@ mutable struct ArmonParameters{Flt_T}
     idx_col::Int
     current_axis::Axis
     s::Int  # Stride
+    stencil_width::Int
 
     # Bounds
     maxtime::Flt_T
@@ -263,8 +268,8 @@ function ArmonParameters(;
         ieee_bits = 64,
         test = :Sod, riemann = :acoustic, scheme = :GAD_minmod, projection = :euler,
         riemann_limiter = :minmod,
-        nghost = 2, nx = 10, ny = 10, 
-        cfl = 0.6, Dt = 0., cst_dt = false, dt_on_even_cycles = false,
+        nghost = 2, nx = 10, ny = 10, stencil_width = 0,
+        cfl = 0., Dt = 0., cst_dt = false, dt_on_even_cycles = false,
         transpose_dims = false, axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
@@ -318,6 +323,15 @@ function ArmonParameters(;
 
     if (nx % px != 0) || (ny % py != 0)
         error("The dimensions of the global domain ($nx x $ny) are not divisible by the number of processors ($px x $py)")
+    end
+
+    if stencil_width == 0
+        stencil_width = min_nghost
+    elseif stencil_width < min_nghost
+        @warn "The detected minimum stencil width is $min_nghost, but $stencil_width was given. \
+               The Boundary conditions might be false." maxlog=1
+    elseif stencil_width > nghost
+        error("The stencil width given ($stencil_width) cannot be bigger than the number of ghost cells ($nghost)")
     end
 
     if riemann_limiter isa Symbol
@@ -426,7 +440,7 @@ function ArmonParameters(;
         row_length, col_length, nbcell,
         ideb, ifin, index_start,
         idx_row, idx_col,
-        X_axis, 1,
+        X_axis, 1, stencil_width,
         maxtime, maxcycle,
         silent, output_dir, output_file,
         write_output, write_ghosts, output_precision, merge_files, animation_step,
@@ -440,7 +454,7 @@ function ArmonParameters(;
     )
 
     # Initialize the test
-    params.test = test(params)
+    params.test = create_test(params, test)
 
     if params.cfl == 0
         params.cfl = default_CFL(params.test)
@@ -490,13 +504,19 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - ieee_bits:  ", sizeof(T) * 8)
     println()
     println(" - test:       ", p.test)
-    println(" - riemann:    ", p.riemann, ", ", p.riemann_limiter)
+    print(" - riemann:    ", p.riemann)
+    if p.scheme != :Godunov
+        println(", ", p.riemann_limiter)
+    else
+        println()
+    end
     println(" - scheme:     ", p.scheme)
     println(" - splitting:  ", p.axis_splitting)
     println(" - cfl:        ", p.cfl)
     println(" - Dt:         ", p.Dt, p.dt_on_even_cycles ? ", updated only for even cycles" : "")
     println(" - euler proj: ", p.projection)
     println(" - cst dt:     ", p.cst_dt)
+    println(" - stencil width: ", p.stencil_width)
     println(" - maxtime:    ", p.maxtime)
     println(" - maxcycle:   ", p.maxcycle)
     println()
@@ -930,20 +950,25 @@ end
 end
 
 
-@generic_kernel function boundaryConditions!(stride::Int, i_start::Int, d::Int,
+@generic_kernel function boundaryConditions!(stencil_width::Int, stride::Int, i_start::Int, d::Int,
         u_factor::T, v_factor::T, rho::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, async, label=boundaryConditions!, no_threading)
 
     idx = @index_1D_lin()
-    i = idx * stride + i_start
+    i  = idx * stride + i_start
     i₊ = i + d
 
-    rho[i]  = rho[i₊]
-    umat[i] = umat[i₊] * u_factor
-    vmat[i] = vmat[i₊] * v_factor
-    pmat[i] = pmat[i₊]
-    cmat[i] = cmat[i₊]
-    gmat[i] = gmat[i₊]
+    for _ in 1:stencil_width
+        rho[i]  = rho[i₊]
+        umat[i] = umat[i₊] * u_factor
+        vmat[i] = vmat[i₊] * v_factor
+        pmat[i] = pmat[i₊]
+        cmat[i] = cmat[i₊]
+        gmat[i] = gmat[i₊]
+
+        i  -= d
+        i₊ += d
+    end
 end
 
 
@@ -984,6 +1009,78 @@ end
     cmat[idx] = value_array[i_arr+5]
     gmat[idx] = value_array[i_arr+6]
     Emat[idx] = value_array[i_arr+7]
+end
+
+
+@generic_kernel function init_test(
+        row_length::Int, nghost::Int, nx::Int, ny::Int, 
+        cart_coords::NTuple{2, Int}, global_grid::NTuple{2, Int},
+        single_comm_per_axis_pass::Bool, extra_ring_width::Int,
+        x::V, y::V, rho::V, Emat::V, umat::V, vmat::V, 
+        domain_mask::V, pmat::V, cmat::V, ustar::V, pstar::V,
+        test_case::Test) where {T, V <: AbstractArray{T}, Test <: TwoStateTestCase}
+    @kernel_options(add_time, label=init_test, no_gpu)
+
+    i = @index_1D_lin()
+
+    @kernel_init begin
+        (cx, cy) = cart_coords
+        (g_nx, g_ny) = global_grid
+
+        # Position of the origin of this sub-domain
+        pos_x = cx * nx
+        pos_y = cy * ny
+
+        r = extra_ring_width
+
+        (gamma::T,
+            high_ρ::T, low_ρ::T,
+            high_p::T, low_p::T,
+            high_u::T, low_u::T, 
+            high_v::T, low_v::T) = init_test_params(test_case)
+    end
+    
+    ix = ((i-1) % row_length) - nghost
+    iy = ((i-1) ÷ row_length) - nghost
+
+    # Global indexes, used only to know to compute the position of the cell
+    g_ix = ix + pos_x
+    g_iy = iy + pos_y
+
+    x[i] = g_ix / g_nx
+    y[i] = g_iy / g_ny
+
+    x_mid::T = x[i] + one(T) / (2*g_nx)
+    y_mid::T = y[i] + one(T) / (2*g_ny)
+
+    if test_region_high(x_mid, y_mid, test_case)
+        rho[i]  = high_ρ
+        Emat[i] = high_p / ((gamma - one(T)) * rho[i])
+        umat[i] = high_u
+        vmat[i] = high_v
+    else
+        rho[i]  = low_ρ
+        Emat[i] = low_p / ((gamma - one(T)) * rho[i])
+        umat[i] = low_u
+        vmat[i] = low_v
+    end
+
+    # Set the domain mask to 1 if the cell should be computed or 0 otherwise
+    if single_comm_per_axis_pass
+        domain_mask[i] = (
+               (-r ≤   ix < nx+r && -r ≤   iy < ny+r)  # Include as well a ring of ghost cells...
+            && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
+            && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
+        ) ? 1 : 0
+    else
+        domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1 : 0
+    end
+
+    # Set to zero to make sure no non-initialized values changes the result
+    pmat[i] = 0
+    cmat[i] = 1  # Set to 1 as a max speed of 0 will create NaNs
+    ustar[i] = 0
+    pstar[i] = 0
 end
 
 #
@@ -1062,88 +1159,21 @@ end
 #
 
 # Constructor for the tests
-(::Type{Test})(::ArmonParameters) where {Test <: TestCase} = Test()
+create_test(::ArmonParameters, ::Type{Test}) where {Test <: TestCase} = Test()
 
-function (::Type{Sedov})(params::ArmonParameters{T}) where T
+function create_test(params::ArmonParameters{T}, ::Type{Sedov}) where T
     (g_nx, g_ny) = params.global_grid
     Δx::T = one(T) / g_nx
     Δy::T = one(T) / g_ny
 
     r_Sedov::T = sqrt(Δx^2 + Δy^2) / sqrt(2)
-    # cell_ratio::T = (π * r_Sedov^2 / 4) / (Δx * Δy)
-    # r::T = r_Sedov * sqrt(cell_ratio)
-    r::T = r_Sedov
 
-    return Sedov{T}(r)
+    return Sedov{T}(r_Sedov)
 end
 
 
-@generic_kernel function init_test(
-        row_length::Int, nghost::Int, nx::Int, ny::Int, 
-        cart_coords::NTuple{2, Int}, global_grid::NTuple{2, Int},
-        single_comm_per_axis_pass::Bool, extra_ring_width::Int,
-        x::V, y::V, rho::V, Emat::V, umat::V, vmat::V, 
-        domain_mask::V, pmat::V, cmat::V, ustar::V, pstar::V,
-        test::Test) where {T, V <: AbstractArray{T}, Test <: TwoStateTestCase}
-    @kernel_options(add_time, label=init_test, no_gpu)
-
-    i = @index_1D_lin()
-
-    @kernel_init begin
-        (cx, cy) = cart_coords
-        (g_nx, g_ny) = global_grid
-
-        # Position of the origin of this sub-domain
-        pos_x = cx * nx
-        pos_y = cy * ny
-
-        r = extra_ring_width
-
-        (gamma::T,
-            high_ρ::T, low_ρ::T,
-            high_p::T, low_p::T,
-            high_u::T, low_u::T, 
-            high_v::T, low_v::T) = init_test_params(test)
-    end
-    
-    ix = ((i-1) % row_length) - nghost
-    iy = ((i-1) ÷ row_length) - nghost
-
-    # Global indexes, used only to know to compute the position of the cell
-    g_ix = ix + pos_x
-    g_iy = iy + pos_y
-
-    x[i] = g_ix / g_nx
-    y[i] = g_iy / g_ny
-
-    if test_region_high(x[i] + 1. / (2*g_nx), y[i] + 1. / (2*g_ny), test)
-        rho[i]  = high_ρ
-        Emat[i] = high_p / ((gamma - 1.) * rho[i])
-        umat[i] = high_u
-        vmat[i] = high_v
-    else
-        rho[i]  = low_ρ
-        Emat[i] = low_p / ((gamma - 1.) * rho[i])
-        umat[i] = low_u
-        vmat[i] = low_v
-    end
-
-    # Set the domain mask to 1 if the cell should be computed or 0 otherwise
-    if single_comm_per_axis_pass
-        domain_mask[i] = (
-               (-r ≤   ix < nx+r && -r ≤   iy < ny+r)  # Include as well a ring of ghost cells...
-            && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
-            && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
-        ) ? 1 : 0
-    else
-        domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1 : 0
-    end
-
-    # Set to zero to make sure no non-initialized values changes the result
-    pmat[i] = 0.
-    cmat[i] = 1.  # Set to 1 as a max speed of 0 will create NaNs
-    ustar[i] = 0.
-    pstar[i] = 0.
+function init_test(params::ArmonParameters, data::ArmonData)
+    return init_test(params, data, 1:params.nbcell, params.test)
 end
 
 #
@@ -2154,7 +2184,7 @@ function armon(params::ArmonParameters{T}) where T
     # Allocate without initialisation in order to correctly map the NUMA space using the first-touch
     # policy when working on CPU only
     @perf_task "init" "alloc" data = ArmonData(params)
-    @perf_task "init" "init_test" wait(init_test(params, data, 1:params.nbcell))
+    @perf_task "init" "init_test" wait(init_test(params, data))
 
     if params.use_gpu
         copy_time = @elapsed d_data = data_to_gpu(data, get_device_array(params))

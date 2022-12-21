@@ -25,8 +25,6 @@ if isinteractive()
 
     Separate test multiple sets with a comma.
 
-    Additionally, putting 'verbose' in the list of tests will display the entire tree of tests results.
-
     Choice: """
     printstyled(stdout, menu; color=:light_green)
     raw_main_options = readline()
@@ -44,31 +42,9 @@ elseif :short in main_options
     main_options = [:quality, :stability, :domains, :convergence, :kernels]
 end
 
-if :verbose in main_options
-    verbose = true
-    deleteat!(main_options, findall(x -> x == :verbose, main_options))
-else
-    verbose = false
-end
 
-
-function override_verbosity(ts::Test.DefaultTestSet, verbose::Bool)
-    ts.verbose = verbose
-    for sub_ts in ts.results
-        if sub_ts isa Test.DefaultTestSet
-            override_verbosity(sub_ts, verbose)
-        end
-    end
-    return ts
-end
-
-
-function do_tests(tests_to_do; verbose=true)
+function do_tests(tests_to_do)
     println("Testing: ", join(tests_to_do, ", "))
-
-    tmp_print = Test.TESTSET_PRINT_ENABLE[]
-
-    Test.TESTSET_PRINT_ENABLE[] = true
 
     ts = @testset "Armon tests" begin
         for test in tests_to_do
@@ -86,19 +62,16 @@ function do_tests(tests_to_do; verbose=true)
 
             # TODO : suceptibility test comparing a result with different rounding modes
             # TODO : test lagrangian only mode
+            # TODO : conservativity test, ΔE == ΔM == 0 after a lot of cycles (even after the shock bounces of the wall in the Sod test)
+            # TODO : async test, first test if 'single_comm_per_axis_pass' doesn't change any result, then async (if nthreads() > 1, else skip)
         end
-
-        # Disable printing at the end so that we can print the results as we like without hiding any
-        # errors.
-        Test.TESTSET_PRINT_ENABLE[] = false
     end
 
-    Test.TESTSET_PRINT_ENABLE[] = tmp_print
-
     # TODO: in Julia 1.8, there is one more option: 'showtimings' which display the time for each test
-    override_verbosity(ts, verbose)
-    Test.print_test_results(ts)
+    if isinteractive()
+        Test.print_test_results(ts)
+    end
 end
 
 
-!isempty(main_options) && do_tests(main_options; verbose)
+!isempty(main_options) && do_tests(main_options)
