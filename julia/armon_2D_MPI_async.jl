@@ -81,8 +81,15 @@ struct Sod       <: TwoStateTestCase end
 struct Sod_y     <: TwoStateTestCase end
 struct Sod_circ  <: TwoStateTestCase end
 struct Bizarrium <: TwoStateTestCase end
-struct Sedov{T <: AbstractFloat} <: TwoStateTestCase 
+struct Sedov{T}  <: TwoStateTestCase
     r::T
+end
+
+create_test(::T, ::T, ::Type{Test}) where {T, Test <: TestCase} = Test()
+
+function create_test(Δx::T, Δy::T, ::Type{Sedov}) where T
+    r_Sedov::T = sqrt(Δx^2 + Δy^2) / sqrt(2)
+    return Sedov{T}(r_Sedov)
 end
 
 test_from_name(::Val{:Sod})       = Sod
@@ -94,6 +101,20 @@ test_from_name(::Val{:Sedov})     = Sedov
 test_from_name(::Val{s}) where s = error("Unknown test case: '$s'")
 test_from_name(s::Symbol) = test_from_name(Val(s))
 
+default_domain_size(::Type{<:TestCase}) = (1, 1)
+default_domain_size(::Type{Sedov}) = (2, 2)
+
+default_domain_origin(::Type{<:TestCase}) = (0, 0)
+default_domain_origin(::Type{Sedov}) = (-1, -1)
+
+default_CFL(::Union{Sod, Sod_y, Sod_circ}) = 0.95
+default_CFL(::Bizarrium) = 0.6
+default_CFL(::Sedov) = 0.7
+
+default_max_time(::Union{Sod, Sod_y, Sod_circ}) = 0.20
+default_max_time(::Bizarrium) = 80e-6
+default_max_time(::Sedov) = 1.0
+
 Base.show(io::IO, ::Sod)       = print(io, "Sod shock tube")
 Base.show(io::IO, ::Sod_y)     = print(io, "Sod shock tube (along the Y axis)")
 Base.show(io::IO, ::Sod_circ)  = print(io, "Sod shock tube (cylindrical symmetry around the Z axis)")
@@ -104,15 +125,7 @@ test_region_high(x::T, _::T, ::Sod)       where T = x ≤ 0.5
 test_region_high(_::T, y::T, ::Sod_y)     where T = y ≤ 0.5
 test_region_high(x::T, y::T, ::Sod_circ)  where T = (x - T(0.5))^2 + (y - T(0.5))^2 ≤ T(0.125)
 test_region_high(x::T, _::T, ::Bizarrium) where T = x ≤ 0.5
-test_region_high(x::T, y::T, s::Sedov{T}) where T = zero(0) ≤ x ≤ s.r && zero(T) ≤ y ≤ s.r
-
-default_CFL(::Union{Sod, Sod_y, Sod_circ}) = 0.95
-default_CFL(::Bizarrium) = 0.6
-default_CFL(::Sedov) = 0.5
-
-default_max_time(::Union{Sod, Sod_y, Sod_circ}) = 0.20
-default_max_time(::Bizarrium) = 80e-6
-default_max_time(::Sedov) = 1.0
+test_region_high(x::T, y::T, s::Sedov{T}) where T = x^2 + y^2 ≤ s.r^2
 
 function init_test_params(::Union{Sod, Sod_y, Sod_circ})
     return (
@@ -168,14 +181,8 @@ function boundaryCondition(side::Symbol, ::Sod_circ)
     return (side == :left || side == :right) ? (-1, 1) : (1, -1)
 end
 
-function boundaryCondition(side::Symbol, ::Sedov)
-    if side == :left
-        return (-1, 1)
-    elseif side == :bottom
-        return (1, -1)
-    else
-        return (1, 1)
-    end
+function boundaryCondition(::Symbol, ::Sedov)
+    return (1, 1)
 end
 
 #
@@ -194,6 +201,8 @@ mutable struct ArmonParameters{Flt_T}
     nx::Int
     ny::Int
     dx::Flt_T
+    domain_size::NTuple{2, Flt_T}
+    origin::NTuple{2, Flt_T}
     cfl::Flt_T
     Dt::Flt_T
     cst_dt::Bool
@@ -270,6 +279,7 @@ function ArmonParameters(;
         test = :Sod, riemann = :acoustic, scheme = :GAD_minmod, projection = :euler,
         riemann_limiter = :minmod,
         nghost = 2, nx = 10, ny = 10, stencil_width = 0,
+        domain_size = nothing, origin = nothing,
         cfl = 0., Dt = 0., cst_dt = false, dt_on_even_cycles = false,
         transpose_dims = false, axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
@@ -293,6 +303,9 @@ function ArmonParameters(;
     cfl = flt_type(cfl)
     Dt = flt_type(Dt)
     maxtime = flt_type(maxtime)
+
+    domain_size = isnothing(domain_size) ? nothing : Tuple(flt_type.(domain_size))
+    origin = isnothing(origin) ? nothing : Tuple(flt_type.(origin))
     
     if cst_dt && Dt == zero(flt_type)
         error("Dt == 0 with constant step enabled")
@@ -339,8 +352,11 @@ function ArmonParameters(;
     end
 
     if test isa Symbol
-        test = test_from_name(test)
-    elseif !(test isa TestCase)
+        test_type = test_from_name(test)
+        test = nothing
+    elseif test isa TestCase
+        test_type = typeof(test)
+    else
         error("Expected a TestCase type or a symbol, got: $test")
     end
 
@@ -394,11 +410,37 @@ function ArmonParameters(;
         device = CPU()
     end
 
+    # Initialize the test
+    if isnothing(domain_size)
+        domain_size = default_domain_size(test_type)
+        domain_size = Tuple(flt_type.(domain_size))
+    end
+
+    if isnothing(origin)
+        origin = default_domain_origin(test_type)
+        origin = Tuple(flt_type.(origin))
+    end
+
+    if isnothing(test)
+        (sx, sy) = domain_size
+        Δx::flt_type = sx / nx
+        Δy::flt_type = sy / ny
+        test = create_test(Δx, Δy, test_type)
+    end
+
+    if cfl == 0
+        cfl = default_CFL(test)
+    end
+
+    if maxtime == 0
+        maxtime = default_max_time(test)
+    end
+
     # Dimensions of the global domain
     g_nx = nx
     g_ny = ny
 
-    dx = flt_type(1. / g_nx)
+    dx = flt_type(domain_size[1] / g_nx)
 
     # Dimensions of an array of the sub-domain
     nx ÷= px
@@ -430,9 +472,9 @@ function ArmonParameters(;
         comm_array_size = 0
     end
     
-    params = ArmonParameters{flt_type}(
-        Sod(), riemann, scheme, riemann_limiter,
-        nghost, nx, ny, dx,
+    return ArmonParameters{flt_type}(
+        test, riemann, scheme, riemann_limiter,
+        nghost, nx, ny, dx, domain_size, origin,
         cfl, Dt, cst_dt, dt_on_even_cycles,
         axis_splitting, projection,
         row_length, col_length, nbcell,
@@ -450,19 +492,6 @@ function ArmonParameters(;
         async_comms,
         compare, is_ref, comparison_tolerance
     )
-
-    # Initialize the test
-    params.test = create_test(params, test)
-
-    if params.cfl == 0
-        params.cfl = default_CFL(params.test)
-    end
-
-    if params.maxtime == 0
-        params.maxtime = default_max_time(params.test)
-    end
-
-    return params
 end
 
 
@@ -518,11 +547,12 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - maxtime:    ", p.maxtime)
     println(" - maxcycle:   ", p.maxcycle)
     println()
-    println(" - domain:     ", p.nx, "x", p.ny, " (", p.nghost, " ghosts)")
+    println(" - domain:     ", p.nx, "×", p.ny, " (", p.nghost, " ghosts)")
+    println(" - domain size: ", join(p.domain_size, " × "), ", origin: (", join(p.origin, ", "), ")")
     println(" - nbcell:     ", @sprintf("%g", p.nx * p.ny), " (", p.nbcell, " total)")
-    println(" - global:     ", p.global_grid[1], "x", p.global_grid[2])
-    println(" - proc grid:  ", p.proc_dims[1], "x", p.proc_dims[2], " ($(p.reorder_grid ? "" : "not ")reordered)")
-    println(" - coords:     ", p.cart_coords[1], "x", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
+    println(" - global:     ", p.global_grid[1], "×", p.global_grid[2])
+    println(" - proc grid:  ", p.proc_dims[1], "×", p.proc_dims[2], " ($(p.reorder_grid ? "" : "not ")reordered)")
+    println(" - coords:     ", p.cart_coords[1], "×", p.cart_coords[2], " (rank: ", p.rank, "/", p.proc_size-1, ")")
     println(" - comms per axis: ", p.single_comm_per_axis_pass ? 1 : 2)
     println(" - asynchronous communications: ", p.async_comms)
     println(" - measure step times: ", p.measure_time)
@@ -1012,6 +1042,7 @@ end
 
 @generic_kernel function init_test(
         row_length::Int, nghost::Int, nx::Int, ny::Int, 
+        domain_size::NTuple{2, T}, origin::NTuple{2, T},
         cart_coords::NTuple{2, Int}, global_grid::NTuple{2, Int},
         single_comm_per_axis_pass::Bool, extra_ring_width::Int,
         x::V, y::V, rho::V, Emat::V, umat::V, vmat::V, 
@@ -1024,6 +1055,8 @@ end
     @kernel_init begin
         (cx, cy) = cart_coords
         (g_nx, g_ny) = global_grid
+        (sx, sy) = domain_size
+        (ox, oy) = origin
 
         # Position of the origin of this sub-domain
         pos_x = cx * nx
@@ -1045,11 +1078,11 @@ end
     g_ix = ix + pos_x
     g_iy = iy + pos_y
 
-    x[i] = g_ix / g_nx
-    y[i] = g_iy / g_ny
+    x[i] = g_ix / g_nx * sx + ox
+    y[i] = g_iy / g_ny * sy + oy
 
-    x_mid::T = x[i] + one(T) / (2*g_nx)
-    y_mid::T = y[i] + one(T) / (2*g_ny)
+    x_mid::T = x[i] + sx / (2*g_nx)
+    y_mid::T = y[i] + sy / (2*g_ny)
 
     if test_region_high(x_mid, y_mid, test_case)
         rho[i]  = high_ρ
@@ -1155,20 +1188,6 @@ end
 #
 # Test initialisation
 #
-
-# Constructor for the tests
-create_test(::ArmonParameters, ::Type{Test}) where {Test <: TestCase} = Test()
-
-function create_test(params::ArmonParameters{T}, ::Type{Sedov}) where T
-    (g_nx, g_ny) = params.global_grid
-    Δx::T = one(T) / g_nx
-    Δy::T = one(T) / g_ny
-
-    r_Sedov::T = sqrt(Δx^2 + Δy^2) / sqrt(2)
-
-    return Sedov{T}(r_Sedov)
-end
-
 
 function init_test(params::ArmonParameters, data::ArmonData)
     return init_test(params, data, 1:params.nbcell, params.test)
@@ -1368,14 +1387,15 @@ end
 function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; cmat, umat, vmat, domain_mask, work_array_1) = data
-    (; cfl, Dt, ideb, ifin, global_grid) = params
+    (; cfl, Dt, ideb, ifin, global_grid, domain_size) = params
     @indexing_vars(params)
 
     (g_nx, g_ny) = global_grid
+    (sx, sy) = domain_size
 
     dt::T = Inf
-    dx::T = 1. / g_nx
-    dy::T = 1. / g_ny
+    dx::T = sx / g_nx
+    dy::T = sy / g_ny
 
     if params.cst_dt
         # Constant time step
@@ -1540,17 +1560,18 @@ end
 #
 
 function update_axis_parameters(params::ArmonParameters{T}, axis::Axis) where T
-    (; row_length, global_grid) = params
+    (; row_length, global_grid, domain_size) = params
     (g_nx, g_ny) = global_grid
+    (sx, sy) = domain_size
 
     params.current_axis = axis
 
     if axis == X_axis
         params.s = 1
-        params.dx = 1. / g_nx
+        params.dx = sx / g_nx
     else  # axis == Y_axis
         params.s = row_length
-        params.dx = 1. / g_ny
+        params.dx = sy / g_ny
     end
 end
 
@@ -1736,7 +1757,7 @@ end
 
 
 function write_slices_files(params::ArmonParameters, data::ArmonData, file_name::String; no_msg=false)
-    (; output_dir, silent, nx, ny, use_MPI, is_root, cart_comm, cart_coords) = params
+    (; output_dir, silent, nx, ny, use_MPI, is_root, cart_comm, global_grid, proc_dims, cart_coords) = params
 
     if is_root && !isdir(output_dir)
         mkpath(output_dir)
@@ -1745,30 +1766,38 @@ function write_slices_files(params::ArmonParameters, data::ArmonData, file_name:
     # Wait for the root command to complete
     use_MPI && MPI.Barrier(cart_comm)
 
+    (g_nx, g_ny) = global_grid
+    (px, py) = proc_dims
     (cx, cy) = cart_coords
 
-    # First row
-    if !use_MPI || cy == 0
+    ((nx != ny) || (px != py)) && error("Domain slices are only implemented for square domains on a square process grid.")
+
+    # Middle row
+    cy_mid = cld(py, 2) - 1
+    if cy == cy_mid
+        y_mid = cld(g_ny, 2) - ny * cy + 1
         output_file_path_X = build_file_path(params, file_name * "_X")
         open(output_file_path_X, "w") do file
-            col_range = 1:1
+            col_range = y_mid:y_mid
             row_range = 1:nx
             write_data_to_file(params, data, col_range, row_range, file; for_3D=false)
         end
     end
 
-    # First column
-    if !use_MPI || cx == 0
+    # Middle column
+    cx_mid = cld(px, 2) - 1
+    if cx == cx_mid
+        x_mid = cld(g_nx, 2) - nx * cx + 1
         output_file_path_Y = build_file_path(params, file_name * "_Y")
         open(output_file_path_Y, "w") do file
             col_range = 1:ny
-            row_range = 1:1
+            row_range = x_mid:x_mid
             write_data_to_file(params, data, col_range, row_range, file; for_3D=false)
         end
     end
 
     # Diagonal
-    if !use_MPI || cx == cy
+    if cx == cy
         output_file_path_D = build_file_path(params, file_name * "_D")
         open(output_file_path_D, "w") do file
             col_range = 1:1
