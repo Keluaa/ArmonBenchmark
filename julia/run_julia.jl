@@ -24,6 +24,7 @@ silent = 2
 output_file = "output"
 write_output = false
 write_ghosts = false
+write_slices = false
 use_ccall = false
 use_threading = true
 use_simd = true
@@ -143,6 +144,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--write-ghosts"
         global write_ghosts = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--write-slices"
+        global write_slices = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--output-digits"
         global output_precision = parse(Int, ARGS[i+1])
@@ -471,7 +475,7 @@ if use_MPI
                 nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
                 test=test, nx=domain[1], ny=domain[2],
                 transpose_dims, axis_splitting, 
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, output_precision, 
+                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, write_slices, output_precision, 
                 measure_time,
                 use_ccall, use_threading, use_simd, use_gpu, device=gpu, block_size, use_MPI, px, py, 
                 single_comm_per_axis_pass, reorder_grid, async_comms,

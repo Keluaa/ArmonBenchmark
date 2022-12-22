@@ -224,8 +224,8 @@ mutable struct ArmonParameters{Flt_T}
     output_file::String
     write_output::Bool
     write_ghosts::Bool
+    write_slices::Bool
     output_precision::Int
-    merge_files::Bool
     animation_step::Int
     measure_time::Bool
     return_data::Bool
@@ -274,7 +274,7 @@ function ArmonParameters(;
         transpose_dims = false, axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
-        write_output = true, write_ghosts = false, output_precision = 6, merge_files = false,
+        write_output = true, write_ghosts = false, write_slices = false, output_precision = 6,
         animation_step = 0, 
         measure_time = true,
         use_ccall = false, use_threading = true, 
@@ -308,10 +308,6 @@ function ArmonParameters(;
 
     if transpose_dims
         error("No support for axis transposition in 2D")
-    end
-
-    if write_output && write_ghosts && merge_files
-        error("Writing the ghost cells to a single output file is not possible")
     end
 
     min_nghost = 1
@@ -445,7 +441,7 @@ function ArmonParameters(;
         X_axis, 1, stencil_width,
         maxtime, maxcycle,
         silent, output_dir, output_file,
-        write_output, write_ghosts, output_precision, merge_files, animation_step,
+        write_output, write_ghosts, write_slices, output_precision, animation_step,
         measure_time, return_data,
         use_ccall, use_threading, use_simd, use_gpu, device, block_size,
         use_MPI, is_root, rank, root_rank, 
@@ -1664,107 +1660,74 @@ function compute_domain_ranges(params::ArmonParameters)
 end
 
 #
-# Output 
+# Reading/Writing
 #
 
-function write_result_single_file(params::ArmonParameters{T}, data::ArmonData{V}, 
-        file_name::String) where {T, V <: AbstractArray{T}}
-    (; silent, nx, ny, nghost, row_length, col_length, output_dir, merge_files,
-       is_root, cart_comm, cart_coords, global_grid) = params
+function write_data_to_file(params::ArmonParameters, data::ArmonData,
+        col_range, row_range, file; direct_indexing=false, for_3D=true)
+    @indexing_vars(params)
 
-    if is_root && merge_files && params.projection == :none
-        @warn "The output is written in an uniform matrix format, which is incompatible with an non uniform grid." maxlog=1
-    end
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
 
-    MPI.Barrier(cart_comm)  # To make sure that no process opens the file before the output dir is created
+    p = params.output_precision
+    format = Printf.Format(join(repeat(["%$(p+3).$(p)f"], length(vars_to_write)), ", ") * "\n")
+    
+    for j in col_range
+        for i in row_range
+            if direct_indexing
+                idx = i + j - 1
+            else
+                idx = @i(i, j)
+            end
 
-    # Type of the view to the real array of this sub-domain (so by excluding the ghost cells)
-    local_subarray_type = MPI.Types.create_subarray((row_length, col_length), (nx, ny), (nghost, nghost), 
-        MPI.Datatype(T); rowmajor=true)
-    MPI.Types.commit!(local_subarray_type)
-
-    # A buffer for one view to the array we want to write
-    data_buffer = MPI.Buffer(data.rho, 1, local_subarray_type)
-
-    # Type of the view of this process to the global domain array 
-    (cx, cy) = cart_coords
-    subarray_type = MPI.Types.create_subarray(global_grid, (nx, ny), (cx * nx, cy * ny), 
-        MPI.Datatype(T); rowmajor=true)
-    MPI.Types.commit!(subarray_type)
-
-    # Open/Create the global file, then write our view to it
-    output_file_path = joinpath(output_dir, file_name)
-    f = MPI.File.open(cart_comm, output_file_path; write=true, create=true)
-
-    MPI.File.set_view!(f, 0, MPI.Datatype(T), subarray_type)
-    MPI.File.write_all(f, data_buffer)
-
-    if is_root
-        # Write the dimensions of the file domain to some utility files for easy gnuplot-ing
-        (g_nx, g_ny) = global_grid
-
-        open(output_file_path * "_DIM_X", "w") do f
-            println(f, g_nx)
+            Printf.format(file, format, getindex.(vars_to_write, idx)...)
         end
-
-        open(output_file_path * "_DIM_Y", "w") do f
-            println(f, g_ny)
-        end
-    end
-
-    if is_root && silent < 2
-        println("\nWrote to file " * output_file_path)
+        for_3D && println(file)  # Separate rows to use pm3d ploting with gnuplot
     end
 end
 
 
-function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V}, 
-        file_name::String; no_msg=false) where {T, V <: AbstractArray{T}}
-    (; silent, output_dir, nx, ny, cart_coords, cart_comm, is_root, nghost) = params
-    @indexing_vars(params)
+function build_file_path(params::ArmonParameters, file_name::String; no_cleanup=false)
+    (; output_dir, use_MPI, is_root, cart_coords, cart_comm) = params
 
-    output_file_path = joinpath(output_dir, file_name)
+    file_path = joinpath(output_dir, file_name)
 
-    if is_root
-        # Advanced globing to remove all files sharing the same file name
-        remove_all_outputs = "rm -f $(output_file_path)_*([0-9])x*([0-9])"
-        run(`bash -O extglob -c $remove_all_outputs`)
+    if is_root && !isdir(output_dir)
+        mkpath(output_dir)
     end
 
-    # Wait for the root command to complete
-    params.use_MPI && MPI.Barrier(cart_comm)
+    if use_MPI && !no_cleanup
+        if is_root
+            # Advanced globing to remove all files sharing the same file name
+            remove_all_outputs = "rm -f $(file_path)_*([0-9])x*([0-9])"
+            run(`bash -O extglob -c $remove_all_outputs`)
+        end
 
-    (cx, cy) = cart_coords
+        # Wait for the root command to complete
+        params.use_MPI && MPI.Barrier(cart_comm)
 
-    f = open("$(output_file_path)_$(cx)x$(cy)", "w")
-   
-    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
+        (cx, cy) = cart_coords
+        params.use_MPI && (file_path *= "_$(cx)x$(cy)")
+    end
 
-    if params.write_ghosts
-        col_range = 1-nghost:ny+nghost
-        row_range = 1-nghost:nx+nghost
-    else
+    return file_path
+end
+
+
+function write_sub_domain_file(params::ArmonParameters, data::ArmonData, file_name::String; no_msg=false)
+    (; silent, nx, ny, is_root, nghost) = params
+
+    output_file_path = build_file_path(params, file_name)
+    open(output_file_path, "w") do file
         col_range = 1:ny
         row_range = 1:nx
-    end
-
-    p = params.output_precision
-    first_format = Printf.Format("%$(p+3).$(p)f")
-    format = Printf.Format(", %$(p+3).$(p)f")
-
-    for j in col_range
-        for i in row_range
-            idx = @i(i, j)
-            Printf.format(f, first_format, vars_to_write[1][idx])
-            for var in vars_to_write[2:end]
-                Printf.format(f, format, var[idx])
-            end
-            print(f, "\n")
+        if params.write_ghosts
+            col_range = inflate(col_range, nghost)
+            row_range = inflate(row_range, nghost)
         end
-        print(f, '\n')
-    end
 
-    close(f)
+        write_data_to_file(params, data, col_range, row_range, file)
+    end
 
     if !no_msg && is_root && silent < 2
         println("\nWrote to files $(output_file_path)_*x*")
@@ -1772,56 +1735,101 @@ function write_sub_domain_file(params::ArmonParameters{T}, data::ArmonData{V},
 end
 
 
-function write_result(params::ArmonParameters{T}, data::ArmonData{V}, 
-        file_name::String) where {T, V <: AbstractArray{T}}
-    (; output_dir, merge_files, is_root) = params
+function write_slices_files(params::ArmonParameters, data::ArmonData, file_name::String; no_msg=false)
+    (; output_dir, silent, nx, ny, use_MPI, is_root, cart_comm, cart_coords) = params
 
     if is_root && !isdir(output_dir)
         mkpath(output_dir)
     end
 
-    if merge_files
-        write_result_single_file(params, data, file_name)
-    else
-        write_sub_domain_file(params, data, file_name)
-    end
-end
-
-
-function read_sub_domain_file!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        file_name::String) where {T, V <: AbstractArray{T}}
-    (; output_dir, cart_coords, nx, ny, nghost) = params
-    @indexing_vars(params)
-
-    comp_file_path = joinpath(output_dir, file_name)
+    # Wait for the root command to complete
+    use_MPI && MPI.Barrier(cart_comm)
 
     (cx, cy) = cart_coords
 
-    f = open("$(comp_file_path)_$(cx)x$(cy)", "r")
-
-    vars_to_read = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
-
-    if params.write_ghosts
-        col_range = 1-nghost:ny+nghost
-        row_range = 1-nghost:nx+nghost
-    else
-        col_range = 1:ny
-        row_range = 1:nx
-    end
-
-    for j in col_range
-        for i in row_range
-            idx = @i(i, j)
-            for var in vars_to_read[1:end-1]
-                var[idx] = parse(T, readuntil(f, ','))
-            end
-            vars_to_read[end][idx] = parse(T, readuntil(f, '\n'))
+    # First row
+    if !use_MPI || cy == 0
+        output_file_path_X = build_file_path(params, file_name * "_X")
+        open(output_file_path_X, "w") do file
+            col_range = 1:1
+            row_range = 1:nx
+            write_data_to_file(params, data, col_range, row_range, file; for_3D=false)
         end
     end
 
-    close(f)
+    # First column
+    if !use_MPI || cx == 0
+        output_file_path_Y = build_file_path(params, file_name * "_Y")
+        open(output_file_path_Y, "w") do file
+            col_range = 1:ny
+            row_range = 1:1
+            write_data_to_file(params, data, col_range, row_range, file; for_3D=false)
+        end
+    end
+
+    # Diagonal
+    if !use_MPI || cx == cy
+        output_file_path_D = build_file_path(params, file_name * "_D")
+        open(output_file_path_D, "w") do file
+            col_range = 1:1
+            row_range = params.ideb:(params.row_length+1):(params.ifin+params.row_length+1)
+            write_data_to_file(params, data, col_range, row_range, file; for_3D=false, direct_indexing=true)
+        end
+    end
+
+    if !no_msg && is_root && silent < 2
+        if params.use_MPI
+            println("Wrote slices to files $(joinpath(output_dir, file_name))_*_*x*")
+        else
+            println("Wrote slices to files $(joinpath(output_dir, file_name))_*")
+        end
+    end
 end
 
+
+function read_data_from_file(params::ArmonParameters{T}, data::ArmonData{V},
+        col_range, row_range, file; direct_indexing=false) where {T, V <: AbstractArray{T}}
+    @indexing_vars(params)
+
+    vars_to_read = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
+
+    for j in col_range
+        for i in row_range
+            if direct_indexing
+                idx = i + j - 1
+            else
+                idx = @i(i, j)
+            end
+
+            for var in vars_to_read[1:end-1]
+                var[idx] = parse(T, readuntil(file, ','))
+            end
+            vars_to_read[end][idx] = parse(T, readuntil(file, '\n'))
+        end
+    end
+end
+
+
+function read_sub_domain_file!(params::ArmonParameters, data::ArmonData, file_name::String)
+    (; nx, ny, nghost) = params
+
+    file_path = build_file_path(params, file_name; no_cleanup=true)
+
+    open(file_path, "r") do file
+        col_range = 1:ny
+        row_range = 1:nx
+        if params.write_ghosts
+            col_range = inflate(col_range, nghost)
+            row_range = inflate(row_range, nghost)
+        end
+
+        read_data_from_file(params, data, col_range, row_range, file)
+    end
+end
+
+#
+# Comparison functions
+#
 
 function compare_data(label::String, params::ArmonParameters{T}, 
         ref_data::ArmonData{V}, our_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
@@ -1902,7 +1910,7 @@ end
 
 #
 # Conservation test
-# 
+#
 
 function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, Emat, domain_mask, x, y) = data
@@ -1952,9 +1960,9 @@ function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where
     return total_mass, total_energy
 end
 
-# 
+#
 # Main time loop
-# 
+#
 
 function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         cpu_data::ArmonData{W}) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
@@ -2106,8 +2114,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         end
 
         if animation_step != 0 && (cycle - 1) % animation_step == 0
-            write_result(params, data, joinpath("anim", params.output_file) * "_" *
-                @sprintf("%03d", (cycle - 1) ÷ animation_step))
+            frame_index = (cycle - 1) ÷ animation_step
+            frame_file = joinpath("anim", params.output_file) * "_" * @sprintf("%03d", frame_index)
+            write_sub_domain_file(params, data, frame_file)
         end
     end
 
@@ -2142,9 +2151,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
     return next_dt, cycle, convert(T, 1 / grind_time), total_cycles_time
 end
 
-# 
+#
 # Main function
-# 
+#
 
 function armon(params::ArmonParameters{T}) where T
     (; silent, is_root) = params
@@ -2200,7 +2209,11 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     if params.write_output
-        write_result(params, data, params.output_file)
+        write_sub_domain_file(params, data, params.output_file)
+    end
+
+    if params.write_slices
+        write_slices_files(params, data, params.output_file)
     end
 
     sorted_time_contrib = sort(collect(total_time_contrib))

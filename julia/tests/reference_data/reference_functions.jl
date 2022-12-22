@@ -1,7 +1,8 @@
 
 using Printf
 using Test
-import .Armon: @i, @indexing_vars, ArmonData, init_test, time_loop, TestCase
+import .Armon: @i, @indexing_vars, ArmonData, TestCase, init_test, time_loop 
+import .Armon: write_data_to_file, read_data_from_file
 
 
 function get_reference_params(test::Symbol, type::Type; overriden_options...)
@@ -37,23 +38,13 @@ end
 function write_reference_data(ref_params::ArmonParameters{T}, ref_file::IO, ref_data::ArmonData{V}, 
         dt::T, cycles::Int) where {T, V <: AbstractArray{T}}
     (; nx, ny) = ref_params
-    @indexing_vars(ref_params)
 
     @printf(ref_file, "%.15f, %d\n", dt, cycles)
-    
-    vars_to_write = [ref_data.x, ref_data.y, ref_data.rho, ref_data.umat, ref_data.vmat, ref_data.pmat]
-    
-    for j in 1:ny
-        for i in 1:nx
-            idx = @i(i, j)
-            @printf(ref_file, "%.15f", vars_to_write[1][idx])
-            for var in vars_to_write[2:end]
-                @printf(ref_file, ", %.15f", var[idx])
-            end
-            println(ref_file)
-        end
-        println(ref_file)
-    end
+
+    col_range = 1:ny
+    row_range = 1:nx
+    ref_params.output_precision = 15
+    write_data_to_file(ref_params, ref_data, col_range, row_range, ref_file)
 end
 
 
@@ -65,17 +56,9 @@ function read_reference_data(ref_params::ArmonParameters{T}, ref_file::IO,
     ref_dt = parse(T, readuntil(ref_file, ','))
     ref_cycles = parse(Int, readuntil(ref_file, '\n'))
 
-    vars_to_read = [ref_data.x, ref_data.y, ref_data.rho, ref_data.umat, ref_data.vmat, ref_data.pmat]
-    
-    for j in 1:ny
-        for i in 1:nx
-            idx = @i(i, j)
-            for var in vars_to_read[1:end-1]
-                var[idx] = parse(T, readuntil(ref_file, ','))
-            end
-            vars_to_read[end][idx] = parse(T, readuntil(ref_file, '\n'))
-        end
-    end
+    col_range = 1:ny
+    row_range = 1:nx
+    read_data_from_file(ref_params, ref_data, col_range, row_range, ref_file)
 
     return ref_dt, ref_cycles
 end
