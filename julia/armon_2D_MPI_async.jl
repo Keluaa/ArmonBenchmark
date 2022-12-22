@@ -980,7 +980,7 @@ end
 
 @generic_kernel function boundaryConditions!(stencil_width::Int, stride::Int, i_start::Int, d::Int,
         u_factor::T, v_factor::T, rho::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V) where {T, V <: AbstractArray{T}}
-    @kernel_options(add_time, async, label=boundaryConditions!, no_threading)
+    @kernel_options(add_time, async, label=boundaryConditions!)
 
     idx = @index_1D_lin()
     i  = idx * stride + i_start
@@ -1002,7 +1002,7 @@ end
 
 @generic_kernel function read_border_array!(side_length::Int, nghost::Int,
         rho::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V, Emat::V, value_array::V) where V
-    @kernel_options(add_time, async, label=border_array, no_threading)
+    @kernel_options(add_time, async, label=border_array)
 
     idx = @index_2D_lin()
     itr = @iter_idx()
@@ -1022,7 +1022,7 @@ end
 
 @generic_kernel function write_border_array!(side_length::Int, nghost::Int,
         rho::V, umat::V, vmat::V, pmat::V, cmat::V, gmat::V, Emat::V, value_array::V) where V
-    @kernel_options(add_time, async, label=border_array, no_threading)
+    @kernel_options(add_time, async, label=border_array)
 
     idx = @index_2D_lin()
     itr = @iter_idx()
@@ -1140,19 +1140,21 @@ end
 
 #
 # Acoustic Riemann problem solvers
-# 
+#
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
         dt::T, range::DomainRange, label::Symbol;
-        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+        dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}}
     u = params.current_axis == X_axis ? data.umat : data.vmat
     if params.riemann == :acoustic  # 2-state acoustic solver (Godunov)
         if params.scheme == :Godunov
             step_label = "acoustic_$(label)!"
-            return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; dependencies)
+            return acoustic!(params, data, step_label, range, data.ustar, data.pstar, u; 
+                dependencies, no_threading)
         elseif params.scheme == :GAD
             step_label = "acoustic_GAD_$(label)!"
-            return acoustic_GAD!(params, data, step_label, range, dt, u, params.riemann_limiter; dependencies)
+            return acoustic_GAD!(params, data, step_label, range, dt, u, params.riemann_limiter; 
+                dependencies, no_threading)
         else
             error("Unknown acoustic scheme: ", params.scheme)
         end
@@ -1166,23 +1168,23 @@ end
 #
 
 function update_EOS!(params::ArmonParameters{T}, data::ArmonData, ::TestCase,
-        range::DomainRange, label::Symbol; dependencies=NoneEvent()) where T
+        range::DomainRange, label::Symbol; dependencies, no_threading) where T
     step_label = "update_EOS_$(label)!"
     gamma::T = 7/5
-    return update_perfect_gas_EOS!(params, data, step_label, range, gamma; dependencies)
+    return update_perfect_gas_EOS!(params, data, step_label, range, gamma; dependencies, no_threading)
 end
 
 
 function update_EOS!(params::ArmonParameters, data::ArmonData, ::Bizarrium,
-        range::DomainRange, label::Symbol; dependencies=NoneEvent())
+        range::DomainRange, label::Symbol; dependencies, no_threading)
     step_label = "update_EOS_$(label)!"
-    return update_bizarrium_EOS!(params, data, step_label, range; dependencies)
+    return update_bizarrium_EOS!(params, data, step_label, range; dependencies, no_threading)
 end
 
 
 function update_EOS!(params::ArmonParameters, data::ArmonData,
-        range::DomainRange, label::Symbol; dependencies=NoneEvent())
-    return update_EOS!(params, data, params.test, range, label; dependencies)
+        range::DomainRange, label::Symbol; dependencies=NoneEvent(), no_threading=false)
+    return update_EOS!(params, data, params.test, range, label; dependencies, no_threading)
 end
 
 #
@@ -1198,7 +1200,7 @@ end
 #
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, side::Symbol;
-        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+        dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}}
     (; row_length, nx, ny) = params
     @indexing_vars(params)
 
@@ -1233,15 +1235,16 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, sid
 
     i_start -= stride  # Adjust for the fact that `@index_1D_lin()` is 1-indexed
 
-    return boundaryConditions!(params, data, loop_range, stride, i_start, d, u_factor, v_factor; dependencies)
+    return boundaryConditions!(params, data, loop_range, stride, i_start, d, u_factor, v_factor; 
+        dependencies, no_threading)
 end
 
 #
 # Halo exchange
 #
 
-function read_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, value_array::W,
-        side::Symbol; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+function read_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, value_array::W, side::Symbol;
+        dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, nx, ny, row_length) = params
     (; tmp_comm_array) = data
     @indexing_vars(params)
@@ -1267,7 +1270,8 @@ function read_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, valu
     end
 
     range = DomainRange(main_range, inner_range)
-    event = read_border_array!(params, data, range, side_length, tmp_comm_array; dependencies)
+    event = read_border_array!(params, data, range, side_length, tmp_comm_array;
+        dependencies, no_threading)
 
     if params.use_gpu
         # Copy `tmp_comm_array` from the GPU to the CPU in `value_array`
@@ -1279,8 +1283,8 @@ function read_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, valu
 end
 
 
-function write_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, value_array::W,
-        side::Symbol; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+function write_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, value_array::W, side::Symbol;
+        dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; nghost, nx, ny, row_length) = params
     (; tmp_comm_array) = data
     @indexing_vars(params)
@@ -1315,7 +1319,8 @@ function write_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, val
     end
 
     range = DomainRange(main_range, inner_range)
-    event = write_border_array!(params, data, range, side_length, tmp_comm_array; dependencies=event)
+    event = write_border_array!(params, data, range, side_length, tmp_comm_array; 
+        dependencies=event, no_threading)
 
     return event
 end
@@ -1329,7 +1334,7 @@ end
 
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::W, axis::Axis; 
-        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+        dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     (; neighbours, cart_comm, cart_coords) = params
     # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: 
     #   https://www.open-mpi.org/faq/?category=runcuda
@@ -1368,12 +1373,15 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, hos
     for side in order
         neighbour = neighbours[side]
         if neighbour == MPI.PROC_NULL
-            prev_event = boundaryConditions!(params, data, side; dependencies=prev_event)
+            prev_event = boundaryConditions!(params, data, side;
+                dependencies=prev_event, no_threading)
         else
-            read_event = read_border_array!(params, data, comm_array, side; dependencies=prev_event)
+            read_event = read_border_array!(params, data, comm_array, side; 
+                dependencies=prev_event, no_threading)
             Event(exchange_with_neighbour, params, comm_array, neighbour, cart_comm;
                 dependencies=read_event) |> wait
-            prev_event = write_border_array!(params, data, comm_array, side)
+            prev_event = write_border_array!(params, data, comm_array, side; 
+                no_threading)
         end
     end
 
@@ -2067,18 +2075,24 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                     end
 
                     @async begin
-                        event_1 = update_EOS!(outer_params, data, 
-                            outer_lb_domain(domain_ranges), :outer; dependencies=prev_event)
-                        event_1 = update_EOS!(outer_params, data, 
-                            outer_rt_domain(domain_ranges), :outer; dependencies=event_1)
+                        # Since the other async tack is the one who should be using all the threads,
+                        # here we forcefully disable multi-threading.
+                        no_threading = true
+
+                        event_1 = update_EOS!(outer_params, data, outer_lb_domain(domain_ranges), :outer; 
+                            dependencies=prev_event, no_threading)
+                        event_1 = update_EOS!(outer_params, data, outer_rt_domain(domain_ranges), :outer; 
+                            dependencies=event_1, no_threading)
 
                         event_1 = boundaryConditions!(outer_params, data, host_array, axis; 
-                            dependencies=event_1)
+                            dependencies=event_1, no_threading)
 
                         event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
-                            outer_fluxes_lb_domain(domain_ranges), :outer; dependencies=event_1)
+                            outer_fluxes_lb_domain(domain_ranges), :outer; 
+                            dependencies=event_1, no_threading)
                         event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
-                            outer_fluxes_rt_domain(domain_ranges), :outer; dependencies=event_1)
+                            outer_fluxes_rt_domain(domain_ranges), :outer; 
+                            dependencies=event_1, no_threading)
                         wait(event_1)
                     end
                 end

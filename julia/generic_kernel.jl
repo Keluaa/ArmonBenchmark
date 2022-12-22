@@ -308,8 +308,6 @@ The possible options are:
         Adds the `step_label::String` parameter to the main kernel function, after `params` (and 
         `data` if present). `step_label` will be passed to the macros added by the `add_time` option 
         as the label for the kernel.
- - `no_threading`:
-        On the CPU kernel, disables multi-threading, leaving only SIMD.
  - `no_gpu`:
         Ignores `params.use_gpu` at runtime and only create the CPU kernel.
 
@@ -361,7 +359,6 @@ const default_kernel_options = Dict(
     :async => false,
     :dynamic_label => false,
     :label => nothing,
-    :no_threading => false,
     :no_gpu => false,
 )
 
@@ -566,17 +563,10 @@ function transform_kernel(func::Expr)
     end
 
     # Compute the switches before calling the cpu kernel
-    if options[:no_threading]
-        setup_cpu_call = quote
-            threading = KernelWithoutThreading()
-            simd      = params.use_simd      ? KernelWithSIMD()      : KernelWithoutSIMD()
-        end
-    else
-        setup_cpu_call = quote
-            threading = params.use_threading ? KernelWithThreading() : KernelWithoutThreading()
-            simd      = params.use_simd      ? KernelWithSIMD()      : KernelWithoutSIMD()
-        end 
-    end
+    setup_cpu_call = quote
+        threading = (!no_threading && params.use_threading) ? KernelWithThreading() : KernelWithoutThreading()
+        simd      = params.use_simd ? KernelWithSIMD() : KernelWithoutSIMD()
+    end 
 
     # -- GPU --
 
@@ -670,8 +660,11 @@ function transform_kernel(func::Expr)
 
     params_unpack = isempty(params_args) ? Expr(:block) : :((; $(params_args...)) = params)
  
-    # Add 'dependencies=NoneEvent()' to the keyword args of the main function
-    push!(main_def[:kwargs], :($(Expr(:kw, :dependencies, :(NoneEvent())))))
+    # Add our keyword args of the main function
+    push!(main_def[:kwargs], 
+        Expr(:kw, :dependencies, :(NoneEvent())),
+        Expr(:kw, :no_threading, false)
+    )
 
     # Build the parameter list needed to call the CPU or GPU kernel
     call_args = map(Iterators.flatten((args, def[:kwargs]))) do arg
@@ -793,7 +786,9 @@ macro was used:
     - `@index_1D_lin()` : `loop_range::OrdinalRange{Int}`
     - `@index_2D_lin()` : `main_range::OrdinalRange{Int}`, `inner_range::OrdinalRange{Int}`
  - An additionnal optional keyword argument, `dependencies` is added for compatibility with KA.jl's
-   event model. It defaults to `NoneEvent()`
+   event model. It defaults to `NoneEvent()`.
+ - Another optional keyword argument, `no_threading`, allows to override the `use_threading`
+   parameter, which can be useful in asynchronous contexts. It defaults to `false`.
 
 Using KA.jl's `@Const` to annotate arguments is supported, but they will be present only in the GPU
 kernel definition.
