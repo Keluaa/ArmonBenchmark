@@ -39,7 +39,7 @@ function write_reference_data(ref_params::ArmonParameters{T}, ref_file::IO, ref_
         dt::T, cycles::Int) where {T, V <: AbstractArray{T}}
     (; nx, ny) = ref_params
 
-    @printf(ref_file, "%.15f, %d\n", dt, cycles)
+    @printf(ref_file, "%#.15g, %d\n", dt, cycles)
 
     col_range = 1:ny
     row_range = 1:nx

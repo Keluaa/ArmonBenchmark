@@ -312,7 +312,7 @@ function ArmonParameters(;
     end
     
     if use_ccall
-        error("The C librairy only supports 1D")
+        error("The C library only supports 1D")
     end
 
     if interleaving
@@ -410,7 +410,7 @@ function ArmonParameters(;
         device = CPU()
     end
 
-    # Initialize the test
+    # Initialize the test
     if isnothing(domain_size)
         domain_size = default_domain_size(test_type)
         domain_size = Tuple(flt_type.(domain_size))
@@ -901,6 +901,7 @@ end
     end
 end
 
+
 @generic_kernel function euler_projection!(s::Int, dx::T, dt::T,
         ustar::V, rho::V, umat::V, vmat::V, Emat::V,
         advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V) where {T, V <: AbstractArray{T}}
@@ -1081,8 +1082,8 @@ end
     x[i] = g_ix / g_nx * sx + ox
     y[i] = g_iy / g_ny * sy + oy
 
-    x_mid::T = x[i] + sx / (2*g_nx)
-    y_mid::T = y[i] + sy / (2*g_ny)
+    x_mid = x[i] + sx / (2*g_nx)
+    y_mid = y[i] + sy / (2*g_ny)
 
     if test_region_high(x_mid, y_mid, test_case)
         rho[i]  = high_ρ
@@ -1699,7 +1700,7 @@ function write_data_to_file(params::ArmonParameters, data::ArmonData,
     vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
 
     p = params.output_precision
-    format = Printf.Format(join(repeat(["%$(p+3).$(p)f"], length(vars_to_write)), ", ") * "\n")
+    format = Printf.Format(join(repeat(["%#$(p+3).$(p)g"], length(vars_to_write)), ", ") * "\n")
     
     for j in col_range
         for i in row_range
@@ -1711,7 +1712,7 @@ function write_data_to_file(params::ArmonParameters, data::ArmonData,
 
             Printf.format(file, format, getindex.(vars_to_write, idx)...)
         end
-        for_3D && println(file)  # Separate rows to use pm3d ploting with gnuplot
+        for_3D && println(file)  # Separate rows to use pm3d plotting with gnuplot
     end
 end
 
@@ -1804,7 +1805,7 @@ function write_slices_files(params::ArmonParameters, data::ArmonData, file_name:
         end
     end
 
-    # Diagonal
+    # Diagonal
     if cx == cy
         output_file_path_D = build_file_path(params, file_name * "_D")
         open(output_file_path_D, "w") do file
@@ -2075,8 +2076,8 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                     end
 
                     @async begin
-                        # Since the other async tack is the one who should be using all the threads,
-                        # here we forcefully disable multi-threading.
+                        # Since the other async tack is the one who should be using all the threads,
+                        # here we forcefully disable multi-threading.
                         no_threading = true
 
                         event_1 = update_EOS!(outer_params, data, outer_lb_domain(domain_ranges), :outer; 
