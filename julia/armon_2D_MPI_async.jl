@@ -121,6 +121,7 @@ Base.show(io::IO, ::Sod_circ)  = print(io, "Sod shock tube (cylindrical symmetry
 Base.show(io::IO, ::Bizarrium) = print(io, "Bizarrium")
 Base.show(io::IO, ::Sedov)     = print(io, "Sedov")
 
+# TODO : use 0.0625 for Sod_circ since 1/8 makes no sense and is quite arbitrary
 test_region_high(x::T, _::T, ::Sod)       where T = x ≤ 0.5
 test_region_high(_::T, y::T, ::Sod_y)     where T = y ≤ 0.5
 test_region_high(x::T, y::T, ::Sod_circ)  where T = (x - T(0.5))^2 + (y - T(0.5))^2 ≤ T(0.125)
@@ -747,7 +748,7 @@ end
 
 #
 # Kernels
-# 
+#
 
 function acoustic_Godunov(ρᵢ::T, ρᵢ₋₁::T, cᵢ::T, cᵢ₋₁::T, uᵢ::T, uᵢ₋₁::T, pᵢ::T, pᵢ₋₁::T) where T
     rc_l = ρᵢ₋₁ * cᵢ₋₁
@@ -2142,7 +2143,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                 current_mass, current_energy = conservation_vars(params, data)
                 ΔM = abs(initial_mass - current_mass)     / initial_mass   * 100
                 ΔE = abs(initial_energy - current_energy) / initial_energy * 100
-                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %8.6f%%, |ΔE| = %8.6f%%\n",
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#8.6g%%, |ΔE| = %#8.6g%%\n",
                     cycle, prev_dt, t, ΔM, ΔE)
             end
         elseif silent <= 1

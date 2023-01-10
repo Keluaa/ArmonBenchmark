@@ -394,6 +394,10 @@ function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}
     options = nothing
     init_expr = Expr(:block)
 
+    # TODO: call macroexpand on the body to allow macros to customize kernels
+    #  => yes but we need to filter out some macros (like the ones from KernelAbstractions)
+    #  => maybe filter by the package which defined the macro
+
     new_body = MacroTools.postwalk(body) do expr
         if @capture(expr, @index_1D_lin())
             stmt_indexing_type = :lin_1D
@@ -418,12 +422,14 @@ function kernel_body_pass!(body::Expr, indexing_replacements::Dict{Symbol, Expr}
             elseif expr.args[1] == Symbol("@iter_idx")
                 stmt_indexing_type = :iter_idx
             elseif expr.args[1] == Symbol("@kernel_options")
+                # TODO: allow to combine options
                 options !== nothing && error("@kernel_options can only be used once per kernel.")
                 opts = expr.args[2:end]
                 filter!((opt) -> !(opt isa LineNumberNode), opts)
                 options = opts
                 return Expr(:block)
             elseif expr.args[1] == Symbol("@kernel_init")
+                # TODO: allow to combine init blocks
                 !isempty(init_expr.args) && error("@kernel_init can only be used once per kernel.")
                 init_expr = expr.args[end]
                 return Expr(:block)
@@ -513,7 +519,7 @@ function transform_kernel(func::Expr)
             for $loop_index_name in loop_range
                 $cpu_body
             end
-        end 
+        end
 
         loop_params = (:(loop_range::OrdinalRange{Int}),)
         loop_params_names = (:loop_range,)
@@ -542,7 +548,7 @@ function transform_kernel(func::Expr)
 
     cpu_def[:name] = Symbol("cpu_$func_name")  # Rename the CPU function
 
-    # Build a function for each possible combinaison of enable/disable SIMD and threading
+    # Build a function for each possible combination of enable/disable SIMD and threading
     push!(cpu_def[:args], Expr(:threading_switch), Expr(:simd_switch))  # Add two arguments to the kernel
     cpu_block = quote end
     for threading in (:with, :without), simd in (:with, :without)
@@ -566,7 +572,7 @@ function transform_kernel(func::Expr)
     setup_cpu_call = quote
         threading = (!no_threading && params.use_threading) ? KernelWithThreading() : KernelWithoutThreading()
         simd      = params.use_simd ? KernelWithSIMD() : KernelWithoutSIMD()
-    end 
+    end
 
     # -- GPU --
 
@@ -586,13 +592,13 @@ function transform_kernel(func::Expr)
     use_2D_lin = :lin_2D in used_indexing_types
     use_global_lin = :iter_idx in used_indexing_types || use_1D_lin || use_2D_lin
 
-    # KernelAbstractions parses only the first layer statements of the kernel body, and doesn't 
-    # recurse into it. Therefore in order to properly initialize the `@index` macros we store into
-    # tmp variables the result of the `@index` macro used in the loop body. Those variables can then
+    # KernelAbstractions parses only the first layer statements of the kernel body, and doesn't
+    # recurse into it. Therefore in order to properly initialize the `@index` macros we store into
+    # tmp variables the result of the `@index` macro used in the loop body. Those variables can then
     # be accessed from everywhere in the kernel body.
     indexing_init = quote
-        $(use_global_lin    ? :($var_global_lin    = @index(Global, Linear)) : Expr(:block))
-        $(use_1D_lin        ? :($var_1D_lin = $var_global_lin + i_0)         : Expr(:block))
+        $(use_global_lin ? :($var_global_lin = @index(Global, Linear)) : Expr(:block))
+        $(use_1D_lin     ? :($var_1D_lin = $var_global_lin + i_0)      : Expr(:block))
         $(use_2D_lin ? :(
                 $var_2D_lin = let
                     # We don't use multi-dimensional kernels since they are very in
@@ -608,8 +614,8 @@ function transform_kernel(func::Expr)
 
     # Adjust the GPU parameters
     if indexing_type == :lin_1D
-        # Note: For the initial index `i_0`, we substract 1 because of how the main and inner ranges 
-        # are defined, and substract 1 because of the fact that the index returned by the `@index` 
+        # Note: For the initial index `i_0`, we subtract 1 because of how the main and inner ranges
+        # are defined, and subtract 1 because of the fact that the index returned by the `@index`
         # starts at 1 and not 0.
         gpu_loop_params = (:(i_0::Int),)
         gpu_loop_params_names = (:(first(loop_range) - 2),)
@@ -756,7 +762,7 @@ function transform_kernel(func::Expr)
 end
 
 
-# TODO : parameter: fold=<struct> to fold the paramerters of the kernel into a `(; <params>) = <struct>` expression
+# TODO : parameter: fold=<struct> to fold the parameters of the kernel into a `(; <params>) = <struct>` expression
 #  + take care of the T and V in where params
 """
     @generic_kernel(function definition)
@@ -785,7 +791,7 @@ macro was used:
  - Then, depending on the indexing macro used:
     - `@index_1D_lin()` : `loop_range::OrdinalRange{Int}`
     - `@index_2D_lin()` : `main_range::OrdinalRange{Int}`, `inner_range::OrdinalRange{Int}`
- - An additionnal optional keyword argument, `dependencies` is added for compatibility with KA.jl's
+ - An additional optional keyword argument, `dependencies` is added for compatibility with KA.jl's
    event model. It defaults to `NoneEvent()`.
  - Another optional keyword argument, `no_threading`, allows to override the `use_threading`
    parameter, which can be useful in asynchronous contexts. It defaults to `false`.

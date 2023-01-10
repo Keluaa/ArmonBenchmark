@@ -82,7 +82,8 @@ outer_rt_domain(dr::DomainRanges) = dr.outer_rt
 # side, between the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed 
 # later, but only on outer right side.
 
-full_fluxes_domain(dr::DomainRanges) = expand_dir(dr.full, dr.direction, 1)
+# TODO: fix incorrect domain for GAD fluxes
+full_fluxes_domain(dr::DomainRanges) = inflate_dir(expand_dir(dr.full, dr.direction, 1), dr.direction, 1)
 inner_fluxes_domain(dr::DomainRanges) = expand_dir(dr.inner, dr.direction, 1)
 outer_fluxes_lb_domain(dr::DomainRanges) = dr.outer_lb
 outer_fluxes_rt_domain(dr::DomainRanges) = shift_dir(dr.outer_rt, dr.direction, 1)
