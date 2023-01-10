@@ -798,15 +798,10 @@ end
 
     # Second order GAD acoustic solver on the current cell
 
-    r_u₋ = (ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6)
-    r_p₋ = (pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6)
-    r_u₊ = (   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6)
-    r_p₊ = (pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6)
-
-    r_u₋ = limiter(r_u₋, LimiterType())
-    r_p₋ = limiter(r_p₋, LimiterType())
-    r_u₊ = limiter(r_u₊, LimiterType())
-    r_p₊ = limiter(r_p₊, LimiterType())
+    r_u₋ = limiter((ustar_i₊ -      u[i]) / (ustar_i -    u[i-s] + 1e-6), LimiterType())
+    r_p₋ = limiter((pstar_i₊ -   pmat[i]) / (pstar_i - pmat[i-s] + 1e-6), LimiterType())
+    r_u₊ = limiter((   u[i-s] - ustar_i₋) / (   u[i] -   ustar_i + 1e-6), LimiterType())
+    r_p₊ = limiter((pmat[i-s] - pstar_i₋) / (pmat[i] -   pstar_i + 1e-6), LimiterType())
 
     dm_l = rho[i-s] * dx
     dm_r = rho[i]   * dx
@@ -897,9 +892,9 @@ end
 
     x_[i] += dt * ustar[i] * domain_mask[i]
 
-    if i == ifin_
+    #=if i == ifin_
         x_[i+s] += dt * ustar[i+s] * domain_mask[i+s]
-    end
+    end=#
 end
 
 
@@ -933,9 +928,7 @@ end
 
     is = i
     disp = dt * ustar[i]
-    if disp > 0
-        i = i - s
-    end
+    i = ifelse(disp > 0, i - s, i)
 
     advection_ρ[is]  = disp * (rho[i]          )
     advection_uρ[is] = disp * (rho[i] * umat[i])
@@ -953,12 +946,8 @@ end
 
     is = i
     disp = dt * ustar[i]
-    if disp > 0
-        Δxₑ = -(dx - dt * ustar[i-s])
-        i = i - s
-    else
-        Δxₑ = dx + dt * ustar[i+s]
-    end
+    Δxₑ = ifelse(disp > 0, -(dx - dt * ustar[i-s]), dx + dt * ustar[i+s])
+    i = ifelse(disp > 0, i - s, i)
 
     Δxₗ₋  = dx + dt * (ustar[i]    - ustar[i-s])
     Δxₗ   = dx + dt * (ustar[i+s]  - ustar[i]  )
@@ -1086,28 +1075,18 @@ end
     x_mid = x[i] + sx / (2*g_nx)
     y_mid = y[i] + sy / (2*g_ny)
 
-    if test_region_high(x_mid, y_mid, test_case)
-        rho[i]  = high_ρ
-        Emat[i] = high_p / ((gamma - one(T)) * rho[i])
-        umat[i] = high_u
-        vmat[i] = high_v
-    else
-        rho[i]  = low_ρ
-        Emat[i] = low_p / ((gamma - one(T)) * rho[i])
-        umat[i] = low_u
-        vmat[i] = low_v
-    end
+    in_high = test_region_high(x_mid, y_mid, test_case)
+    rho[i]  = ifelse(in_high, high_ρ, low_ρ)
+    Emat[i] = ifelse(in_high, high_p, low_p) / ((gamma - one(T)) * rho[i])
+    umat[i] = ifelse(in_high, high_u, low_u)
+    vmat[i] = ifelse(in_high, high_v, low_v)
 
     # Set the domain mask to 1 if the cell should be computed or 0 otherwise
-    if single_comm_per_axis_pass
-        domain_mask[i] = (
-               (-r ≤   ix < nx+r && -r ≤   iy < ny+r)  # Include as well a ring of ghost cells...
-            && ( 0 ≤   ix < nx   ||  0 ≤   iy < ny  )  # ...while excluding the corners of the sub-domain...
-            && ( 0 ≤ g_ix < g_nx &&  0 ≤ g_iy < g_ny)  # ...and only if it is in the global domain
-        ) ? 1 : 0
-    else
-        domain_mask[i] = (0 ≤ ix < nx && 0 ≤ iy < ny) ? 1 : 0
-    end
+    is_real = ifelse(single_comm_per_axis_pass,
+        ((-r ≤ ix < nx+r) & (-r ≤ iy < ny+r)) & ((0 ≤ ix < nx) | (0 ≤ iy < ny)) & ((0 ≤ g_ix < g_nx) & (0 ≤ g_iy < g_ny)),
+        ((0 ≤ ix < nx) & (0 ≤ iy < ny))
+    )
+    domain_mask[i] = ifelse(is_real, 1, 0)
 
     # Set to zero to make sure no non-initialized values changes the result
     pmat[i] = 0

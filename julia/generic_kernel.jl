@@ -1,5 +1,11 @@
 
 const use_std_lib_threads = parse(Bool, get(ENV, "USE_STD_LIB_THREADS", "false"))
+const use_loop_vectorization = parse(Bool, get(ENV, "USE_LOOP_VEC", "false"))
+
+if use_loop_vectorization
+    using LoopVectorization
+end
+
 
 """
 Controls which multi-threading library to use.
@@ -40,7 +46,11 @@ end
 
 
 function make_simd_loop(expr::Expr; choice=:dynamic)
-    with = :(@fastmath @inbounds @simd ivdep $(expr))
+    if use_loop_vectorization
+        with = :(@turbo $(expr))
+    else
+        with = :(@fastmath @inbounds @simd ivdep $(expr))
+    end
     without = :(@inbounds $(expr))
     
     if choice == :dynamic
@@ -505,9 +515,10 @@ function transform_kernel(func::Expr)
 
     cpu_def = deepcopy(def)
 
+    # TODO: this +0 is to circumvent the fact that statements such as 'i = j' are not well supported by LoopVectorization
     cpu_body, init_expr, indexing_type, used_indexing_types, options = kernel_body_pass!(cpu_def[:body], Dict(
-        :lin_1D => quote $loop_index_name end,
-        :lin_2D => quote $loop_index_name end,
+        :lin_1D => quote $loop_index_name + 0 end,
+        :lin_2D => quote $loop_index_name + 0 end,
         :iter_idx => quote __j_iter + __i_idx end
     ), :CPU)
 
@@ -816,5 +827,10 @@ f(params, 1:10)  # GPU call
 ```
 """
 macro generic_kernel(func)
-    return transform_kernel(func)
+    try
+        return transform_kernel(func)
+    catch
+        println("Kernel generation failed while parsing function at $__source__, expanding in module $__module__")
+        rethrow()
+    end
 end
