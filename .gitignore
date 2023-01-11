@@ -5,8 +5,10 @@ plots
 plot_scripts
 sub_scripts
 jobs_output
+cmp_data
 comp_cpu_gpu/out
 .idea
+.vscode
 
 output*
 *.gif

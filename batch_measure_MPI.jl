@@ -3,7 +3,7 @@ using Printf
 using Dates
 
 @enum Device CPU CUDA ROCM
-@enum Backend Julia Kokkos
+@enum Backend Julia Kokkos CPP
 @enum Compiler GCC Clang ICC
 
 
@@ -104,6 +104,18 @@ struct KokkosParams <: BackendParams
 end
 
 
+struct CppParams <: BackendParams
+    options::Tuple{Vector{String}, String, String}
+    omp_places::String
+    omp_proc_bind::String
+    threads::Int
+    ieee_bits::Int
+    use_simd::Int
+    dimension::Int
+    compiler::Compiler
+end
+
+
 no_cluster_cmd(armon_options, nprocs) = `mpiexecjl -n $(nprocs) $(armon_options)`
 cluster_cmd(armon_options, cluster_options) = `ccc_mprun $(cluster_options) $(armon_options)`
 
@@ -119,6 +131,10 @@ required_modules = ["cuda", "rocm", "hwloc", "mpi"]
 
 julia_script_path = "./julia/run_julia.jl"
 kokkos_script_path = "./kokkos/run_kokkos.jl"
+
+cpp_omp_exe_path = "./cpp/armon.exe"
+cpp_omp_make_dir = "./cpp/"
+cpp_omp_make_target = "armon.exe"
 
 data_dir = "./data/"
 plot_scripts_dir = "./plot_scripts/"
@@ -268,6 +284,8 @@ function parse_measure_params(file_line_parser)
                     push!(backends, Julia)
                 elseif raw_backend == "kokkos"
                     push!(backends, Kokkos)
+                elseif raw_backend == "cpp"
+                    push!(backends, CPP)
                 else
                     error("Unknown backend: $raw_backend, at line $i")
                 end
@@ -598,6 +616,20 @@ function parse_combinaisons(measure::MeasureParams, cluster_params::ClusterParam
                 measure.compilers,
             )
         )
+    elseif backend == CPP
+        return Iterators.map(
+            params.CppParams(params...),
+            Iterators.product(
+                measure.armon_params,
+                measure.omp_places,
+                measure.omp_proc_bind,
+                threads,
+                measure.ieee_bits,
+                measure.use_simd,
+                measure.dimension,
+                measure.compilers,
+            )
+        )
     else
         error("Unknown backend: $backend")
     end
@@ -850,6 +882,11 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster_param
     append!(armon_options, additionnal_options)
 
     return armon_options
+end
+
+
+function run_backend(measure::MeasureParams, params::CppParams, cluster_params::ClusterParams, base_file_name::String)
+    error("NYI")  # TODO
 end
 
 

@@ -2,7 +2,7 @@
 cd(@__DIR__)
 
 if !@isdefined(Armon)
-    include("../armon_2D_MPI_async.jl")
+    include("../Armon.jl")
 end
 
 using .Armon
