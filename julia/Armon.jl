@@ -174,19 +174,19 @@ function init_test_params(p::Sedov{T}) where T
     )
 end
 
-function boundaryCondition(side::Symbol, ::Union{Sod, Bizarrium})
+function boundaryCondition(side::Symbol, ::Union{Sod, Bizarrium})::NTuple{2, Int}
     return (side == :left || side == :right) ? (-1, 1) : (1, 1)
 end
 
-function boundaryCondition(side::Symbol, ::Sod_y)
+function boundaryCondition(side::Symbol, ::Sod_y)::NTuple{2, Int}
     return (side == :left || side == :right) ? (1, 1) : (1, -1)
 end
 
-function boundaryCondition(side::Symbol, ::Sod_circ)
+function boundaryCondition(side::Symbol, ::Sod_circ)::NTuple{2, Int}
     return (side == :left || side == :right) ? (-1, 1) : (1, -1)
 end
 
-function boundaryCondition(::Symbol, ::Sedov)
+function boundaryCondition(::Symbol, ::Sedov)::NTuple{2, Int}
     return (1, 1)
 end
 
@@ -248,7 +248,6 @@ mutable struct ArmonParameters{Flt_T}
     return_data::Bool
 
     # Performance
-    use_ccall::Bool
     use_threading::Bool
     use_simd::Bool
     use_gpu::Bool
@@ -289,15 +288,14 @@ function ArmonParameters(;
         nghost = 2, nx = 10, ny = 10, stencil_width = 0,
         domain_size = nothing, origin = nothing,
         cfl = 0., Dt = 0., cst_dt = false, dt_on_even_cycles = false,
-        transpose_dims = false, axis_splitting = :Sequential,
+        axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
         write_output = true, write_ghosts = false, write_slices = false, output_precision = 6,
         animation_step = 0, 
         measure_time = true, measure_hw_counters = false,
         hw_counters_options = nothing, hw_counters_output = nothing,
-        use_ccall = false, use_threading = true, 
-        use_simd = true, interleaving = false,
+        use_threading = true, use_simd = true,
         use_gpu = false, device = :CUDA, block_size = 1024,
         use_MPI = true, px = 1, py = 1,
         single_comm_per_axis_pass = false, reorder_grid = true, 
@@ -318,18 +316,6 @@ function ArmonParameters(;
     
     if cst_dt && Dt == zero(flt_type)
         error("Dt == 0 with constant step enabled")
-    end
-    
-    if use_ccall
-        error("The C library only supports 1D")
-    end
-
-    if interleaving
-        error("No support for interleaving in 2D")
-    end
-
-    if transpose_dims
-        error("No support for axis transposition in 2D")
     end
 
     if measure_hw_counters
@@ -505,7 +491,7 @@ function ArmonParameters(;
         measure_time,
         measure_hw_counters, hw_counters_options, hw_counters_output,
         return_data,
-        use_ccall, use_threading, use_simd, use_gpu, device, block_size,
+        use_threading, use_simd, use_gpu, device, block_size,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
         single_comm_per_axis_pass, extra_ring_width, reorder_grid, comm_array_size,
@@ -519,9 +505,7 @@ function print_parameters(p::ArmonParameters{T}) where T
     println("Parameters:")
     print(" - multithreading: ", p.use_threading)
     if p.use_threading
-        if p.use_ccall
-            println(" (OMP threads: ", ENV["OMP_NUM_THREADS"], ")")
-        elseif use_std_lib_threads
+        if use_std_lib_threads
             println(" (Julia standard threads: ", Threads.nthreads(), ")")
         else
             println(" (Julia threads: ", Threads.nthreads(), ")")
@@ -530,7 +514,6 @@ function print_parameters(p::ArmonParameters{T}) where T
         println()
     end
     println(" - use_simd:   ", p.use_simd)
-    println(" - use_ccall:  ", p.use_ccall)
     print(" - use_gpu:    ", p.use_gpu)
     if p.use_gpu
         print(", ")
@@ -755,8 +738,6 @@ end
     @i(i, j)
 
 Converts the two-dimensional indexes `i` and `j` to a mono-dimensional index.
-Since the variables of `@indexing_vars` are updated whenever the arrays are transposed, this macro
-handles the transposition of the arrays.
 
 ```julia
     idx = @i(i, j)
@@ -1070,7 +1051,8 @@ end
         cart_coords::NTuple{2, Int}, global_grid::NTuple{2, Int},
         single_comm_per_axis_pass::Bool, extra_ring_width::Int,
         x::V, y::V, rho::V, Emat::V, umat::V, vmat::V, 
-        domain_mask::V, pmat::V, cmat::V, ustar::V, pstar::V,
+        domain_mask::V, pmat::V, cmat::V, ustar::V, pstar::V, 
+        gmat::V, work_array_1::V, work_array_2::V, work_array_3::V, work_array_4::V,
         test_case::Test) where {T, V <: AbstractArray{T}, Test <: TwoStateTestCase}
     @kernel_options(add_time, label=init_test, no_gpu)
 
@@ -1136,6 +1118,12 @@ end
     cmat[i] = 1  # Set to 1 as a max speed of 0 will create NaNs
     ustar[i] = 0
     pstar[i] = 0
+
+    gmat[i] = 0
+    work_array_1[i] = 0
+    work_array_2[i] = 0
+    work_array_3[i] = 0
+    work_array_4[i] = 0
 end
 
 #
@@ -1720,7 +1708,11 @@ function write_data_to_file(params::ArmonParameters, data::ArmonData,
         col_range, row_range, file; direct_indexing=false, for_3D=true)
     @indexing_vars(params)
 
-    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
+    # vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat,
+    #     data.Emat, data.cmat, data.ustar, data.pstar]
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.Emat,
+        data.pmat, data.cmat, data.gmat, data.ustar, data.pstar, 
+        data.work_array_1, data.work_array_2, data.work_array_3, data.work_array_4]
 
     p = params.output_precision
     format = Printf.Format(join(repeat(["%#$(p+3).$(p)g"], length(vars_to_write)), ", ") * "\n")
@@ -1976,6 +1968,9 @@ end
 function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where {T, V <: AbstractArray{T}}
     (; rho, Emat, domain_mask, x, y) = data
     (; ideb, ifin, dx, row_length) = params
+
+    total_mass::T = zero(T)
+    total_energy::T = zero(T)
 
     if params.use_gpu
         if params.projection == :none

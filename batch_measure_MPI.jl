@@ -31,7 +31,6 @@ mutable struct MeasureParams
     omp_places::Vector{String}
     dimension::Vector{Int}
     async_comms::Vector{Bool}
-    jl_mpi_impl::Vector{String}
     ieee_bits::Vector{Int}
     block_sizes::Vector{Int}
 
@@ -41,9 +40,8 @@ mutable struct MeasureParams
     process_grids::Vector{Vector{Int}}
     process_grid_ratios::Union{Nothing, Vector{Vector{Int}}}
     tests_list::Vector{String}
-    transpose_dims::Vector{Bool}
     axis_splitting::Vector{String}
-    armon_params::Vector{Tuple{Vector{String}, String, String}}  # Tuple: options, legend, name suffix
+    armon_params::Vector{Tuple{Vector{String}, String, String}}  # Tuple: options, legend, name suffix
 
     # Measurement params
     name::String
@@ -71,7 +69,7 @@ mutable struct MeasureParams
 end
 
 
-struct IntiParams
+struct ClusterParams
     processes::Int
     distribution::String
     node_count::Int
@@ -91,7 +89,6 @@ struct JuliaParams <: BackendParams
     use_simd::Int
     dimension::Int
     async_comms::Bool
-    jl_mpi_impl::String
 end
 
 
@@ -107,16 +104,16 @@ struct KokkosParams <: BackendParams
 end
 
 
-no_inti_cmd(armon_options, nprocs) = `mpiexecjl -n $(nprocs) $(armon_options)`
-inti_cmd(armon_options, inti_options) = `ccc_mprun $(inti_options) $(armon_options)`
+no_cluster_cmd(armon_options, nprocs) = `mpiexecjl -n $(nprocs) $(armon_options)`
+cluster_cmd(armon_options, cluster_options) = `ccc_mprun $(cluster_options) $(armon_options)`
 
 julia_options = ["-O3", "--check-bounds=no", "--project"]
-julia_options_no_inti = ["-O3", "--check-bounds=no"]
+julia_options_no_cluster = ["-O3", "--check-bounds=no"]
 armon_base_options = [
     "--write-output", "0",
     "--verbose", "2"
 ]
-max_inti_cores = 128  # Maximum number of cores in a node
+max_node_cores = 128  # Maximum number of cores in a node
 
 required_modules = ["cuda", "rocm", "hwloc", "mpi"]
 
@@ -219,15 +216,13 @@ function parse_measure_params(file_line_parser)
     jl_proc_bind = ["close"]
     omp_places = ["cores"]
     omp_proc_bind = ["close"]
-    dimension = [1]
+    dimension = [2]
     async_comms = [false]
-    jl_mpi_impl = ["async"]
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     process_grids = ["1,1"]
     process_grid_ratios = nothing
     tests_list = ["Sod"]
-    transpose_dims = [false]
     axis_splitting = ["Sequential"]
     armon_params = [[
         "--write-output", "0",
@@ -338,7 +333,7 @@ function parse_measure_params(file_line_parser)
         elseif option == "async_comms"
             async_comms = parse.(Bool, split(value, ','))
         elseif option == "jl_mpi_impl"
-            jl_mpi_impl = split(value, ',')
+            @warn "'jl_mpi_impl' option is ignored" maxlog=1
         elseif option == "cells"
             cells_list = value
         elseif option == "domains"
@@ -350,7 +345,7 @@ function parse_measure_params(file_line_parser)
         elseif option == "tests"
             tests_list = split(value, ',')
         elseif option == "transpose"
-            transpose_dims = parse.(Bool, split(value, ','))
+            @warn "'transpose' option is ignored" maxlog=1
         elseif option == "splitting"
             axis_splitting = split(value, ',')
         elseif option == "armon"
@@ -460,9 +455,9 @@ function parse_measure_params(file_line_parser)
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         create_sub_job_chain, add_reference_job, one_job_per_cell,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
-        dimension, async_comms, jl_mpi_impl, ieee_bits, block_sizes,
+        dimension, async_comms, ieee_bits, block_sizes,
         cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
-        transpose_dims, axis_splitting, params_and_legends,
+        axis_splitting, params_and_legends,
         name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose,
         use_max_threads, cst_cells_per_process, limit_to_max_mem,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
@@ -553,9 +548,9 @@ function parse_arguments()
 end
 
 
-function build_inti_combinaisons(measure::MeasureParams)
+function build_cluster_combinaisons(measure::MeasureParams)
     return Iterators.map(
-        params->IntiParams(params...),
+        params->ClusterParams(params...),
         Iterators.product(
             measure.processes,
             measure.distributions,
@@ -565,10 +560,10 @@ function build_inti_combinaisons(measure::MeasureParams)
 end
 
 
-function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams, backend::Backend)
+function parse_combinaisons(measure::MeasureParams, cluster_params::ClusterParams, backend::Backend)
     if measure.use_max_threads
-        process_per_node = inti_params.processes ÷ inti_params.node_count
-        threads_per_process = max_inti_cores ÷ process_per_node
+        process_per_node = cluster_params.processes ÷ cluster_params.node_count
+        threads_per_process = max_node_cores ÷ process_per_node
         threads = [threads_per_process]
     else
         threads = measure.threads
@@ -587,7 +582,6 @@ function parse_combinaisons(measure::MeasureParams, inti_params::IntiParams, bac
                 measure.use_simd,
                 measure.dimension,
                 measure.async_comms,
-                measure.jl_mpi_impl,
             )
         )
     elseif backend == Kokkos
@@ -614,7 +608,6 @@ function armon_combinaisons(measure::MeasureParams, dimension::Int)
     if dimension == 1
         return Iterators.product(
             measure.tests_list,
-            [false],
             ["Sequential"],
             [[1, 1]],
             [nothing]
@@ -622,7 +615,6 @@ function armon_combinaisons(measure::MeasureParams, dimension::Int)
     else
         return Iterators.product(
             measure.tests_list,
-            measure.transpose_dims,
             measure.axis_splitting,
             isnothing(measure.process_grid_ratios) ? measure.process_grids : [nothing],
             isnothing(measure.process_grid_ratios) ? [nothing] : measure.process_grid_ratios
@@ -655,17 +647,12 @@ end
 
 function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
         base_file_name::String, legend_base::String,
-        test::String, transpose_dims::Bool, axis_splitting::String, process_grid::Vector{Int})
+        test::String, axis_splitting::String, process_grid::Vector{Int})
     file_name = base_file_name * test
     if dimension == 1
         legend = "$test, $legend_base"
     else
         legend = test
-
-        if length(measure.transpose_dims) > 1
-            file_name *= transpose_dims ? "_transposed" : ""
-            legend *= transpose_dims ? "ᵀ" : ""
-        end
 
         if length(measure.axis_splitting) > 1
             file_name *= "_" * axis_splitting
@@ -684,11 +671,11 @@ function build_armon_data_file_name(measure::MeasureParams, dimension::Int,
 end
 
 
-function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::IntiParams, base_file_name::String)
+function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params::ClusterParams, base_file_name::String)
     armon_options = [
         "julia", "-t", params.threads
     ]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
+    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
     push!(armon_options, julia_script_path)
 
     if measure.device == CUDA
@@ -708,12 +695,12 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
     if measure.cst_cells_per_process
         # Scale the cells by the number of processes
         if params.dimension == 1
-            cells_list .*= inti_params.processes
+            cells_list .*= cluster_params.processes
         else
             # We need to distribute the factor along each axis, while keeping the divisibility of 
             # the cells count, since it will be divided by the number of processes along each axis.
             # Therefore we make the new values multiples of 64, but this is still not perfect.
-            scale_factor = inti_params.processes^(1/params.dimension)
+            scale_factor = cluster_params.processes^(1/params.dimension)
             cells_list = cells_list .* scale_factor
             cells_list .-= [cells .% 64 for cells in cells_list]
             cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
@@ -755,8 +742,6 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
     if params.dimension > 1
         append!(armon_options, [
             "--async-comms", params.async_comms,
-            "--mpi-impl", params.jl_mpi_impl,
-            "--transpose", join(measure.transpose_dims, ','),
             "--splitting", join(measure.axis_splitting, ','),
             "--flat-dims", measure.flatten_time_dims
         ])
@@ -770,7 +755,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
             push!(armon_options, "--proc-grid-ratio", join([
                 join(string.(ratio), ',')
                 for ratio in measure.process_grid_ratios
-                if check_ratio_for_grid(inti_params.processes, ratio)
+                if check_ratio_for_grid(cluster_params.processes, ratio)
             ], ';'))
         end
     end
@@ -782,8 +767,8 @@ function run_backend(measure::MeasureParams, params::JuliaParams, inti_params::I
 end
 
 
-function run_backend(measure::MeasureParams, params::KokkosParams, inti_params::IntiParams, base_file_name::String)
-    if inti_params.processes > 1
+function run_backend(measure::MeasureParams, params::KokkosParams, cluster_params::ClusterParams, base_file_name::String)
+    if cluster_params.processes > 1
         error("The Kokkos backend doesn't support MPI yet")
     end
 
@@ -796,7 +781,7 @@ function run_backend(measure::MeasureParams, params::KokkosParams, inti_params::
     end
 
     armon_options = Any["julia"]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
+    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
     push!(armon_options, kokkos_script_path)
 
     if measure.device == CUDA
@@ -816,12 +801,12 @@ function run_backend(measure::MeasureParams, params::KokkosParams, inti_params::
     if measure.cst_cells_per_process
         # Scale the cells by the number of processes
         if params.dimension == 1
-            cells_list .*= inti_params.processes
+            cells_list .*= cluster_params.processes
         else
             # We need to distribute the factor along each axis, while keeping the divisibility of 
             # the cells count, since it will be divided by the number of processes along each axis.
             # Therefore we make the new values multiples of 64, but this is still not perfect.
-            scale_factor = inti_params.processes^(1/params.dimension)
+            scale_factor = cluster_params.processes^(1/params.dimension)
             cells_list = cells_list .* scale_factor
             cells_list .-= [cells .% 64 for cells in cells_list]
             cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
@@ -854,7 +839,7 @@ function run_backend(measure::MeasureParams, params::KokkosParams, inti_params::
         "--verbose", (measure.verbose ? 2 : 3),
         "--compiler", params.compiler
     ])
-    
+
     if params.dimension > 1
         append!(armon_options, [
             "--splitting", join(measure.axis_splitting, ',')
@@ -868,11 +853,11 @@ function run_backend(measure::MeasureParams, params::KokkosParams, inti_params::
 end
 
 
-function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti_params::IntiParams)
+function run_backend_reference(measure::MeasureParams, params::JuliaParams, cluster_params::ClusterParams)
     armon_options = [
         "julia", "-t", params.threads
     ]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
+    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
     push!(armon_options, julia_script_path)
 
     if measure.device == CUDA
@@ -912,8 +897,6 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
     if params.dimension > 1
         append!(armon_options, [
             "--async-comms", params.async_comms,
-            "--mpi-impl", params.jl_mpi_impl,
-            "--transpose", measure.transpose_dims[1],
             "--splitting", measure.axis_splitting[1]
         ])
 
@@ -926,7 +909,7 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
             push!(armon_options, "--proc-grid-ratio", join([
                 join(string.(ratio), ',')
                 for ratio in measure.process_grid_ratios
-                if check_ratio_for_grid(inti_params.processes, ratio)
+                if check_ratio_for_grid(cluster_params.processes, ratio)
             ], ';'))
         end
     end
@@ -938,8 +921,8 @@ function run_backend_reference(measure::MeasureParams, params::JuliaParams, inti
 end
 
 
-function run_backend_reference(measure::MeasureParams, params::KokkosParams, inti_params::IntiParams)
-    if inti_params.processes > 1
+function run_backend_reference(measure::MeasureParams, params::KokkosParams, cluster_params::ClusterParams)
+    if cluster_params.processes > 1
         error("The Kokkos backend doesn't support MPI yet")
     end
 
@@ -952,7 +935,7 @@ function run_backend_reference(measure::MeasureParams, params::KokkosParams, int
     end
 
     armon_options = ["julia"]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_inti : julia_options)
+    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
     push!(armon_options, kokkos_script_path)
 
     if measure.device == CUDA
@@ -1073,11 +1056,6 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         legend *= ", $async_str"
     end
 
-    if length(measure.jl_mpi_impl) > 1
-        name *= "_$(params.jl_mpi_impl)"
-        legend *= ", MPI $(params.jl_mpi_impl)"
-    end
-
     if !isempty(params.options[2])
         legend *= ", " * params.options[2]
     end
@@ -1085,7 +1063,7 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
     if !isempty(params.options[3])
         name *= "_" * params.options[3]
     end
-    
+
     return name * "_", legend
 end
 
@@ -1117,23 +1095,23 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
     if !isempty(params.options[3])
         name *= "_" * params.options[3]
     end
-    
+
     return name * "_", legend
 end
 
 
-function build_inti_options(measure::MeasureParams, inti_params::IntiParams, threads::Int)
+function build_cluster_options(measure::MeasureParams, cluster_params::ClusterParams, threads::Int)
     if measure.create_sub_job_chain
-        # The rest of the parameters are put in the job submission script
+        # The rest of the parameters are put in the job submission script
         return [
-            "-E", "-m block:$(inti_params.distribution)"
+            "-E", "-m block:$(cluster_params.distribution)"
         ]
     else
         return [
             "-p", measure.node,
-            "-N", inti_params.node_count,                  # Number of nodes to distribute the processes to
-            "-n", inti_params.processes,                   # Number of processes
-            "-E", "-m block:$(inti_params.distribution)",  # Threads distribution
+            "-N", cluster_params.node_count,                  # Number of nodes to distribute the processes to
+            "-n", cluster_params.processes,                   # Number of processes
+            "-E", "-m block:$(cluster_params.distribution)",  # Threads distribution
             # Get the exclusive usage of the node, to make sure that Nvidia GPUs are accessible and to
             # further control threads/memory usage
             "-x",
@@ -1149,35 +1127,35 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
     plot_MPI_commands = []
     color_index = 1
     comb_i = 0
-    for inti_params in build_inti_combinaisons(measure)
-        # Marker style for the plot
+    for cluster_params in build_cluster_combinaisons(measure)
+        # Marker style for the plot
         point_type = 5
-        
-        for backend in measure.backends, parameters in parse_combinaisons(measure, inti_params, backend)
+
+        for backend in measure.backends, parameters in parse_combinaisons(measure, cluster_params, backend)
             comb_i += 1
             erase_files = comb_i > skip_first
-            
-            if parameters.threads * inti_params.processes > max_inti_cores * inti_params.node_count
+
+            if parameters.threads * cluster_params.processes > max_node_cores * cluster_params.node_count
                 continue
             end
 
-            base_file_name, legend_base = build_data_file_base_name(measure, inti_params.processes, inti_params.distribution, inti_params.node_count, parameters)
+            base_file_name, legend_base = build_data_file_base_name(measure, cluster_params.processes, cluster_params.distribution, cluster_params.node_count, parameters)
             dimension = parameters.dimension
 
-            for (test, transpose_dims, axis_splitting, process_grid, process_grid_ratio) in armon_combinaisons(measure, dimension)
+            for (test, axis_splitting, process_grid, process_grid_ratio) in armon_combinaisons(measure, dimension)
                 if dimension > 1 && isnothing(process_grid)
-                    if check_ratio_for_grid(inti_params.processes, process_grid_ratio)
-                        px, py = process_ratio_to_grid(inti_params.processes, process_grid_ratio)
+                    if check_ratio_for_grid(cluster_params.processes, process_grid_ratio)
+                        px, py = process_ratio_to_grid(cluster_params.processes, process_grid_ratio)
                     else
                         continue  # This ratio is incompatible with this process count
                     end
                     process_grid = Int[px, py]
                 end
-                
-                data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, transpose_dims, axis_splitting, process_grid)
-                
+
+                data_file_name_base, legend = build_armon_data_file_name(measure, dimension, base_file_name, legend_base, test, axis_splitting, process_grid)
+
                 legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
-                
+
                 data_file_name = data_file_name_base * ".csv"
                 erase_files && (open(data_file_name, "w") do _ end)  # Create/Clear the file
                 if measure.error_bars
@@ -1196,13 +1174,13 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
 
                 if measure.time_MPI_plot
                     MPI_plot_file_name = data_file_name_base * "_MPI_time.csv"
-                    erase_files && (open(MPI_plot_file_name, "w") do _ end)  # Create/Clear the file
+                    erase_files && (open(MPI_plot_file_name, "w") do _ end)  # Create/Clear the file
                     plot_cmd = gnuplot_MPI_plot_command_1(MPI_plot_file_name, legend, color_index, point_type)
                     push!(plot_MPI_commands, plot_cmd)
                     plot_cmd = gnuplot_MPI_plot_command_2(MPI_plot_file_name, 
                         measure.device == CPU ? ("(relative) " * legend) : (legend * " (relative)"), color_index, point_type)
                     push!(plot_MPI_commands, plot_cmd)
-                    color_index += 1  # Each line and its relative counterpart will have the same color
+                    color_index += 1  # Each line and its relative counterpart will have the same color
                 end
             end
         end
@@ -1242,21 +1220,20 @@ backend_disp_name(::JuliaParams) = "Julia"
 backend_disp_name(::KokkosParams) = "C++ Kokkos"
 
 
-function run_backend_msg(measure::MeasureParams, julia_params::JuliaParams, inti_params::IntiParams)
+function run_backend_msg(measure::MeasureParams, julia_params::JuliaParams, cluster_params::ClusterParams)
     """Running Julia with:
     - $(julia_params.threads) threads
     - threads binding: $(julia_params.jl_proc_bind), places: $(julia_params.jl_places)
     - $(julia_params.use_simd == 1 ? "with" : "without") SIMD
     - $(julia_params.dimension)D
     - $(julia_params.async_comms ? "a" : "")synchronous communications
-    - MPI $(julia_params.jl_mpi_impl) implementation
     - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
-    - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
+    - with $(cluster_params.processes) processes on $(cluster_params.node_count) nodes ($(cluster_params.distribution) distribution)
    """
 end
 
 
-function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, inti_params::IntiParams)
+function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, cluster_params::ClusterParams)
     """Running C++ Kokkos backend with:
      - $(kokkos_params.threads) threads
      - threads binding: $(kokkos_params.omp_proc_bind), places: $(kokkos_params.omp_places)
@@ -1264,65 +1241,65 @@ function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, in
      - $(kokkos_params.dimension)D
      - compiled with $(kokkos_params.compiler)
      - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
-     - with $(inti_params.processes) processes on $(inti_params.node_count) nodes ($(inti_params.distribution) distribution)
+     - with $(cluster_params.processes) processes on $(cluster_params.node_count) nodes ($(cluster_params.distribution) distribution)
     """
 end
 
 
-function run_measure(measure::MeasureParams, backend_params::BackendParams, inti_params::IntiParams, i::Int)
+function run_measure(measure::MeasureParams, backend_params::BackendParams, cluster_params::ClusterParams, i::Int)
     backend_name = backend_disp_name(backend_params)
     num_threads = backend_params.threads
 
-    if num_threads * inti_params.processes > max_inti_cores * inti_params.node_count
-        println("Skipping running $(inti_params.processes) $(backend_name) processes with $(num_threads) threads on $(inti_params.node_count) nodes.")
+    if num_threads * cluster_params.processes > max_node_cores * cluster_params.node_count
+        println("Skipping running $(cluster_params.processes) $(backend_name) processes with $(num_threads) threads on $(cluster_params.node_count) nodes.")
         return nothing, nothing
     end
 
-    if !isnothing(measure.process_grid_ratios) && !any(map(Base.Fix1(check_ratio_for_grid, inti_params.processes), measure.process_grid_ratios))
-        println("Skipping running $(inti_params.processes) $(backend_name) processes since none of the given grid ratios can entirely divide $(inti_params.processes)")
+    if !isnothing(measure.process_grid_ratios) && !any(map(Base.Fix1(check_ratio_for_grid, cluster_params.processes), measure.process_grid_ratios))
+        println("Skipping running $(cluster_params.processes) $(backend_name) processes since none of the given grid ratios can entirely divide $(cluster_params.processes)")
         return nothing, nothing
     end
 
     base_file_name, _ = build_data_file_base_name(measure, 
-        inti_params.processes, inti_params.distribution, inti_params.node_count, backend_params)
-    armon_options = run_backend(measure, backend_params, inti_params, base_file_name)
+        cluster_params.processes, cluster_params.distribution, cluster_params.node_count, backend_params)
+    armon_options = run_backend(measure, backend_params, cluster_params, base_file_name)
 
-    println(run_backend_msg(measure, backend_params, inti_params))
-    
+    println(run_backend_msg(measure, backend_params, cluster_params))
+
     if measure.create_sub_job_chain
         ref_cmd = nothing
         if measure.add_reference_job
-            ref_armon_options = run_backend_reference(measure, backend_params, inti_params)
+            ref_armon_options = run_backend_reference(measure, backend_params, cluster_params)
             if isempty(measure.node)
-                ref_cmd = no_inti_cmd(ref_armon_options, inti_params.processes)
+                ref_cmd = no_cluster_cmd(ref_armon_options, cluster_params.processes)
             else
-                inti_options = build_inti_options(measure, inti_params, num_threads)
-                ref_cmd = inti_cmd(ref_armon_options, inti_options)
+                cluster_options = build_cluster_options(measure, cluster_params, num_threads)
+                ref_cmd = cluster_cmd(ref_armon_options, cluster_options)
             end
         end
-        
+
         if measure.one_job_per_cell
             # Split '--cells-list' into their own commands
             i = findfirst(v -> v == "--cells-list", armon_options)
             cells_list = split(armon_options[i+1], backend_params.dimension == 1 ? "," : ";")
-            
+
             cmds = Cmd[]
             for cells in cells_list
                 armon_options[i+1] = cells
                 if isempty(measure.node)
-                    cmd = no_inti_cmd(armon_options, inti_params.processes)
+                    cmd = no_cluster_cmd(armon_options, cluster_params.processes)
                 else
-                    inti_options = build_inti_options(measure, inti_params, num_threads)
-                    cmd = inti_cmd(armon_options, inti_options)
+                    cluster_options = build_cluster_options(measure, cluster_params, num_threads)
+                    cmd = cluster_cmd(armon_options, cluster_options)
                 end
                 push!(cmds, cmd)
             end
         else
             if isempty(measure.node)
-                cmd = no_inti_cmd(armon_options, inti_params.processes)
+                cmd = no_cluster_cmd(armon_options, cluster_params.processes)
             else
-                inti_options = build_inti_options(measure, inti_params, num_threads)
-                cmd = inti_cmd(armon_options, inti_options)
+                cluster_options = build_cluster_options(measure, cluster_params, num_threads)
+                cmd = cluster_cmd(armon_options, cluster_options)
             end
 
             cmds = [cmd]
@@ -1331,10 +1308,10 @@ function run_measure(measure::MeasureParams, backend_params::BackendParams, inti
         return cmds, ref_cmd
     else
         if isempty(measure.node)
-            cmd = no_inti_cmd(armon_options, inti_params.processes)
+            cmd = no_cluster_cmd(armon_options, cluster_params.processes)
         else
-            inti_options = build_inti_options(measure, inti_params, num_threads)
-            cmd = inti_cmd(armon_options, inti_options)
+            cluster_options = build_cluster_options(measure, cluster_params, num_threads)
+            cmd = cluster_cmd(armon_options, cluster_options)
         end
     end
 
@@ -1354,17 +1331,17 @@ function run_measure(measure::MeasureParams, backend_params::BackendParams, inti
 end
 
 
-job_command_type = Tuple{MeasureParams, IntiParams, BackendParams, Vector{Cmd}, Union{Nothing, Cmd}}
+job_command_type = Tuple{MeasureParams, ClusterParams, BackendParams, Vector{Cmd}, Union{Nothing, Cmd}}
 
 
 function make_submission_scripts(job_commands::Vector{job_command_type})
-    # Remove all previous scripts (if any)
+    # Remove all previous scripts (if any)
     rm_sub_scripts_files = "rm -f $(sub_scripts_dir)sub_*.sh"
     run(`bash -c $rm_sub_scripts_files`)
 
     # Save each command to a submission script, which will launch the next command after the job
     # completes.
-    for (i, (measure, inti_params, backend_params, commands, ref_command)) in enumerate(job_commands)
+    for (i, (measure, cluster_params, backend_params, commands, ref_command)) in enumerate(job_commands)
         sub_script_name = sub_scripts_dir * measure.name * "_$i.sh"
         open(sub_script_name, "w") do sub_script_file
             if i < length(job_commands)
@@ -1376,7 +1353,7 @@ function make_submission_scripts(job_commands::Vector{job_command_type})
 
             print(sub_script_file, 
                 sub_script_content(measure.name, i, measure.node, 
-                    inti_params.node_count, inti_params.processes, backend_params.threads, measure.max_time,
+                    cluster_params.node_count, cluster_params.processes, backend_params.threads, measure.max_time,
                     ref_command, commands,
                     next_job_file_name))
         end
@@ -1393,7 +1370,7 @@ function setup_env()
     mkpath(sub_scripts_dir)
     mkpath(sub_scripts_output_dir)
 
-    # Clear the plots update file
+    # Clear the plots update file
     run(`truncate -s 0 $plots_update_file`)
 
     # Are we in a login node?
@@ -1423,7 +1400,7 @@ function main()
     measures, start_at, do_only, skip_first, comb_count = parse_arguments()
 
     Base.exit_on_sigint(false) # To be able to properly handle Crtl-C
-    
+
     start_time = Dates.now()
 
     job_commands = job_command_type[]
@@ -1441,7 +1418,7 @@ function main()
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
 
         if isempty(measure.node)
-            @warn "Running outside of INTI: cannot control distribution type" maxlog=1
+            @warn "Running outside of a cluster: cannot control distribution type" maxlog=1
         end
 
         # Create the files and plot script once at the beginning
@@ -1450,8 +1427,8 @@ function main()
         # For each main parameter combinaison, run a job
         comb_i = 0
         comb_c = 0
-        for inti_params in build_inti_combinaisons(measure)
-            for backend in measure.backends, backend_params in parse_combinaisons(measure, inti_params, backend)
+        for cluster_params in build_cluster_combinaisons(measure)
+            for backend in measure.backends, backend_params in parse_combinaisons(measure, cluster_params, backend)
                 comb_i += 1
                 if i == start_at && comb_i <= skip_first
                     continue
@@ -1459,10 +1436,10 @@ function main()
                     @goto end_loop
                 end
 
-                commands, ref_command = run_measure(measure, backend_params, inti_params, i)
+                commands, ref_command = run_measure(measure, backend_params, cluster_params, i)
 
                 if measure.create_sub_job_chain && !isnothing(commands)
-                    push!(job_commands, (measure, inti_params, backend_params, commands, ref_command))
+                    push!(job_commands, (measure, cluster_params, backend_params, commands, ref_command))
                 end
 
                 comb_c += 1

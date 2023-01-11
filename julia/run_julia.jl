@@ -9,13 +9,11 @@ using .VTune
 scheme = :GAD_minmod
 riemann = :acoustic
 riemann_limiter = :minmod
-iterations = 4
 nghost = 2
 cfl = 0.6
 Dt = 0.
 maxtime = 0.0
 maxcycle = 500
-euler_projection = true
 projection = :euler
 cst_dt = false
 dt_on_even_cycles = false
@@ -25,23 +23,19 @@ output_file = "output"
 write_output = false
 write_ghosts = false
 write_slices = false
-use_ccall = false
 use_threading = true
 use_simd = true
-interleaving = false
 use_gpu = false
 block_size = 1024
 gpu = :CUDA
 threads_places = :cores
 threads_proc_bind = :close
 dimension = 2
-use_temp_vars_for_projection = false
 output_precision = 6
 compare = false
 compare_ref = false
 comparison_tol = 1e-10
 
-transpose_dims = []
 axis_splitting = []
 tests = []
 cells_list = []
@@ -56,7 +50,6 @@ proc_grid_ratios = nothing
 single_comm_per_axis_pass = false
 reorder_grid = true
 async_comms = false
-mpi_impl = :async  # :sync, :async, :transpose
 
 measure_time = true
 measure_hw_counters = false
@@ -78,9 +71,7 @@ repeats = 1
 dim_index = findfirst(x->x=="--dim", ARGS)
 if !isnothing(dim_index)
     dimension = parse(Int, ARGS[dim_index+1])
-    if dimension ∉ (1, 2)
-        error("Unexpected dimension: $dimension")
-    end
+    dimension != 2 && error("Only 2D is supported for now")
     deleteat!(ARGS, [dim_index, dim_index+1])
 end
 
@@ -115,12 +106,10 @@ while i <= length(ARGS)
         global Dt = parse(Float64, ARGS[i+1])
         global i += 1
     elseif arg == "--euler"
-        global euler_projection = parse(Bool, ARGS[i+1])
-        global projection = :euler
+        @warn "'--euler' option is ignored"
         global i += 1
     elseif arg == "--projection"
         global projection = Symbol(ARGS[i+1])
-        global euler_projection = (projection != :none)
         global i += 1
     elseif arg == "--cst-dt"
         global cst_dt = parse(Bool, ARGS[i+1])
@@ -169,10 +158,10 @@ while i <= length(ARGS)
         global use_simd = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--use-ccall"
-        global use_ccall = parse(Bool, ARGS[i+1])
+        @warn "'--use-ccall' option is ignored"
         global i += 1
     elseif arg == "--interleaving"
-        global interleaving = parse(Bool, ARGS[i+1])
+        @warn "'--interleaving' option is ignored"
         global i += 1
     elseif arg == "--use-std-threads"
         use_std_threads = parse(Bool, ARGS[i+1])
@@ -191,53 +180,31 @@ while i <= length(ARGS)
 
     # GPU params
     elseif arg == "--use-gpu"
-        global use_gpu = parse(Bool, ARGS[i+1])
+        @warn "'--use-gpu' is ignored"
         global i += 1
     elseif arg == "--gpu"
         global gpu = Symbol(uppercase(ARGS[i+1]))
-        global i += 1
-        if gpu == :ROCM
-            ENV["USE_ROCM_GPU"] = "true"
-        elseif gpu == :CUDA
-            ENV["USE_ROCM_GPU"] = "false"
-        else
-            error("Unknown gpu: " * gpu)
-        end
         global use_gpu = true
+        global i += 1
     elseif arg == "--block-size"
         global block_size = parse(Int, ARGS[i+1])
-        global i += 1
-        ENV["GPU_BLOCK_SIZE"] = block_size
-
-    # 1D only params
-    elseif arg == "--iterations"
-        global iterations = parse(Int, ARGS[i+1])
         global i += 1
 
     # 2D only params
     elseif arg == "--transpose"
-        if dimension != 2
-            error("'--transpose' is 2D only")
-        end
-        global transpose_dims = parse.(Bool, split(ARGS[i+1], ','))
+        @warn "'--transpose' option is ignored"
         global i += 1
     elseif arg == "--splitting"
-        if dimension != 2
-            error("'--splitting' is 2D only")
-        end
         global axis_splitting = Symbol.(split(ARGS[i+1], ','))
         global i += 1
     elseif arg == "--flat-dims"
-        if dimension != 2
-            error("'--flat-dims' is 2D only")
-        end
         global flatten_time_dims = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--temp-vars-transpose"
-        global use_temp_vars_for_projection = parse(Bool, ARGS[i+1])
+        @warn "'--temp-vars-transpose' option is ignored"
         global i += 1
     elseif arg == "--continuous-ranges"
-        ENV["USE_CONTINUOUS_RANGES"] = parse(Bool, ARGS[i+1])
+        @warn "'--continuous-ranges' option is ignored"
         global i += 1
 
     # List params
@@ -297,7 +264,7 @@ while i <= length(ARGS)
         global async_comms = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--mpi-impl"
-        global mpi_impl = Symbol(ARGS[i+1])
+        @warn "'--mpi-impl' option is ignored"
         global i += 1
 
     # Measurements params
@@ -344,213 +311,123 @@ while i <= length(ARGS)
 end
 
 
-if use_MPI
-    if use_gpu
-        # We must select a GPU before initializing MPI
-        if gpu == :ROCM
-            error("ROCM is, for now, not MPI aware")
-        end
-
-        # If SLURM is used to dispatch jobs, we can use the local ID of the process to uniquely 
-        # assign the GPUs to each process.
-        gpu_index = parse(Int, get(ENV, "SLURM_LOCALID", "-1"))
-        if gpu_index == -1
-            @warn "SLURM_LOCALID is not defined. GPU device defaults to 0. All processes on the same node will use the same GPU." maxlog=1
-            gpu_index = 0
-        end
-
-        using CUDA
-        gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
-        CUDA.device!(gpu_index)
+if use_gpu
+    # We must select a GPU before initializing MPI
+    if gpu == :ROCM
+        error("ROCM is, for now, not MPI aware")
     end
 
-    using MPI
-    MPI.Init()
-
-    rank = MPI.Comm_rank(MPI.COMM_WORLD)
-    global_size = MPI.Comm_size(MPI.COMM_WORLD)
-    is_root = rank == 0
-    if is_root
-        println("Using MPI with $global_size processes")
-        loading_start_time = time_ns()
+    # If SLURM is used to dispatch jobs, we can use the local ID of the process to uniquely 
+    # assign the GPUs to each process.
+    gpu_index = parse(Int, get(ENV, "SLURM_LOCALID", "-1"))
+    if gpu_index == -1
+        @warn "SLURM_LOCALID is not defined. GPU device defaults to 0. All processes on the same node will use the same GPU." maxlog=1
+        gpu_index = 0
     end
 
-    if dimension == 1
-        include("armon_1D_MPI.jl")
-    elseif mpi_impl == :sync
-        include("armon_2D_MPI.jl")
-    elseif mpi_impl == :async
-        include("armon_2D_MPI_async.jl")
-    elseif mpi_impl == :transpose
-        include("armon_2D_MPI_transposition.jl")
-    else
-        error("Unknown Julia 2D MPI implementation: $mpi_impl")
-    end
-    using .Armon
+    using CUDA
+    gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
+    CUDA.device!(gpu_index)
+end
 
-    # Create a communicator for each node of the MPI world
-    node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.COMM_TYPE_SHARED, rank)
+using MPI
+MPI.Init()
 
-    # Get the rank and the number of processes running on the same node
-    local_rank = MPI.Comm_rank(node_local_comm)
-    local_size = MPI.Comm_size(node_local_comm)
-
-    # Pin the threads on the node with no overlap with the other processes running on the same node
-    thread_offset = local_rank * Threads.nthreads()
-    omp_bind_threads(thread_offset, threads_places, threads_proc_bind)
-
-    if verbose_MPI || !isempty(file_MPI_dump)
-        # Call 'MPI_Get_processor_name', which is not exposed by MPI.jl, in order to get the name of
-        # the node on which the current process is running.
-        raw_node_name = Vector{UInt8}(undef, 256)  # MPI_MAX_PROCESSOR_NAME == 256
-        len = Ref{Cint}()
-        #= MPI.@mpichk =# ccall((:MPI_Get_processor_name, MPI.libmpi), Cint, (Ptr{Cuchar}, Ptr{Cint}), raw_node_name, len)
-        node_name = unsafe_string(pointer(raw_node_name), len[])
-
-        using ThreadPinning  # To use threadinfo() and getcpuids()
-        
-        if !isempty(file_MPI_dump)
-            is_root && println("Writing MPI process info to $file_MPI_dump...")
-            # Write the debug info to the file, ordered by process rank
-            mpi_info_file = MPI.File.open(MPI.COMM_WORLD, file_MPI_dump; write=true)
-
-            info_line_length = 300
-            cores_line_length = 10+512
-            proc_offset = info_line_length + cores_line_length + 2
-
-            if use_gpu
-                info_line = @sprintf("%4d: local %-2d/%2d (gpu %s) in node %s", rank, local_rank+1, local_size, string(CUDA.uuid(CUDA.device()))[1:8], node_name)
-            else
-                info_line = @sprintf("%4d: local %-2d/%2d in node %s", rank, local_rank+1, local_size, node_name)
-            end
-            
-            cores_line = Vector{String}()
-            push!(cores_line, " - cores: ")
-            for tid in getcpuids()
-                push!(cores_line, @sprintf("%4d", tid))
-            end
-            cores_line = reduce(*, cores_line)
-
-            info_line = @sprintf("%-300s\n", info_line[1:min(length(info_line), info_line_length)])
-            cores_line = @sprintf("%-522s\n", cores_line[1:min(length(cores_line), cores_line_length)])
-            proc_info_lines = info_line * cores_line
-
-            MPI.File.write_at_all(mpi_info_file, proc_offset * rank, proc_info_lines)
-        end
-
-        if verbose_MPI
-            is_root && println("Processes info:")
-            # Print the debug info in order, one process at a time
-            for i in 1:global_size
-                if i == rank+1
-                    if use_gpu
-                        @printf(" - %-4d: local %-2d/%2d (gpu %s) in node %s\n", rank, local_rank+1, local_size, string(CUDA.uuid(CUDA.device()))[1:8], node_name)
-                    else
-                        @printf(" - %-4d: local %-2d/%2d in node %s\n", rank, local_rank+1, local_size, node_name)
-                    end
-                    threadinfo(; color=false, blocksize=64)
-                end
-                MPI.Barrier(MPI.COMM_WORLD)
-            end
-        end
-    end
-
-    if dimension == 1
-        function build_params(test, cells; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
-                axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, test, riemann, scheme, iterations, nghost, nbcell=cells, cfl, Dt, euler_projection,
-                cst_dt, maxtime, maxcycle, silent, write_output,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu, use_MPI)
-        end
-    elseif mpi_impl == :async
-        function build_params(test, domain; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
-                axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, projection, riemann_limiter,
-                nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
-                test=test, nx=domain[1], ny=domain[2],
-                transpose_dims, axis_splitting, 
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, write_slices, output_precision, 
-                measure_time,
-                use_ccall, use_threading, use_simd, use_gpu, device=gpu, block_size, use_MPI, px, py, 
-                single_comm_per_axis_pass, reorder_grid, async_comms,
-                compare, is_ref=compare_ref, comparison_tolerance=comparison_tol)
-        end
-    elseif mpi_impl == :transpose
-        function build_params(test, domain; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
-                axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
-                test=test, nx=domain[1], ny=domain[2],
-                euler_projection, transpose_dims, axis_splitting, 
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
-                measure_time, measure_hw_counters, hw_counters_options, hw_counters_output=hw_counters_output_file,
-                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py, 
-                single_comm_per_axis_pass, reorder_grid, async_comms, use_temp_vars_for_projection)
-        end
-    elseif mpi_impl == :sync
-        function build_params(test, domain; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims,
-                axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu,
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
-                test=test, nx=domain[1], ny=domain[2],
-                euler_projection, transpose_dims=false, axis_splitting,
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts, 
-                measure_time, measure_hw_counters, hw_counters_options, hw_counters_output=hw_counters_output_file,
-                use_ccall, use_threading, use_simd, use_gpu, use_MPI, px, py,
-                single_comm_per_axis_pass, reorder_grid)
-        end
-    end
-else
+rank = MPI.Comm_rank(MPI.COMM_WORLD)
+global_size = MPI.Comm_size(MPI.COMM_WORLD)
+is_root = rank == 0
+if is_root
+    println("Using MPI with $global_size processes")
     loading_start_time = time_ns()
+end
+
+include("Armon.jl")
+using .Armon
+
+# Create a communicator for each node of the MPI world
+node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.COMM_TYPE_SHARED, rank)
+
+# Get the rank and the number of processes running on the same node
+local_rank = MPI.Comm_rank(node_local_comm)
+local_size = MPI.Comm_size(node_local_comm)
+
+# Pin the threads on the node with no overlap with the other processes running on the same node
+thread_offset = local_rank * Threads.nthreads()
+omp_bind_threads(thread_offset, threads_places, threads_proc_bind)
+
+if verbose_MPI || !isempty(file_MPI_dump)
+    # Call 'MPI_Get_processor_name', which is not exposed by MPI.jl, in order to get the name of
+    # the node on which the current process is running.
+    raw_node_name = Vector{UInt8}(undef, 256)  # MPI_MAX_PROCESSOR_NAME == 256
+    len = Ref{Cint}()
+    #= MPI.@mpichk =# ccall((:MPI_Get_processor_name, MPI.libmpi), Cint, (Ptr{Cuchar}, Ptr{Cint}), raw_node_name, len)
+    node_name = unsafe_string(pointer(raw_node_name), len[])
+
+    using ThreadPinning  # To use threadinfo() and getcpuids()
     
-    if dimension == 1
-        include("armon_1D.jl")
-    else
-        include("armon_2D.jl")
-    end
-    using .Armon
+    if !isempty(file_MPI_dump)
+        is_root && println("Writing MPI process info to $file_MPI_dump...")
+        # Write the debug info to the file, ordered by process rank
+        mpi_info_file = MPI.File.open(MPI.COMM_WORLD, file_MPI_dump; write=true)
 
-    global_size = 1
-    is_root = true
+        info_line_length = 300
+        cores_line_length = 10+512
+        proc_offset = info_line_length + cores_line_length + 2
 
-    if !use_gpu
-        omp_bind_threads(threads_places, threads_proc_bind)
-    end
-
-    if dimension == 1
-        function build_params(test, cells; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
-                axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu, 
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, iterations, cfl, Dt, cst_dt, 
-                test=test, nbcell=cells,
-                euler_projection, maxtime, maxcycle, silent, output_file, write_output,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu)
+        if use_gpu
+            info_line = @sprintf("%4d: local %-2d/%2d (gpu %s) in node %s", rank, local_rank+1, local_size, string(CUDA.uuid(CUDA.device()))[1:8], node_name)
+        else
+            info_line = @sprintf("%4d: local %-2d/%2d in node %s", rank, local_rank+1, local_size, node_name)
         end
-    else
-        function build_params(test, domain; 
-                ieee_bits, riemann, scheme, iterations, cfl, Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims, 
-                axis_splitting, maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file,
-                use_ccall, use_threading, use_simd, interleaving, use_gpu,
-                use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
-            return ArmonParameters(; ieee_bits, riemann, scheme, nghost, cfl, Dt, cst_dt, 
-                test=test, nx=domain[1], ny=domain[2],
-                euler_projection, transpose_dims, axis_splitting, 
-                maxtime, maxcycle, silent, output_file, write_output, write_ghosts,
-                use_ccall, use_threading, use_simd, use_gpu)
+        
+        cores_line = Vector{String}()
+        push!(cores_line, " - cores: ")
+        for tid in getcpuids()
+            push!(cores_line, @sprintf("%4d", tid))
+        end
+        cores_line = reduce(*, cores_line)
+
+        info_line = @sprintf("%-300s\n", info_line[1:min(length(info_line), info_line_length)])
+        cores_line = @sprintf("%-522s\n", cores_line[1:min(length(cores_line), cores_line_length)])
+        proc_info_lines = info_line * cores_line
+
+        MPI.File.write_at_all(mpi_info_file, proc_offset * rank, proc_info_lines)
+    end
+
+    if verbose_MPI
+        is_root && println("Processes info:")
+        # Print the debug info in order, one process at a time
+        for i in 1:global_size
+            if i == rank+1
+                if use_gpu
+                    @printf(" - %-4d: local %-2d/%2d (gpu %s) in node %s\n", rank, local_rank+1, local_size, string(CUDA.uuid(CUDA.device()))[1:8], node_name)
+                else
+                    @printf(" - %-4d: local %-2d/%2d in node %s\n", rank, local_rank+1, local_size, node_name)
+                end
+                threadinfo(; color=false, blocksize=64)
+            end
+            MPI.Barrier(MPI.COMM_WORLD)
         end
     end
+end
+
+
+function build_params(test, domain; 
+        ieee_bits, riemann, scheme, cfl, Dt, cst_dt, dt_on_even_cycles, 
+        axis_splitting, maxtime, maxcycle, 
+        silent, output_file, write_output, hw_counters_output_file,
+        use_threading, use_simd, use_gpu, 
+        use_MPI, px, py, single_comm_per_axis_pass, reorder_grid, async_comms)
+    return ArmonParameters(;
+        ieee_bits, riemann, scheme, projection, riemann_limiter,
+        nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
+        test=test, nx=domain[1], ny=domain[2],
+        axis_splitting, 
+        maxtime, maxcycle, silent, output_file, write_output, write_ghosts, write_slices, output_precision, 
+        measure_time, measure_hw_counters, hw_counters_options, hw_counters_output=hw_counters_output_file,
+        use_threading, use_simd, use_gpu, device=gpu, block_size, use_MPI, px, py, 
+        single_comm_per_axis_pass, reorder_grid, async_comms,
+        compare, is_ref=compare_ref, comparison_tolerance=comparison_tol)
 end
 
 
@@ -560,12 +437,6 @@ if use_gpu && is_root
     else
         println("Using CUDA GPU")
     end
-end
-
-
-if dimension == 1
-    transpose_dims = [false]
-    axis_splitting = [:Sequential]
 end
 
 
@@ -653,12 +524,7 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
     for i in 1:repeats
         with_profiling && @resume_profiling()
         
-        if mpi_impl == :async
-            _, cycles, cells_per_sec, time_contrib, async_efficiency = armon(params)
-        else
-            _, cycles, cells_per_sec, time_contrib = armon(params)
-            async_efficiency = 0.
-        end
+        _, cycles, cells_per_sec, time_contrib, async_efficiency = armon(params)
 
         with_profiling && @pause_profiling()
         vals_cells_per_sec[i] = cells_per_sec
@@ -678,13 +544,12 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
 end
 
 
-function do_measure(data_file_name, hw_c_file_name, test, cells, transpose, splitting)
+function do_measure(data_file_name, hw_c_file_name, test, cells, splitting)
     params = build_params(test, cells; 
-        ieee_bits, riemann, scheme, iterations, cfl, 
-        Dt, cst_dt, dt_on_even_cycles=false, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
+        ieee_bits, riemann, scheme, cfl, 
+        Dt, cst_dt, dt_on_even_cycles=false, axis_splitting=splitting,
         maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file=hw_c_file_name,
-        use_ccall, use_threading, use_simd,
-        interleaving, use_gpu,
+        use_threading, use_simd, use_gpu,
         use_MPI=false, px=0, py=0,
         single_comm_per_axis_pass=false, reorder_grid=false, async_comms=false
     )
@@ -693,8 +558,7 @@ function do_measure(data_file_name, hw_c_file_name, test, cells, transpose, spli
         @printf(" - %s, %11g cells: ", test, cells)
     else
         @printf(" - %-4s %-14s %11g cells (%5gx%-5g): ", 
-            string(test) * (transpose ? "ᵀ" : ""),
-            string(splitting), cells[1] * cells[2], cells[1], cells[2])
+            string(test), string(splitting), cells[1] * cells[2], cells[1], cells[2])
     end
 
     if limit_to_max_mem
@@ -736,24 +600,21 @@ function do_measure(data_file_name, hw_c_file_name, test, cells, transpose, spli
 end
 
 
-function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, cells, transpose, splitting, px, py)
+function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, cells, splitting, px, py)
     if is_root
         if dimension == 1
             @printf(" - %s, %11g cells: ", test, cells)
         else
             @printf(" - (%2dx%-2d) %-4s %-14s %11g cells (%5gx%-5g): ", 
-                px, py,
-                string(test) * (transpose ? "ᵀ" : ""),
-                string(splitting), cells[1] * cells[2], cells[1], cells[2])
+                px, py, string(test), string(splitting), cells[1] * cells[2], cells[1], cells[2])
         end
     end
 
     params = build_params(test, cells; 
-        ieee_bits, riemann, scheme, iterations, cfl, 
-        Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims=transpose, axis_splitting=splitting,
+        ieee_bits, riemann, scheme, cfl, 
+        Dt, cst_dt, dt_on_even_cycles, axis_splitting=splitting,
         maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file=hw_c_file_name,
-        use_ccall, use_threading, use_simd,
-        interleaving, use_gpu,
+        use_threading, use_simd, use_gpu,
         use_MPI, px, py,
         single_comm_per_axis_pass, reorder_grid, async_comms
     )
@@ -849,11 +710,8 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
                 end
             end
 
-            @printf(", %5.1f%% of MPI time", total_MPI_time / total_time * 100)
-
-            if mpi_impl == :async
-                @printf(" (async: %5.1f%%)", async_efficiency * 100)
-            end
+            @printf(", %5.1f%% of MPI time (async: %5.1f%%)",
+                total_MPI_time / total_time * 100, async_efficiency * 100)
         end
 
         @printf(" %s\n", get_duration_string(duration))
@@ -886,21 +744,24 @@ if is_root
     compile_start_time = time_ns()
 end
 
-for test in tests, transpose in transpose_dims
+
+for test in tests
     # We redirect stdout so that in case 'silent < 5', output functions are pre-compiled and so they 
     # don't influence the timing results.
     # 'devnull' is not used here since 'println' and others will not go through their normal code paths.
     dummy_pipe = Pipe()
     redirect_stdout(dummy_pipe) do
         run_armon(build_params(test, dimension == 1 ? 10000 : (240*proc_domains[1][1], 240*proc_domains[1][2]);
-            ieee_bits, riemann, scheme, iterations, cfl, 
-            Dt, cst_dt, dt_on_even_cycles, euler_projection, transpose_dims=transpose, axis_splitting=axis_splitting[1], 
-            maxtime, maxcycle=10, silent, output_file, write_output=false, hw_counters_output_file="", use_ccall, use_threading, use_simd, 
-            interleaving, use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
+            ieee_bits, riemann, scheme, cfl, 
+            Dt, cst_dt, dt_on_even_cycles, axis_splitting=axis_splitting[1], 
+            maxtime, maxcycle=10, silent, output_file, write_output=false, hw_counters_output_file="",
+            use_threading, use_simd, 
+            use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
             single_comm_per_axis_pass, reorder_grid, async_comms
         ), false)
     end
 end
+
 
 if is_root
     compile_end_time = time_ns()
@@ -908,7 +769,7 @@ if is_root
 end
 
 
-for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px, py) in proc_domains
+for test in tests, splitting in axis_splitting, (px, py) in proc_domains
     if isempty(base_file_name)
         data_file_name = ""
         hist_file_name = ""
@@ -921,10 +782,6 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px
         hw_c_file_name = base_file_name * string(test) * "_hw_counters.csv"
     else
         data_file_name = base_file_name * string(test)
-
-        if length(transpose_dims) > 1
-            data_file_name *= transpose ? "_transposed" : ""
-        end
 
         if length(axis_splitting) > 1
             data_file_name *= "_" * string(splitting)
@@ -944,9 +801,9 @@ for test in tests, transpose in transpose_dims, splitting in axis_splitting, (px
 
     for cells in cells_list
         if use_MPI
-            time_contrib = do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, cells, transpose, splitting, px, py)
+            time_contrib = do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, cells, splitting, px, py)
         else
-            time_contrib = do_measure(data_file_name, hw_c_file_name, test, cells, transpose, splitting)
+            time_contrib = do_measure(data_file_name, hw_c_file_name, test, cells, splitting)
         end
 
         if is_root
