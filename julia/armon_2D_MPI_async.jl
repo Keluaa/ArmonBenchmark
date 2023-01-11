@@ -33,6 +33,10 @@ end
 include("vtune_lib.jl")
 using .VTune
 
+# Hardware counters measurements
+
+include("perf_utils.jl")
+
 #
 # Axis enum
 #
@@ -238,6 +242,9 @@ mutable struct ArmonParameters{Flt_T}
     output_precision::Int
     animation_step::Int
     measure_time::Bool
+    measure_hw_counters::Bool
+    hw_counters_options::String
+    hw_counters_output::String
     return_data::Bool
 
     # Performance
@@ -287,7 +294,8 @@ function ArmonParameters(;
         silent = 0, output_dir = ".", output_file = "output",
         write_output = true, write_ghosts = false, write_slices = false, output_precision = 6,
         animation_step = 0, 
-        measure_time = true,
+        measure_time = true, measure_hw_counters = false,
+        hw_counters_options = nothing, hw_counters_output = nothing,
         use_ccall = false, use_threading = true, 
         use_simd = true, interleaving = false,
         use_gpu = false, device = :CUDA, block_size = 1024,
@@ -322,6 +330,15 @@ function ArmonParameters(;
 
     if transpose_dims
         error("No support for axis transposition in 2D")
+    end
+
+    if measure_hw_counters
+        use_gpu && error("Hardware counters are not supported on GPU")
+        async_comms && error("Hardware counters in an asynchronous context are NYI")
+        !measure_time && error("Hardware counters are only done when timings are measured as well")
+
+        hw_counters_options = @something hw_counters_options default_perf_options()
+        hw_counters_output = @something hw_counters_output ""
     end
 
     min_nghost = 1
@@ -485,7 +502,9 @@ function ArmonParameters(;
         maxtime, maxcycle,
         silent, output_dir, output_file,
         write_output, write_ghosts, write_slices, output_precision, animation_step,
-        measure_time, return_data,
+        measure_time,
+        measure_hw_counters, hw_counters_options, hw_counters_output,
+        return_data,
         use_ccall, use_threading, use_simd, use_gpu, device, block_size,
         use_MPI, is_root, rank, root_rank, 
         proc_size, (px, py), C_COMM, (cx, cy), neighbours, (g_nx, g_ny),
@@ -557,6 +576,9 @@ function print_parameters(p::ArmonParameters{T}) where T
     println(" - comms per axis: ", p.single_comm_per_axis_pass ? 1 : 2)
     println(" - asynchronous communications: ", p.async_comms)
     println(" - measure step times: ", p.measure_time)
+    if p.measure_hw_counters
+        println(" - hardware counters measured: ", p.hw_counters_options)
+    end
     println()
     if p.write_output
         println(" - write output: ", p.write_output, " (precision: ", p.output_precision, " digits)")
@@ -840,7 +862,7 @@ end
     i = @index_2D_lin()
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
-    # "Dissipative issue of high-order shock capturing schemes wtih non-convex equations of state"
+    # "Dissipative issue of high-order shock capturing schemes with non-convex equations of state"
     # JCP 2009
 
     @kernel_init begin
@@ -1702,7 +1724,7 @@ function write_data_to_file(params::ArmonParameters, data::ArmonData,
 
     p = params.output_precision
     format = Printf.Format(join(repeat(["%#$(p+3).$(p)g"], length(vars_to_write)), ", ") * "\n")
-    
+
     for j in col_range
         for i in row_range
             if direct_indexing
@@ -2301,6 +2323,19 @@ function armon(params::ArmonParameters{T}) where T
 
         @printf("\nAsynchronicity efficiency: %.2f sec / %.2f sec = %.2f%% (effective time / total steps time)\n",
             total_time / 1e9, sync_total_time / 1e9, total_time / sync_total_time * 100)
+    end
+
+    if is_root && params.measure_hw_counters && !isempty(axis_hw_counters)
+        sorted_counters = sort(collect(axis_hw_counters); lt=(a, b)->(a[1] < b[1]))
+        sorted_counters = map((p)->(string(first(p)) => last(p)), sorted_counters)
+        if params.silent < 3
+            print_hardware_counters_table(stdout, params.hw_counters_options, sorted_counters)
+        end
+        if !isempty(params.hw_counters_output)
+            open(params.hw_counters_output, "w") do file
+                print_hardware_counters_table(file, params.hw_counters_options, sorted_counters; raw_print=true)
+            end
+        end
     end
 
     if params.return_data

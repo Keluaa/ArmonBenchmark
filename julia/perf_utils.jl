@@ -135,7 +135,11 @@ function print_hardware_counters_table(io::IO, hw_counters_options::String,
             push!(row, step_name)
 
             for event in events
-                push!(row, step_counters[event].value)
+                if haskey(step_counters, event)
+                    push!(row, step_counters[event].value)
+                else
+                    push!(row, "") 
+                end
             end
 
             push!(data, row)

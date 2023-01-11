@@ -1,8 +1,11 @@
 
 in_warmup_cycle = false
-set_warmup(b::Bool) = in_warmup_cycle = b
+set_warmup(b::Bool) = global in_warmup_cycle = b
 is_warming_up()::Bool = in_warmup_cycle
 
+#
+# Timings storage
+#
 
 axis_time_contrib = Dict{Axis, Dict{String, Float64}}()
 total_time_contrib = Dict{String, Float64}()
@@ -35,9 +38,42 @@ function add_axis_time(axis, label, time)
 end
 
 
+#
+# Hardware counters storage
+#
+
+axis_hw_counters = nothing
+const hw_counters_lock = ReentrantLock()
+
+
+function init_hw_counter(axis, label)
+    inner_dict_type = Dict{LinuxPerf.EventType, LinuxPerf.Counter}
+    lock(hw_counters_lock) do
+        if isnothing(axis_hw_counters)
+            global axis_hw_counters = Dict{Axis, Dict{String, inner_dict_type}}()
+        end
+        if !haskey(axis_hw_counters, axis)
+            global axis_hw_counters[axis] = Dict{String, inner_dict_type}()
+        end
+        if !haskey(axis_hw_counters[axis], label)
+            global axis_hw_counters[axis][label] = inner_dict_type()
+        end
+    end
+    return
+end
+
+#
+# Macros 
+#
+
 function build_time_expr(label, common_time_only, expr; use_wait=true, exclude_from_total=false)
     return esc(quote
         if params.measure_time && !is_warming_up()
+            if params.measure_hw_counters
+                var"_$(label)_hw" = init_bench(params.hw_counters_options)
+                enable_bench(var"_$(label)_hw")
+            end
+
             @static if $(use_wait)
                 var"_$(label)_res"   = $(expr)
                 var"_$(label)_time"  = @elapsed wait(var"_$(label)_res")
@@ -49,6 +85,12 @@ function build_time_expr(label, common_time_only, expr; use_wait=true, exclude_f
                 var"_$(label)_time"  = var"_$(label)_end" - var"_$(label)_start"
             end
 
+            if params.measure_hw_counters
+                disable_bench(var"_$(label)_hw")
+                var"_$(label)_hw_stats" = close_bench(var"_$(label)_hw") |> reduce_threads_stats!
+                sum_stats!(axis_hw_counters[$(common_time_only) ? X_axis : params.current_axis][$(label)], var"_$(label)_hw_stats")
+            end
+
             @static if $(!common_time_only)
                 add_axis_time(params.current_axis, $(label), var"_$(label)_time")
             end
@@ -57,6 +99,9 @@ function build_time_expr(label, common_time_only, expr; use_wait=true, exclude_f
             end
             
             var"_$(label)_res"
+        elseif params.measure_hw_counters && is_warming_up()
+            init_hw_counter(params.current_axis, $(label))
+            $(expr)
         else
             $(expr)
         end
