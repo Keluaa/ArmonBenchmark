@@ -18,6 +18,7 @@ export ArmonParameters, armon
 # Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
 # Bug: fix dtCFL on AMDGPU
+# Bug: steps are not properly categorized and filtered at the output, giving wrong asynchronicity efficiency
 
 # MPI Init
 
@@ -285,13 +286,13 @@ function ArmonParameters(;
         ieee_bits = 64,
         test = :Sod, riemann = :acoustic, scheme = :GAD_minmod, projection = :euler,
         riemann_limiter = :minmod,
-        nghost = 2, nx = 10, ny = 10, stencil_width = 0,
+        nghost = 2, nx = 10, ny = 10, stencil_width = nothing,
         domain_size = nothing, origin = nothing,
         cfl = 0., Dt = 0., cst_dt = false, dt_on_even_cycles = false,
         axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
-        write_output = true, write_ghosts = false, write_slices = false, output_precision = 6,
+        write_output = false, write_ghosts = false, write_slices = false, output_precision = 6,
         animation_step = 0, 
         measure_time = true, measure_hw_counters = false,
         hw_counters_options = nothing, hw_counters_output = nothing,
@@ -325,6 +326,9 @@ function ArmonParameters(;
 
         hw_counters_options = @something hw_counters_options default_perf_options()
         hw_counters_output = @something hw_counters_output ""
+    else
+        hw_counters_options = ""
+        hw_counters_output = ""
     end
 
     min_nghost = 1
@@ -340,7 +344,7 @@ function ArmonParameters(;
         error("The dimensions of the global domain ($nx x $ny) are not divisible by the number of processors ($px x $py)")
     end
 
-    if stencil_width == 0
+    if isnothing(stencil_width)
         stencil_width = min_nghost
     elseif stencil_width < min_nghost
         @warn "The detected minimum stencil width is $min_nghost, but $stencil_width was given. \
@@ -366,6 +370,8 @@ function ArmonParameters(;
 
     # MPI
     if use_MPI
+        !MPI.Initialized() && error("'use_mpi=true' but MPI has not yet been initialized")
+
         rank = MPI.Comm_rank(COMM)
         proc_size = MPI.Comm_size(COMM)
 
@@ -1052,7 +1058,6 @@ end
         single_comm_per_axis_pass::Bool, extra_ring_width::Int,
         x::V, y::V, rho::V, Emat::V, umat::V, vmat::V, 
         domain_mask::V, pmat::V, cmat::V, ustar::V, pstar::V, 
-        gmat::V, work_array_1::V, work_array_2::V, work_array_3::V, work_array_4::V,
         test_case::Test) where {T, V <: AbstractArray{T}, Test <: TwoStateTestCase}
     @kernel_options(add_time, label=init_test, no_gpu)
 
@@ -1118,12 +1123,6 @@ end
     cmat[i] = 1  # Set to 1 as a max speed of 0 will create NaNs
     ustar[i] = 0
     pstar[i] = 0
-
-    gmat[i] = 0
-    work_array_1[i] = 0
-    work_array_2[i] = 0
-    work_array_3[i] = 0
-    work_array_4[i] = 0
 end
 
 #
@@ -1621,6 +1620,10 @@ function split_axes(params::ArmonParameters{T}, cycle::Int) where T
             (axis_2, T(1.0)),
             (axis_1, T(0.5)),
         ]
+    elseif params.axis_splitting == :X_only
+        return [(X_axis, T(1.0))]
+    elseif params.axis_splitting == :Y_only
+        return [(Y_axis, T(1.0))]
     else
         error("Unknown axes splitting method: $(params.axis_splitting)")
     end
@@ -1708,11 +1711,7 @@ function write_data_to_file(params::ArmonParameters, data::ArmonData,
         col_range, row_range, file; direct_indexing=false, for_3D=true)
     @indexing_vars(params)
 
-    # vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat,
-    #     data.Emat, data.cmat, data.ustar, data.pstar]
-    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.Emat,
-        data.pmat, data.cmat, data.gmat, data.ustar, data.pstar, 
-        data.work_array_1, data.work_array_2, data.work_array_3, data.work_array_4]
+    vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
 
     p = params.output_precision
     format = Printf.Format(join(repeat(["%#$(p+3).$(p)g"], length(vars_to_write)), ", ") * "\n")
@@ -2042,7 +2041,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
 
     if params.async_comms
         # Disable multi-threading when computing the outer domains, since Polyester cannot run
-        # mutliple loops at the same time.
+        # multiple loops at the same time.
         outer_params = copy(params)
         outer_params.use_threading = false
     else
