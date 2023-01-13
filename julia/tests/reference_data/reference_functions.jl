@@ -72,7 +72,7 @@ function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycl
 
     open(ref_file_name, "r") do ref_file
         ref_dt, ref_cycles = read_reference_data(ref_params, ref_file, ref_data)
-        @test ref_dt ≈ dt atol=1e-13
+        @test ref_dt ≈ dt atol=1e-13 rtol=4*eps()
         @test ref_cycles == cycles
     end
 
@@ -83,7 +83,7 @@ function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycl
         for field in fields_to_compare
             ref_row = @view getfield(ref_data, field)[row_range]
             cur_row = @view getfield(data, field)[row_range]
-            diff_count = sum(.~ isapprox.(ref_row, cur_row; atol=1e-13))
+            diff_count = sum(.~ isapprox.(ref_row, cur_row; atol=1e-13, rtol=4*eps()))
             differences_count += diff_count
             (diff_count > 0) && @debug "Row $j has $diff_count differences in '$field' with the reference"
         end

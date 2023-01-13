@@ -292,7 +292,7 @@ function ArmonParameters(;
         axis_splitting = :Sequential,
         maxtime = 0, maxcycle = 500_000,
         silent = 0, output_dir = ".", output_file = "output",
-        write_output = false, write_ghosts = false, write_slices = false, output_precision = 6,
+        write_output = false, write_ghosts = false, write_slices = false, output_precision = nothing,
         animation_step = 0, 
         measure_time = true, measure_hw_counters = false,
         hw_counters_options = nothing, hw_counters_output = nothing,
@@ -306,6 +306,10 @@ function ArmonParameters(;
     )
 
     flt_type = (ieee_bits == 64) ? Float64 : Float32
+
+    if isnothing(output_precision)
+        output_precision = flt_type == Float64 ? 17 : 9  # Exact output by default
+    end
 
     # Make sure that all floating point types are the same
     cfl = flt_type(cfl)
@@ -1714,7 +1718,7 @@ function write_data_to_file(params::ArmonParameters, data::ArmonData,
     vars_to_write = [data.x, data.y, data.rho, data.umat, data.vmat, data.pmat]
 
     p = params.output_precision
-    format = Printf.Format(join(repeat(["%#$(p+3).$(p)g"], length(vars_to_write)), ", ") * "\n")
+    format = Printf.Format(join(repeat(["%#$(p+7).$(p)e"], length(vars_to_write)), ", ") * "\n")
 
     for j in col_range
         for i in row_range

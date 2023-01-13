@@ -1,4 +1,6 @@
 
+cd(@__DIR__())
+
 include("../../Armon.jl")
 using .Armon
 
