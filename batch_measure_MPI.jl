@@ -131,10 +131,7 @@ required_modules = ["cuda", "rocm", "hwloc", "mpi"]
 
 julia_script_path = "./julia/run_julia.jl"
 kokkos_script_path = "./kokkos/run_kokkos.jl"
-
-cpp_omp_exe_path = "./cpp/armon.exe"
-cpp_omp_make_dir = "./cpp/"
-cpp_omp_make_target = "armon.exe"
+cpp_script_path = "./cpp/run_cpp.jl"
 
 data_dir = "./data/"
 plot_scripts_dir = "./plot_scripts/"
@@ -618,7 +615,7 @@ function parse_combinaisons(measure::MeasureParams, cluster_params::ClusterParam
         )
     elseif backend == CPP
         return Iterators.map(
-            params.CppParams(params...),
+            params->CppParams(params...),
             Iterators.product(
                 measure.armon_params,
                 measure.omp_places,
@@ -886,7 +883,59 @@ end
 
 
 function run_backend(measure::MeasureParams, params::CppParams, cluster_params::ClusterParams, base_file_name::String)
-    error("NYI")  # TODO
+    if cluster_params.processes > 1
+        error("The C++ backend doesn't support MPI")
+    end
+
+    if measure.limit_to_max_mem
+        @warn "The C++ backend doesn't support the 'limit_to_max_mem'" maxlog=1
+    end
+
+    if measure.time_histogram
+        @warn "The C++ backend doesn't support the 'time_histogram'" maxlog=1
+    end
+
+    armon_options = Any["julia"]
+    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
+    push!(armon_options, cpp_script_path)
+
+    if measure.device != CPU
+        error("The C++ backend works only on the CPU")
+    end
+
+    if params.dimension == 1
+        cells_list = measure.cells_list
+    else
+        error("The C++ backend works only in 1D")
+    end
+
+    if measure.cst_cells_per_process
+        # Scale the cells by the number of processes
+        cells_list .*= cluster_params.processes
+    end
+
+    cells_list_str = join(cells_list, ',')
+
+    append!(armon_options, armon_base_options)
+    append!(armon_options, [
+        "--use-simd", params.use_simd,
+        "--ieee", params.ieee_bits,
+        "--tests", join(measure.tests_list, ','),
+        "--cells-list", cells_list_str,
+        "--num-threads", params.threads,
+        "--threads-places", params.omp_places,
+        "--threads-proc-bind", params.omp_proc_bind,
+        "--data-file", base_file_name,
+        "--gnuplot-script", measure.gnuplot_script,
+        "--repeats", measure.repeats,
+        "--verbose", (measure.verbose ? 2 : 3),
+        "--compiler", params.compiler
+    ])
+
+    additionnal_options, _, _ = params.options
+    append!(armon_options, additionnal_options)
+
+    return armon_options
 end
 
 
@@ -1018,6 +1067,54 @@ function run_backend_reference(measure::MeasureParams, params::KokkosParams, clu
 end
 
 
+function run_backend_reference(measure::MeasureParams, params::CppParams, cluster_params::ClusterParams)
+    if cluster_params.processes > 1
+        error("The C++ backend doesn't support MPI")
+    end
+
+    if measure.limit_to_max_mem
+        @warn "The C++ backend doesn't support the 'limit_to_max_mem'" maxlog=1
+    end
+
+    if measure.time_histogram
+        @warn "The C++ backend doesn't support the 'time_histogram'" maxlog=1
+    end
+
+    armon_options = ["julia"]
+    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
+    push!(armon_options, cpp_script_path)
+
+    if measure.device != CPU
+        error("The C++ backend works only on the CPU")
+    end
+
+    if params.dimension == 1
+        cells_list = [1000]
+        cells_list_str = join(cells_list, ',')
+    else
+        error("The C++ backend works only in 1D")
+    end
+
+    append!(armon_options, armon_base_options)
+    append!(armon_options, [
+        "--use-simd", params.use_simd,
+        "--ieee", 64,
+        "--cycle", 1,
+        "--tests", measure.tests_list[1],
+        "--cells-list", cells_list_str,
+        "--threads-places", params.omp_places,
+        "--threads-proc-bind", params.omp_proc_bind,
+        "--repeats", 1,
+        "--verbose", 5
+    ])
+
+    additionnal_options, _, _ = params.options
+    append!(armon_options, additionnal_options)
+
+    return armon_options
+end
+
+
 function build_data_file_base_name(measure::MeasureParams, 
         processes::Int, distribution::String, node_count::Int,
         threads::Int, use_simd::Int, dimension::Int, backend::Backend)
@@ -1054,8 +1151,8 @@ function build_data_file_base_name(measure::MeasureParams,
     end
 
     if length(measure.use_simd) > 1
-        name *= use_simd ? "_SIMD" : "_NO_SIMD"
-        legend *= use_simd ? ", SIMD" : ""
+        name *= use_simd == 1 ? "_SIMD" : "_NO_SIMD"
+        legend *= use_simd == 1 ? ", SIMD" : ""
     end
 
     if length(measure.threads) > 1
@@ -1107,6 +1204,38 @@ end
 
 function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
         node_count::Int, params::KokkosParams)
+    name, legend = build_data_file_base_name(measure, processes, distribution, node_count, params.threads, 
+                                             params.use_simd, params.dimension, Kokkos)
+
+    if length(measure.omp_proc_bind) > 1
+        name *= "_$(params.omp_proc_bind)"
+        legend *= ", bind: $(params.omp_proc_bind)"
+    end
+
+    if length(measure.omp_places) > 1
+        name *= "_$(params.omp_places)"
+        legend *= ", places: $(params.omp_places)"
+    end
+
+    if length(measure.compilers) > 1
+        name *= "_$(params.compiler)"
+        legend *= ", $(params.compiler)"
+    end
+
+    if !isempty(params.options[2])
+        legend *= ", " * params.options[2]
+    end
+
+    if !isempty(params.options[3])
+        name *= "_" * params.options[3]
+    end
+
+    return name * "_", legend
+end
+
+
+function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,
+        node_count::Int, params::CppParams)
     name, legend = build_data_file_base_name(measure, processes, distribution, node_count, params.threads, 
                                              params.use_simd, params.dimension, Kokkos)
 
@@ -1255,6 +1384,7 @@ end
 
 backend_disp_name(::JuliaParams) = "Julia"
 backend_disp_name(::KokkosParams) = "C++ Kokkos"
+backend_disp_name(::CppParams) = "C++ OpenMP"
 
 
 function run_backend_msg(measure::MeasureParams, julia_params::JuliaParams, cluster_params::ClusterParams)
@@ -1277,6 +1407,19 @@ function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, cl
      - $(kokkos_params.use_simd == 1 ? "with" : "without") SIMD
      - $(kokkos_params.dimension)D
      - compiled with $(kokkos_params.compiler)
+     - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
+     - with $(cluster_params.processes) processes on $(cluster_params.node_count) nodes ($(cluster_params.distribution) distribution)
+    """
+end
+
+
+function run_backend_msg(measure::MeasureParams, cpp_params::CppParams, cluster_params::ClusterParams)
+    """Running C++ OpenMP backend with:
+     - $(cpp_params.threads) threads
+     - threads binding: $(cpp_params.omp_proc_bind), places: $(cpp_params.omp_places)
+     - $(cpp_params.use_simd == 1 ? "with" : "without") SIMD
+     - 1D
+     - compiled with $(cpp_params.compiler)
      - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
      - with $(cluster_params.processes) processes on $(cluster_params.node_count) nodes ($(cluster_params.distribution) distribution)
     """

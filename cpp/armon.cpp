@@ -154,7 +154,7 @@ void BizarriumEOS()
 
     const size_t ideb_ = ideb, ifin_ = ifin;
 
-OMP_FOR(firstprivate(ideb_, ifin_, rho0, G0, s, q, r, eps0, Cv0, T0, K0) shared(rho, pmat, emat, cmat, gmat))
+OMP_FOR(firstprivate(ideb_, ifin_, rho0, G0, s, q, r, eps0, Cv0, T0, K0) shared(rho, pmat, Emat, cmat, gmat, umat))
     for (size_t i = ideb_; i < ifin_; i++) {
         flt_t x_ = rho[i] / rho0 - 1;
         flt_t g = G0 * (1 - rho0 / rho[i]);
@@ -169,10 +169,11 @@ OMP_FOR(firstprivate(ideb_, ifin_, rho0, G0, s, q, r, eps0, Cv0, T0, K0) shared(
         flt_t pk0prime = -flt_t(0.5) * K0 * std::pow(1 + x_, flt_t(3)) * rho0 * (2 * (1 + 3 * x_) * f0 + 2 * x_ * (2 + 3 * x_) * f1 + (x_ * x_) * (1 + x_) * f2);
         flt_t pk0second = flt_t(0.5) * K0 * std::pow(1 + x_, flt_t(4)) * (rho0 * rho0) * (12 * (1 + 2 * x_) * f0 + 6 * (1 + 6 * x_ + 6 * (x_ * x_)) * f1 + 6 * x_ * (1 + x_) * (1 + 2 * x_) * f2 + std::pow(x_ * (1 + x_), flt_t(2)) * f3);
 
-        pmat[i] = pk0 + G0*rho0*(emat[i] - eps_k0);
+        flt_t e = Emat[i] - flt_t(0.5) * std::pow(umat[i], flt_t(2));
+        pmat[i] = pk0 + G0*rho0*(e - eps_k0);
         cmat[i] = std::sqrt(G0*rho0*(pmat[i] - pk0) - pk0prime) / rho[i];
-
-        gmat[i] = flt_t(0.5)/(std::pow(rho[i],flt_t(3))*std::pow(cmat[i],flt_t(2)))*(pk0second+std::pow(G0*rho0,flt_t(2))*(pmat[i]-pk0));
+        gmat[i] = flt_t(0.5) / (std::pow(rho[i],flt_t(3)) * std::pow(cmat[i],flt_t(2)))
+                * (pk0second+std::pow(G0*rho0,flt_t(2))*(pmat[i]-pk0));
     }
 }
 
@@ -180,11 +181,12 @@ OMP_FOR(firstprivate(ideb_, ifin_, rho0, G0, s, q, r, eps0, Cv0, T0, K0) shared(
 void perfectGasEOS(flt_t gamma)
 {
     const size_t ideb_ = ideb, ifin_ = ifin;
-OMP_FOR(firstprivate(ideb_, ifin_, gamma) shared(pmat, cmat, gmat, rho, emat))
+OMP_FOR(firstprivate(ideb_, ifin_, gamma) shared(pmat, cmat, gmat, rho, Emat, umat))
     for (size_t i = ideb_; i < ifin_; i++) {
-        pmat[i] = (gamma-1)*rho[i]*emat[i];
-        cmat[i] = std::sqrt(gamma*pmat[i]/rho[i]);
-        gmat[i] = (1+gamma)/2;
+        flt_t e = Emat[i] - flt_t(0.5) * std::pow(umat[i], flt_t(2));
+        pmat[i] = (gamma - 1) * rho[i] * e;
+        cmat[i] = std::sqrt(gamma * pmat[i] / rho[i]);
+        gmat[i] = (1 + gamma) / 2;
     }
 }
 
@@ -205,7 +207,7 @@ void init_test()
         if (max_time == 0.0) max_time = 0.20;
         if (cfl == 0.0) cfl = 0.95;
 
-OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat, emat, Emat, cmat, gmat))
+OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat, Emat, cmat, gmat))
         for (int i = ideb; i <= ifin; i++) {
             x[i] = flt_t(i - nb_ghosts) / flt_t(nb_cells);
             if (x[i] < 0.5) {
@@ -220,7 +222,7 @@ OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat,
             }
 
             const flt_t gamma = 1.4;
-            emat[i] = Emat[i] = pmat[i]/((gamma-1)*rho[i]);
+            Emat[i] = pmat[i]/((gamma-1)*rho[i]);
             cmat[i] = std::sqrt(gamma*pmat[i]/rho[i]);
             gmat[i] = flt_t(0.5)*(1+gamma);
         }
@@ -231,19 +233,20 @@ OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat,
         if (max_time == 0.0) max_time = 80e-6;
         if (cfl == 0.0) cfl = 0.6;
 
-OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat, emat, Emat))
+OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat, Emat))
         for (int i = ideb; i <= ifin; i++) {
             x[i] = flt_t(i - nb_ghosts) / flt_t(nb_cells);
             if (x[i] < 0.5) {
                 rho[i] = 1.42857142857e+4;
+                umat[i] = 0.;
                 pmat[i] = 0.;
-                emat[i] = Emat[i] = 4.48657821135e+6;
+                Emat[i] = 4.48657821135e+6;
             }
             else {
                 rho[i] =  10000.;
                 umat[i] = 250.;
-                emat[i] = 0.;
-                Emat[i] = emat[i] + flt_t(0.5) * std::pow(umat[i], flt_t(2));
+                pmat[i] = 0.;
+                Emat[i] = flt_t(0.5) * std::pow(umat[i], flt_t(2));
             }
         }
         BizarriumEOS();
@@ -255,17 +258,24 @@ OMP_FOR(firstprivate(ideb, ifin, nb_ghosts, nb_cells) shared(x, rho, pmat, umat,
 
 void boundaryConditions()
 {
-    rho[ideb-1] = rho[ideb];    rho[ifin] = rho[ifin-1]; 
-    umat[ideb-1] = -umat[ideb]; 
-    pmat[ideb-1] = pmat[ideb];  pmat[ifin] = pmat[ifin-1]; 
-    cmat[ideb-1] = cmat[ideb];  cmat[ifin] = cmat[ifin-1]; 
-    gmat[ideb-1] = gmat[ideb];  gmat[ifin] = gmat[ifin-1];
+    int i_l = ideb - 1;
+    int ip_l = ideb;
+    int i_r = ifin;
+    int ip_r = ifin - 1;
 
-    if (test == Test::Bizarrium) {
-        umat[ifin] = umat[ifin-1];
-    }
-    else {
-        umat[ifin] = -umat[ifin-1];
+    flt_t u_factor = (test == Test::Bizarrium) ? 1 : -1;
+
+    for (int w = 0; w < nb_ghosts; w++) {
+        rho[i_l] = rho[ip_l];    rho[i_r] = rho[ip_r];
+        umat[i_l] = -umat[ip_l]; umat[i_r] = umat[ip_r] * u_factor;
+        pmat[i_l] = pmat[ip_l];  pmat[i_r] = pmat[ip_r];
+        cmat[i_l] = cmat[ip_l];  cmat[i_r] = cmat[ip_r];
+        gmat[i_l] = gmat[ip_l];  gmat[i_r] = gmat[ip_r];
+
+        i_l -= 1;
+        ip_l += 1;
+        i_r += 1;
+        ip_r -= 1;
     }
 }
 
@@ -275,21 +285,29 @@ void first_order_euler_remap(flt_t dt)
     const size_t ideb_ = ideb, ifin_ = ifin;
 OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(X, ustar, tmp_rho, tmp_urho, tmp_Erho, rho, umat, Emat))
     for (size_t i = ideb_; i <= ifin_; i++) {
-        flt_t dx = X[i+1] - X[i];
-        flt_t L1 =  std::max(flt_t(0.), ustar[i]) * dt;
-        flt_t L3 = -std::min(flt_t(0.), ustar[i+1]) * dt;
-        flt_t L2 = dx - L1 - L3;
+        size_t idx = i;
+        flt_t disp = dt * ustar[i];
+        if (disp > 0) {
+            idx = i - 1;
+        }
 
-        tmp_rho[i]  = (L1 * rho[i-1]             + L2 * rho[i]           + L3 * rho[i+1]            ) / dx;
-        tmp_urho[i] = (L1 * rho[i-1] * umat[i-1] + L2 * rho[i] * umat[i] + L3 * rho[i+1] * umat[i+1]) / dx;
-        tmp_Erho[i] = (L1 * rho[i-1] * Emat[i-1] + L2 * rho[i] * Emat[i] + L3 * rho[i+1] * Emat[i+1]) / dx;
+        tmp_rho[i]  = disp * (rho[idx]            );
+        tmp_urho[i] = disp * (rho[idx] * umat[idx]);
+        tmp_Erho[i] = disp * (rho[idx] * Emat[idx]);
     }
 
-OMP_FOR(firstprivate(ideb_, ifin_) shared(tmp_rho, tmp_urho, tmp_Erho, rho, umat, Emat))
+OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(tmp_rho, tmp_urho, tmp_Erho, rho, umat, Emat, ustar, x))
     for (size_t i = ideb_; i <= ifin_; i++) {
-        rho[i]  = tmp_rho[i];
-        umat[i] = tmp_urho[i] / tmp_rho[i];
-        Emat[i] = tmp_Erho[i] / tmp_rho[i];
+        flt_t dx = x[i+1] - x[i];
+        flt_t dX = dx + dt * (ustar[i+1] - ustar[i]);
+
+        flt_t tmp_rho_  = (dX * rho[i]           - (tmp_rho[i+1]  - tmp_rho[i] )) / dx;
+        flt_t tmp_urho_ = (dX * rho[i] * umat[i] - (tmp_urho[i+1] - tmp_urho[i])) / dx;
+        flt_t tmp_Erho_ = (dX * rho[i] * Emat[i] - (tmp_Erho[i+1] - tmp_Erho[i])) / dx;
+
+        rho[i]  = tmp_rho_;
+        umat[i] = tmp_urho_ / tmp_rho_;
+        Emat[i] = tmp_Erho_ / tmp_rho_;
     }
 }
 
@@ -328,52 +346,67 @@ OMP_FOR(firstprivate(ideb, ifin) shared(x, cmat) reduction(min:dt))
 }
 
 
+std::tuple<flt_t, flt_t> acoustic_Godunov(
+        flt_t rho_i, flt_t rho_im, flt_t c_i, flt_t c_im,
+        flt_t u_i,   flt_t u_im,   flt_t p_i, flt_t p_im)
+{
+    flt_t rc_l = rho_im * c_im;
+    flt_t rc_r = rho_i  * c_i;
+    flt_t ustar_i = (rc_l * u_im + rc_r * u_i +               (p_im - p_i)) / (rc_l + rc_r);
+    flt_t pstar_i = (rc_r * p_im + rc_l * p_i + rc_l * rc_r * (u_im - u_i)) / (rc_l + rc_r);
+    return std::make_tuple(ustar_i, pstar_i);
+}
+
+
 void acoustic()
 {
-    const size_t ideb_ = ideb, ifin_ = ifin;
+    const size_t ideb_ = ideb - 1, ifin_ = ifin + 1;
 OMP_FOR(firstprivate(ideb_, ifin_) shared(rho, cmat, ustar, umat, pmat, pstar))
     for (size_t i = ideb_; i <= ifin_; i++) {
-        flt_t rc_l = rho[i-1] * cmat[i-1];
-        flt_t rc_r = rho[i]   * cmat[i];
-
-        ustar[i] = (rc_l * umat[i-1] + rc_r * umat[i] + (pmat[i-1] - pmat[i])) / (rc_l + rc_r);
-        pstar[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] + rc_l * rc_r * (umat[i-1] - umat[i])) / (rc_l + rc_r);
+        auto [ustar_i, pstar_i] = acoustic_Godunov(
+             rho[i],  rho[i-1], cmat[i], cmat[i-1],
+            umat[i], umat[i-1], pmat[i], pmat[i-1]);
+        ustar[i] = ustar_i;
+        pstar[i] = pstar_i;
     }
 }
 
 
 void acoustic_GAD(flt_t dt)
 {
-    const size_t ideb_ = ideb, ifin_ = ifin;
-OMP_FOR(firstprivate(ideb_, ifin_) shared(rho, cmat, umat, pmat, ustar_1, pstar_1))
+    const size_t ideb_ = ideb - 1, ifin_ = ifin + 1;
+OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(x, rho, cmat, umat, pmat, ustar, pstar))
     for (size_t i = ideb_; i <= ifin_; i++) {
-        flt_t rc_l = rho[i-1] * cmat[i-1];
-        flt_t rc_r = rho[i]   * cmat[i];
+        // First order acoustic solver on the left cell
+        auto [ustar_im, pstar_im] = acoustic_Godunov(
+             rho[i-1],  rho[i-2], cmat[i-1], cmat[i-2],
+            umat[i-1], umat[i-2], pmat[i-1], pmat[i-2]);
 
-        ustar_1[i] = (rc_l * umat[i-1] + rc_r * umat[i] + (pmat[i-1] - pmat[i])) / (rc_l + rc_r);
-        pstar_1[i] = (rc_r * pmat[i-1] + rc_l * pmat[i] + rc_l * rc_r * (umat[i-1] - umat[i])) / (rc_l + rc_r);
-    }
+        // First order acoustic solver on the current cell
+        auto [ustar_i, pstar_i] = acoustic_Godunov(
+             rho[i],  rho[i-1], cmat[i], cmat[i-1],
+            umat[i], umat[i-1], pmat[i], pmat[i-1]);
 
-OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(x, rho, cmat, umat, pmat, ustar, pstar, ustar_1, pstar_1))
-    for (size_t i = ideb_; i <= ifin_; i++) {
-        flt_t r_u_m = (ustar_1[i+1] - umat[i]) / (ustar_1[i] - umat[i-1] + flt_t(1e-6));
-        flt_t r_p_m = (pstar_1[i+1] - pmat[i]) / (pstar_1[i] - pmat[i-1] + flt_t(1e-6));
-        flt_t r_u_p = (umat[i-1] - ustar_1[i-1]) / (umat[i] - ustar_1[i] + flt_t(1e-6));
-        flt_t r_p_p = (pmat[i-1] - pstar_1[i-1]) / (pmat[i] - pstar_1[i] + flt_t(1e-6));
-        // if (std::isnan(r_u_m)) r_u_m = 1;
-        // if (std::isnan(r_p_m)) r_p_m = 1;
-        // if (std::isnan(r_u_p)) r_u_p = 1;
-        // if (std::isnan(r_p_p)) r_p_p = 1;
+        // First order acoustic solver on the right cell
+        auto [ustar_ip, pstar_ip] = acoustic_Godunov(
+             rho[i+1],  rho[i], cmat[i+1], cmat[i],
+            umat[i+1], umat[i], pmat[i+1], pmat[i]);
+
+        flt_t r_um = phi((ustar_ip -   umat[i]) / (ustar_i - umat[i-1] + flt_t(1e-6)));
+        flt_t r_pm = phi((pstar_ip -   pmat[i]) / (pstar_i - pmat[i-1] + flt_t(1e-6)));
+        flt_t r_up = phi((umat[i-1] - ustar_im) / (umat[i] - ustar_i   + flt_t(1e-6)));
+        flt_t r_pp = phi((pmat[i-1] - pstar_im) / (pmat[i] - pstar_i   + flt_t(1e-6)));
 
         flt_t dm_l = rho[i-1] * (x[i] - x[i-1]);
         flt_t dm_r = rho[i]   * (x[i+1] - x[i]);
         flt_t Dm = (dm_l + dm_r) / 2;
-        flt_t theta = ((rho[i-1] * cmat[i-1]) + (rho[i] * cmat[i])) / 2 * (dt / Dm);
 
-        ustar[i] = ustar_1[i] + flt_t(0.5) * (1 - theta)
-                * (phi(r_u_p) * (umat[i] - ustar_1[i]) - phi(r_u_m) * (ustar_1[i] - umat[i-1]));
-        pstar[i] = pstar_1[i] + flt_t(0.5) * (1 - theta)
-                * (phi(r_p_p) * (pmat[i] - pstar_1[i]) - phi(r_p_m) * (pstar_1[i] - pmat[i-1]));
+        flt_t rc_l = rho[i-1] * cmat[i-1];
+        flt_t rc_r = rho[i]   * cmat[i];
+        flt_t theta = flt_t(0.5) * (1 - (rc_l + rc_r) / 2 * (dt / Dm));
+
+        ustar[i] = ustar_i + theta * (r_up * (umat[i] - ustar_i) - r_um * (ustar_i - umat[i-1]));
+        pstar[i] = pstar_i + theta * (r_pp * (pmat[i] - pstar_i) - r_pm * (pstar_i - pmat[i-1]));
     }
 }
 
@@ -397,24 +430,19 @@ void cellUpdate(flt_t dt)
 {
     const size_t ideb_ = ideb, ifin_ = ifin;
 
-OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(X, x, ustar))
-    for (size_t i = ideb_; i <= ifin_; i++) {
-        X[i] = x[i] + dt * ustar[i];
-    }
-
-OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(X, x, rho, umat, Emat, emat, pstar, ustar))
+OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(x, rho, umat, Emat, pstar, ustar))
     for (size_t i = ideb_; i < ifin_; i++) {
-        flt_t dm = rho[i] * (x[i+1] - x[i]);
-        rho[i] = dm / (X[i+1] - X[i]);
+        flt_t dx = x[i+1] - x[i];
+        flt_t dm = rho[i] * dx;
+        rho[i] = dm / (dx + dt * (ustar[i+1] - ustar[i]));
         umat[i] += dt / dm * (pstar[i] - pstar[i+1]);
         Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+1] * ustar[i+1]);
-        emat[i] = Emat[i] - flt_t(0.5) * std::pow(umat[i], flt_t(2));
     }
     
     if (!euler_projection) {
-OMP_FOR(firstprivate(ideb_, ifin_) shared(X, x))
+OMP_FOR(firstprivate(ideb_, ifin_, dt) shared(x, ustar))
         for (size_t i = ideb_; i <= ifin_; i++) {
-            x[i] = X[i];
+            x[i] += dt * ustar[i];
         }
     }
 }
@@ -463,7 +491,7 @@ void time_loop()
         t += dt;
 
         if (verbose <= 1) {
-            printf("Cycle = %d, dt = %.3g, t = %.3g\n", cycle, dt, t);
+            printf("Cycle = %d, dt = %#18.15g, t = %#18.15g\n", cycle, dt, t);
         }
 
         if (!std::isfinite(dt) || dt <= 0.) {
@@ -510,6 +538,7 @@ Options:
     -t <test>               Test case: 'Sod' or 'Bizarrium'
     -s <scheme>             Numeric scheme: 'Godunov' (first order) or 'GAD-minmod' (second order, minmod limiter)
     --cells N               Number of cells in the mesh
+    --nghost N              Number of ghost cells
     --cycle N               Maximum number of iterations
     --riemann <solver>      Riemann solver: 'acoustic' only
     --euler 0-1             Enable the eulerian projection step after each iteration
@@ -556,6 +585,10 @@ void parse_arguments(int argc, const char* argv[])
         }
         else if (strcmp(argv[i], "--cells") == 0) {
             nb_cells = (int) strtol(argv[i+1], nullptr, 10);
+            i++;
+        }
+        else if (strcmp(argv[i], "--nghost") == 0) {
+            nb_ghosts = (int) strtol(argv[i+1], nullptr, 10);
             i++;
         }
         else if (strcmp(argv[i], "--cycle") == 0) {
@@ -662,6 +695,7 @@ int main(int argc, const char* argv[])
         printf(" - riemann:    %s\n", "acoustic");
         printf(" - scheme:     %s\n", (scheme == Scheme::Godunov) ? "Godunov" : "GAD-minmod");
         printf(" - nb cells:   %g\n", double(nb_cells));
+        printf(" - nb ghosts:  %d\n", nb_ghosts);
         printf(" - Dt init:    %g\n", Dt);
         printf(" - euler proj: %d\n", euler_projection);
         printf(" - cst dt:     %d\n", cst_dt);
