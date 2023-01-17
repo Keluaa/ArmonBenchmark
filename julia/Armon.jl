@@ -300,7 +300,7 @@ function ArmonParameters(;
         use_gpu = false, device = :CUDA, block_size = 1024,
         use_MPI = true, px = 1, py = 1,
         single_comm_per_axis_pass = false, reorder_grid = true, 
-        async_comms = true,
+        async_comms = false,
         compare = false, is_ref = false, comparison_tolerance = 1e-10,
         return_data = false
     )
@@ -1546,12 +1546,13 @@ function slope_minmod(uᵢ₋::T, uᵢ::T, uᵢ₊::T, r₋::T, r₊::T) where T
 end
 
 
-function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::V, 
-        dt::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
+function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::W, 
+        dt::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     params.projection == :none && return dependencies
 
     if params.use_MPI && !params.single_comm_per_axis_pass
         # Additional communications phase needed to get the new values of the lagrangian cells
+        # TODO: put this outside of the function
         dependencies = boundaryConditions!(params, data, host_array, params.current_axis; dependencies)
     end
 

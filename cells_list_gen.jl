@@ -16,7 +16,7 @@ to_domain_string(cells, s::Specs) = join((join(repeat(["$i"], s.dim), ',') for i
 
 function spread_cells(max_cells; 
         min_cells=10^4.5, step_log=log10(2), 
-        dim=2, vars=19, type=Float64,
+        dim=2, vars=16, type=Float64,
         device=:CPU, max_mem=nothing,
         proc_per_device=1,
         devices=1)
@@ -47,5 +47,5 @@ function spread_cells(max_cells;
 
     println("From $(first(min_cells)) to $(max_cells) in $(dim)D on $(max_mem / 1e9) GB spread over $(processes) processes on $(devices) $(device):")
     println(to_domain_string(cells, specs))
-    return cells
+    return cells, specs
 end
