@@ -134,7 +134,7 @@ armon_base_options = [
 ]
 max_node_cores = 128  # Maximum number of cores in a node
 
-required_modules = ["cuda", "rocm", "hwloc", "mpi"]
+required_modules = ["cuda", #="rocm",=# "hwloc", "mpi"]
 
 julia_script_path = "./julia/run_julia.jl"
 kokkos_script_path = "./kokkos/run_kokkos.jl"

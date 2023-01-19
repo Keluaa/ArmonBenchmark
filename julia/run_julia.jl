@@ -316,11 +316,6 @@ end
 
 
 if use_gpu
-    # We must select a GPU before initializing MPI
-    if gpu == :ROCM
-        error("ROCM is, for now, not MPI aware")
-    end
-
     # If SLURM is used to dispatch jobs, we can use the local ID of the process to uniquely 
     # assign the GPUs to each process.
     gpu_index = parse(Int, get(ENV, "SLURM_LOCALID", "-1"))
@@ -329,9 +324,14 @@ if use_gpu
         gpu_index = 0
     end
 
-    using CUDA
-    gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
-    CUDA.device!(gpu_index)
+    # We must select a GPU before initializing MPI
+    if use_MPI && gpu == :ROCM
+        @warn "ROCM is, for now, not MPI aware"
+    else
+        using CUDA
+        gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
+        CUDA.device!(gpu_index)
+    end
 end
 
 using MPI
