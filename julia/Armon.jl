@@ -1423,7 +1423,7 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
     if params.cst_dt
         # Constant time step
         return Dt
-    elseif params.use_gpu && params.device == ROCDevice()
+    elseif params.use_gpu && params.device isa ROCDevice
         # AMDGPU doesn't support ArrayProgramming, however its implementation of `reduce` is quite
         # fast. Therefore first we compute dt for all cells and store the result in a temporary
         # array, then we reduce this array.
