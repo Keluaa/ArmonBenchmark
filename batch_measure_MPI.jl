@@ -1287,21 +1287,23 @@ function build_cluster_options(measure::MeasureParams, cluster_params::ClusterPa
 end
 
 
-function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
+function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int, comb_count::Int)
     plot_commands = []
     hist_commands = []
     plot_MPI_commands = []
     color_index = 1
     comb_i = 0
+    comb_c = 0
     for cluster_params in build_cluster_combinaisons(measure)
         # Marker style for the plot
         point_type = 5
 
         for backend in measure.backends, parameters in parse_combinaisons(measure, cluster_params, backend)
             comb_i += 1
-            erase_files = comb_i > skip_first
+            do_combinaison = comb_i > skip_first && comb_c <= comb_count
 
             if parameters.threads * cluster_params.processes > max_node_cores * cluster_params.node_count
+                do_combinaison && (comb_c += 1)
                 continue
             end
 
@@ -1323,7 +1325,7 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
                 legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
 
                 data_file_name = data_file_name_base * ".csv"
-                erase_files && (open(data_file_name, "w") do _ end)  # Create/Clear the file
+                do_combinaison && (open(data_file_name, "w") do _ end)  # Create/Clear the file
                 if measure.error_bars
                     plot_cmd = gnuplot_plot_command_errorbars(data_file_name, legend, point_type)
                 else
@@ -1333,14 +1335,14 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
 
                 if measure.time_histogram
                     hist_file_name = data_file_name_base * "_hist.csv"
-                    erase_files && (open(hist_file_name, "w") do _ end)  # Create/Clear the file
+                    do_combinaison && (open(hist_file_name, "w") do _ end)  # Create/Clear the file
                     plot_cmd = gnuplot_hist_plot_command(hist_file_name, legend, point_type)
                     push!(hist_commands, plot_cmd)
                 end
 
                 if measure.time_MPI_plot
                     MPI_plot_file_name = data_file_name_base * "_MPI_time.csv"
-                    erase_files && (open(MPI_plot_file_name, "w") do _ end)  # Create/Clear the file
+                    do_combinaison && (open(MPI_plot_file_name, "w") do _ end)  # Create/Clear the file
                     plot_cmd = gnuplot_MPI_plot_command_1(MPI_plot_file_name, legend, color_index, point_type)
                     push!(plot_MPI_commands, plot_cmd)
                     plot_cmd = gnuplot_MPI_plot_command_2(MPI_plot_file_name, 
@@ -1349,6 +1351,8 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int)
                     color_index += 1  # Each line and its relative counterpart will have the same color
                 end
             end
+
+            do_combinaison && (comb_c += 1)
         end
     end
 
@@ -1602,7 +1606,7 @@ function main()
         end
 
         # Create the files and plot script once at the beginning
-        create_all_data_files_and_plot(measure, i == start_at ? skip_first : 0)  # TODO : take into account 'comb_count', here the other runs after will still have their data overwritten
+        create_all_data_files_and_plot(measure, i == start_at ? skip_first : 0, comb_count)
 
         # For each main parameter combinaison, run a job
         comb_i = 0
