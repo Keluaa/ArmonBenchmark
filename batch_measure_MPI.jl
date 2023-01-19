@@ -55,6 +55,7 @@ mutable struct MeasureParams
     use_max_threads::Bool
     cst_cells_per_process::Bool
     limit_to_max_mem::Bool
+    track_energy::Bool
 
     # > Time histogram
     time_histogram::Bool
@@ -66,6 +67,12 @@ mutable struct MeasureParams
     time_MPI_plot::Bool
     gnuplot_MPI_script::String
     time_MPI_plot_file::String
+
+    # > Energy plot
+    energy_plot::Bool
+    energy_plot_reps::Bool
+    energy_script::String
+    energy_plot_file::String
 end
 
 
@@ -182,12 +189,27 @@ $(log_scale ? "set logscale x" : "")
 `echo "$graph_file_name" >> $plots_update_file`
 plot """
 
+
+base_gnuplot_energy_script_commands(graph_file_name, title, log_scale, legend_pos) = """
+set terminal pdfcairo color size 10in, 6in
+set output '$graph_file_name'
+set ylabel 'Energy Consumption [J]'
+set xlabel 'Cells count'
+set title "$title"
+set key $legend_pos top
+set yrange [0:]
+$(log_scale ? "set logscale x" : "")
+`echo "$graph_file_name" >> $plots_update_file`
+plot """
+
 gnuplot_plot_command(data_file, legend_title, pt_index; mode="lp") = "'$(data_file)' w $(mode) pt $(pt_index) title '$(legend_title)'"
 gnuplot_plot_command_errorbars(data_file, legend_title, pt_index) = gnuplot_plot_command(data_file, legend_title, pt_index; mode="yerrorlines")
 gnuplot_hist_plot_command(data_file, legend_title, color_index) = "'$(data_file)' using 2: xtic(1) with histogram lt $(color_index) title '$(legend_title)'"
 gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:2 axis x1y1 w lp lc $(color_index) pt $(pt_index) title '$(legend_title)'"
 gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
-
+gnuplot_energy_plot_command(data_file, legend_title, color_index, pt_index; mode="lp") = "'$(data_file)' using 1:2:3 w $(mode) lc $(color_index) pt $(pt_index) t '$(legend_title)'"
+gnuplot_energy_plot_command_errorbars(data_file, legend_title, color_index, pt_index) = gnuplot_energy_plot_command(data_file, legend_title, color_index, pt_index; mode="yerrorlines")
+gnuplot_energy_vals_plot_command(data_file, legend_title, color_index, pt_index, rep)  = "'$(data_file)' u 1:$(rep+3) w lp lc $(color_index) dt 3 pt $(pt_index) t '$(legend_title)'"
 
 sub_script_content(job_name, index, partition, nodes, processes, cores_per_process, max_time, ref_command, commands, next_script) = """
 #!/bin/bash
@@ -255,6 +277,10 @@ function parse_measure_params(file_line_parser)
     use_max_threads = false
     cst_cells_per_process = false
     limit_to_max_mem = false
+
+    track_energy = false
+    energy_plot = false
+    energy_plot_reps = false
 
     time_histogram = false
     flatten_time_dims = false
@@ -393,6 +419,12 @@ function parse_measure_params(file_line_parser)
             cst_cells_per_process = parse(Bool, value)
         elseif option == "limit_to_max_mem"
             limit_to_max_mem = parse(Bool, value)
+        elseif option == "track_energy"
+            track_energy = parse(Bool, value)
+        elseif options == "energy_plot"
+            energy_plot = parse(Bool, value)
+        elseif options == "energy_plot_reps"
+            energy_plot_reps = parse(Bool, value)
         elseif option == "time_hist"
             time_histogram = parse(Bool, value)
         elseif option == "flat_hist_dims"
@@ -467,6 +499,9 @@ function parse_measure_params(file_line_parser)
     gnuplot_MPI_script = plot_scripts_dir * name * "_MPI_time.plot"
     time_MPI_plot_file = plots_dir * name * "_MPI_time.pdf"
 
+    energy_script = plot_scripts_dir * name * "_Energy.plot"
+    energy_plot_file = plots_dir * name * "_Energy.pdf"
+
     return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
         create_sub_job_chain, add_reference_job, one_job_per_cell,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
@@ -474,9 +509,10 @@ function parse_measure_params(file_line_parser)
         cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         axis_splitting, params_and_legends,
         name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose,
-        use_max_threads, cst_cells_per_process, limit_to_max_mem,
+        use_max_threads, cst_cells_per_process, limit_to_max_mem, track_energy,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
-        time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file)
+        time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file,
+        energy_plot, energy_plot_reps, energy_script, energy_plot_file)
 end
 
 
@@ -503,7 +539,7 @@ julia batch_measure.jl [--override-node=<node>,<new node>]
                        [--do-only=<measures count>]
                        [--skip-first=<combinaison count>]
                        [--count=<combinaison count>]
-                       [--help]
+                       [--help|-h]
                        <script files>...'
 """
 
@@ -523,7 +559,7 @@ function parse_arguments()
     measures::Vector{MeasureParams} = []
 
     for arg in ARGS
-        if (startswith(arg, "--"))
+        if (startswith(arg, "-"))
             # Batch parameter
             if (startswith(arg, "--override-node="))
                 node, replacement_node = split(split(arg, '=')[2], ',')
@@ -542,6 +578,7 @@ function parse_arguments()
                 comb_count = parse(Int, value)
             elseif arg == "--help" || arg == "-h"
                 println(USAGE)
+                exit(0)
             else
                 error("Wrong batch option: " * arg * "\n" * USAGE)
             end
@@ -765,7 +802,8 @@ function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params
         "--time-MPI-graph", measure.time_MPI_plot,
         "--gnuplot-MPI-script", measure.gnuplot_MPI_script,
         "--use-mpi", measure.use_MPI,
-        "--limit-to-mem", measure.limit_to_max_mem
+        "--limit-to-mem", measure.limit_to_max_mem,
+        "--track-energy", measure.track_energy
     ])
 
     if params.dimension > 1
@@ -866,7 +904,8 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster_param
         "--gnuplot-script", measure.gnuplot_script,
         "--repeats", measure.repeats,
         "--verbose", (measure.verbose ? 2 : 3),
-        "--compiler", params.compiler
+        "--compiler", params.compiler,
+        "--track-energy", measure.track_energy
     ])
 
     if params.dimension > 1
@@ -929,7 +968,8 @@ function run_backend(measure::MeasureParams, params::CppParams, cluster_params::
         "--gnuplot-script", measure.gnuplot_script,
         "--repeats", measure.repeats,
         "--verbose", (measure.verbose ? 2 : 3),
-        "--compiler", params.compiler
+        "--compiler", params.compiler,
+        "--track-energy", measure.track_energy
     ])
 
     additionnal_options, _, _ = params.options
@@ -938,6 +978,7 @@ function run_backend(measure::MeasureParams, params::CppParams, cluster_params::
     return armon_options
 end
 
+# TODO : now with "--track-energy" the references might not be needed anymore
 
 function run_backend_reference(measure::MeasureParams, params::JuliaParams, cluster_params::ClusterParams)
     armon_options = [
@@ -1291,6 +1332,7 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int,
     plot_commands = []
     hist_commands = []
     plot_MPI_commands = []
+    plot_energy_commands = []
     color_index = 1
     comb_i = 0
     comb_c = 0
@@ -1348,7 +1390,25 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int,
                     plot_cmd = gnuplot_MPI_plot_command_2(MPI_plot_file_name, 
                         measure.device == CPU ? ("(relative) " * legend) : (legend * " (relative)"), color_index, point_type)
                     push!(plot_MPI_commands, plot_cmd)
-                    color_index += 1  # Each line and its relative counterpart will have the same color
+                end
+
+                if measure.energy_plot
+                    energy_plot_file_name = data_file_name_base * "_Energy.csv"
+                    do_combinaison && (open(energy_plot_file_name, "w") do _ end)  # Create/Clear the file
+                    if measure.error_bars
+                        plot_cmd = gnuplot_energy_plot_command_errorbars(data_file_name, legend, color_index, point_type)
+                    else
+                        plot_cmd = gnuplot_energy_plot_command(data_file_name, legend, color_index, point_type)
+                    end
+                    push!(plot_energy_commands, plot_cmd)
+                    measure.energy_plot_reps && for r in measure.repeats
+                        plot_cmd = gnuplot_energy_vals_plot_command(data_file_name, legend * " - $r", color_index, point_type, r)
+                        push!(plot_energy_commands, plot_cmd)
+                    end
+                end
+
+                if measure.time_MPI_plot || measure.energy_plot
+                    color_index += 1  # Each line and its relative counterpart(s) will have the same color
                 end
             end
 
@@ -1380,6 +1440,17 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int,
             print(gnuplot_script, base_gnuplot_MPI_time_script_commands(measure.time_MPI_plot_file, plot_title,
                 measure.log_scale, measure.device == CPU ? "right" : "left"))
             plot_cmd = join(plot_MPI_commands, ", \\\n     ")
+            println(gnuplot_script, plot_cmd)
+        end
+    end
+
+    if measure.energy_plot
+        # Same for the energy plot
+        open(measure.energy_script, "w") do gnuplot_script
+            plot_title = measure.plot_title * ", Energy consumption"
+            print(gnuplot_script, base_gnuplot_energy_script_commands(measure.energy_plot_file, plot_title,
+                measure.log_scale, measure.device == CPU ? "right" : "left"))
+            plot_cmd = join(plot_energy_commands, ", \\\n     ")
             println(gnuplot_script, plot_cmd)
         end
     end

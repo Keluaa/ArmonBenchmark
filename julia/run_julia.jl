@@ -57,6 +57,7 @@ hw_counters_options = "(cache-misses,cache-references,L1-dcache-loads,L1-dcache-
     #= "(LLC-load-misses,LLC-loads,LLC-store-misses,LLC-stores)," * =#
     "(dTLB-loads,dTLB-load-misses)," *
     "(cpu-cycles,instructions,branch-instructions)"
+track_energy = false
 
 base_file_name = ""
 gnuplot_script = ""
@@ -80,7 +81,7 @@ i = 1
 while i <= length(ARGS)
     arg = ARGS[i]
 
-    # Solver params
+    # Solver params
     if arg == "-s"
         global scheme = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
@@ -121,7 +122,7 @@ while i <= length(ARGS)
         global nghost = parse(Int, ARGS[i+1])
         global i += 1
 
-    # Solver output params
+    # Solver output params
     elseif arg == "--verbose"
         global silent = parse(Int, ARGS[i+1])
         global i += 1
@@ -150,7 +151,7 @@ while i <= length(ARGS)
         global comparison_tol = parse(Float64, ARSG[i+1])
         global i += 1
 
-    # Multithreading params
+    # Multithreading params
     elseif arg == "--use-threading"
         global use_threading = parse(Bool, ARGS[i+1])
         global i += 1
@@ -178,7 +179,7 @@ while i <= length(ARGS)
         global threads_proc_bind = Symbol(ARGS[i+1])
         global i += 1
 
-    # GPU params
+    # GPU params
     elseif arg == "--use-gpu"
         @warn "'--use-gpu' is ignored"
         global i += 1
@@ -283,8 +284,11 @@ while i <= length(ARGS)
     elseif arg == "--limit-to-mem"
         global limit_to_max_mem = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--track-energy"
+        global track_energy = parse(Bool, ARGS[i+1])
+        global i += 1
 
-    # Measurement output params
+    # Measurement output params
     elseif arg == "--data-file"
         global base_file_name = ARGS[i+1]
         global i += 1
@@ -515,8 +519,31 @@ function get_duration_string(duration_sec::Float64)
 end
 
 
+function get_current_energy_consumed()
+    job_id = get(ENV, "SLURM_JOBID", 0)
+    if job_id == 0
+        @warn "SLURM_JOBID is not defined, cannot get the energy consumption" maxlog=1
+        return 0
+    end
+
+    format = "jobid,ConsumedEnergyRaw"
+    slurm_cmd = `sstat -j $job_id -a -P -o $format`
+    output = read(slurm_cmd, String)
+
+    parsed = output |> strip |> split
+    parsed = map(step -> split(step, '|'), parsed)
+    current_job_step = last(parsed)
+
+    length(current_job_step) != 2 && error("Expected two columns in the output. Output:\n$output\n")
+
+    return parse(Int, last(current_job_step))  # In Joules
+end
+
+
 function run_armon(params::ArmonParameters, with_profiling::Bool)
     vals_cells_per_sec = Vector{Float64}(undef, repeats)
+    energy_consumed = zeros(Int, repeats)
+    prev_energy = track_energy ? get_current_energy_consumed() : 0
     total_time_contrib = nothing
     total_cycles = 0
     mean_async_efficiency = 0
@@ -527,6 +554,13 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
         _, cycles, cells_per_sec, time_contrib, async_efficiency = armon(params)
 
         with_profiling && @pause_profiling()
+
+        if track_energy
+            current_energy = get_current_energy_consumed()
+            energy_consumed[i] = current_energy - prev_energy
+            prev_energy = current_energy
+        end
+
         vals_cells_per_sec[i] = cells_per_sec
         total_cycles += cycles
         mean_async_efficiency += async_efficiency
@@ -540,11 +574,11 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
 
     mean_async_efficiency /= repeats
     
-    return total_cycles, vals_cells_per_sec, total_time_contrib, mean_async_efficiency
+    return total_cycles, vals_cells_per_sec, energy_consumed, total_time_contrib, mean_async_efficiency
 end
 
 
-function do_measure(data_file_name, hw_c_file_name, test, cells, splitting)
+function do_measure(data_file_name, energy_file_name, hw_c_file_name, test, cells, splitting)
     params = build_params(test, cells; 
         ieee_bits, riemann, scheme, cfl, 
         Dt, cst_dt, dt_on_even_cycles=false, axis_splitting=splitting,
@@ -575,13 +609,16 @@ function do_measure(data_file_name, hw_c_file_name, test, cells, splitting)
     end
 
     time_start = time_ns()
-    cycles, vals_cells_per_sec, time_contrib, async_efficiency = run_armon(params, true)
+    cycles, vals_cells_per_sec, energy_consumed, time_contrib, async_efficiency = run_armon(params, true)
     time_end = time_ns()
 
     duration = (time_end - time_start) / 1.0e9
 
     mean_cells_per_sec = mean(vals_cells_per_sec)
     std_cells_per_sec = std(vals_cells_per_sec; corrected=true, mean=mean_cells_per_sec)
+
+    mean_energy_consumed = mean(energy_consumed)
+    std_energy_consumed = std(energy_consumed; corrected=true, mean=mean_energy_consumed)
 
     @printf("%8.3f ± %3.1f Giga cells/sec %s\n", cells_per_sec, std_cells_per_sec, get_duration_string(duration))
 
@@ -596,11 +633,18 @@ function do_measure(data_file_name, hw_c_file_name, test, cells, splitting)
         end
     end
 
+    if options.track_energy && !isempty(energy_file_name)
+        open(energy_file_name, "a") do file
+            println(file, prod(cells), ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
+                join(energy_consumed, ", "))
+        end
+    end
+
     return time_contrib
 end
 
 
-function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, cells, splitting, px, py)
+function do_measure_MPI(data_file_name, comm_file_name, energy_file_name, hw_c_file_name, test, cells, splitting, px, py)
     if is_root
         if dimension == 1
             @printf(" - %s, %11g cells: ", test, cells)
@@ -626,8 +670,8 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
         variables_count = fieldcount(Armon.ArmonData)
         data_size = variables_count * params.nbcell * sizeof(typeof(params.Dt))
 
-        # TODO : Account for ressource usage overlap, for GPUs and multi-socket nodes
-        
+        # TODO : Account for resource usage overlap, for GPUs and multi-socket nodes
+
         if data_size > max_mem
             is_root && @printf("skipped because of memory: %.1f > %.1f GB\n", data_size / 10^9 * params.proc_size, max_mem / 10^9 * params.proc_size)
             return nothing
@@ -636,7 +680,7 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
 
     time_start = time_ns()
 
-    cycles, vals_cells_per_sec, time_contrib, async_efficiency = run_armon(params, true)
+    cycles, vals_cells_per_sec, energy_consumed, time_contrib, async_efficiency = run_armon(params, true)
 
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
@@ -649,9 +693,17 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
     time_contrib_vals = last.(time_contrib)
     merged_time_contrib_vals = MPI.Reduce(time_contrib_vals, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
  
-    # Gather the throughput measurements on the root process
+    # Gather the throughput and energy measurements on the root process
     merged_vals_cells_per_sec = MPI.Gather(vals_cells_per_sec, 0, MPI.COMM_WORLD)
     total_cells_per_sec = MPI.Reduce(sum(vals_cells_per_sec) / repeats, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
+
+    if track_energy
+        merged_energy_consumed = MPI.Gather(energy_consumed, 0, MPI.COMM_WORLD)
+        mean_energy_consumed = MPI.Reduce(sum(energy_consumed) / repeats, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
+    else
+        merged_energy_consumed = energy_consumed
+        mean_energy_consumed = 0
+    end
 
     if is_root
         if cycles <= 5
@@ -665,6 +717,12 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
             std_cells_per_sec = 0
         end
 
+        if length(merged_energy_consumed) > 1
+            std_energy_consumed = std(merged_energy_consumed; corrected=true) * sqrt(params.proc_size)
+        else
+            std_energy_consumed = 0
+        end
+
         @printf("%8.3f ± %4.2f Giga cells/sec", total_cells_per_sec, std_cells_per_sec)
 
         # Append the result to the data file
@@ -675,6 +733,13 @@ function do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, ce
                 else
                     println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec, ", ", std_cells_per_sec)
                 end
+            end
+        end
+
+        if !isempty(energy_file_name)
+            open(energy_file_name, "a") do file
+                println(file, prod(cells), ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
+                    join(energy_consumed, ", "))
             end
         end
         
@@ -724,7 +789,7 @@ end
 function process_ratio_to_grid(n_proc, ratios)
     (rpx, rpy) = ratios
     r = rpx / rpy
-    # In theory the ratios have been pre-checked so that those convertions don't throw InexactError
+    # In theory the ratios have been pre-checked so that those conversions don't throw InexactError
     px = convert(Int, √(n_proc * r))
     py = convert(Int, √(n_proc / r))
     return px, py
@@ -775,25 +840,24 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
         hist_file_name = ""
         comm_file_name = ""
         hw_c_file_name = ""
-    elseif dimension == 1
-        data_file_name = base_file_name * string(test) * ".csv"
-        hist_file_name = base_file_name * string(test) * "_hist.csv"
-        comm_file_name = base_file_name * string(test) * "_MPI_time.csv"
-        hw_c_file_name = base_file_name * string(test) * "_hw_counters.csv"
+        ergy_file_name = ""
     else
         data_file_name = base_file_name * string(test)
 
-        if length(axis_splitting) > 1
-            data_file_name *= "_" * string(splitting)
-        end
-
-        if length(proc_domains) > 1
-            data_file_name *= "_pg=$(px)x$(py)"
+        if dimension > 1
+            if length(axis_splitting) > 1
+                data_file_name *= "_" * string(splitting)
+            end
+    
+            if length(proc_domains) > 1
+                data_file_name *= "_pg=$(px)x$(py)"
+            end
         end
 
         hist_file_name = data_file_name * "_hist.csv"
         comm_file_name = data_file_name * "_MPI_time.csv"
         hw_c_file_name = data_file_name * "_hw_counters.csv"
+        ergy_file_name = data_file_name * "_ENERGY.csv"
         data_file_name *= ".csv"
     end
 
@@ -801,9 +865,11 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
 
     for cells in cells_list
         if use_MPI
-            time_contrib = do_measure_MPI(data_file_name, comm_file_name, hw_c_file_name, test, cells, splitting, px, py)
+            time_contrib = do_measure_MPI(data_file_name, comm_file_name, ergy_file_name, 
+                hw_c_file_name, test, cells, splitting, px, py)
         else
-            time_contrib = do_measure(data_file_name, hw_c_file_name, test, cells, splitting)
+            time_contrib = do_measure(data_file_name, ergy_file_name, 
+                hw_c_file_name, test, cells, splitting)
         end
 
         if is_root
