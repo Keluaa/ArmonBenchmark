@@ -33,7 +33,7 @@ end
         @testset "$test with $type" for type in (Float32, Float64),
                                         test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov)
             @test begin
-                differences_count = cmp_gpu_with_reference_for(type, test, CUDADevice(), CuArray)
+                differences_count = cmp_gpu_with_reference_for(type, test, :CUDA, CuArray)
                 differences_count == 0
             end skip=no_cuda
         end
@@ -43,7 +43,7 @@ end
         @testset "$test with $type" for type in (Float32, Float64),
                                         test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov)
             @test begin
-                differences_count = cmp_gpu_with_reference_for(type, test, ROCDevice(), ROCArray)
+                differences_count = cmp_gpu_with_reference_for(type, test, :ROCM, ROCArray)
                 differences_count == 0
             end skip=no_rocm
         end

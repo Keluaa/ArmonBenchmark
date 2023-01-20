@@ -19,6 +19,7 @@ export ArmonParameters, armon
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
 # Bug: fix dtCFL on AMDGPU
 # Bug: steps are not properly categorized and filtered at the output, giving wrong asynchronicity efficiency
+# Bug: some time measurements are incorrect on GPU
 
 # MPI Init
 
@@ -1504,9 +1505,9 @@ function dtCFL_MPI(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
     return dt
 end
 
-# 
+#
 # Lagrangian cell update
-# 
+#
 
 function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
@@ -1525,13 +1526,13 @@ function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
     end
 
     u = params.current_axis == X_axis ? data.umat : data.vmat
-    cell_update!(params, data, first_i:last_i, dt, u; dependencies)
+    event = cell_update!(params, data, first_i:last_i, dt, u; dependencies)
     if params.projection == :none
         x = params.current_axis == X_axis ? data.x : data.y
-        cell_update_lagrange!(params, data, first_i:last_i, last_i, dt, x; dependencies)
+        event = cell_update_lagrange!(params, data, first_i:last_i, last_i, dt, x; dependencies=event)
     end
 
-    return NoneEvent()
+    return event
 end
 
 #
@@ -2161,6 +2162,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
 
         if is_root
             if silent <= 1
+                wait(prev_event)
                 current_mass, current_energy = conservation_vars(params, data)
                 ΔM = abs(initial_mass - current_mass)     / initial_mass   * 100
                 ΔE = abs(initial_energy - current_energy) / initial_energy * 100
@@ -2168,6 +2170,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                     cycle, prev_dt, t, ΔM, ΔE)
             end
         elseif silent <= 1
+            wait(prev_event)
             conservation_vars(params, data)
         end
 
@@ -2175,16 +2178,20 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
         prev_dt = next_dt
 
         if cycle == 5
+            wait(prev_event)
             t_warmup = time_ns()
             set_warmup(false)
         end
 
         if animation_step != 0 && (cycle - 1) % animation_step == 0
+            wait(prev_event)
             frame_index = (cycle - 1) ÷ animation_step
             frame_file = joinpath("anim", params.output_file) * "_" * @sprintf("%03d", frame_index)
             write_sub_domain_file(params, data, frame_file)
         end
     end
+
+    wait(prev_event)
 
     @label stop
 

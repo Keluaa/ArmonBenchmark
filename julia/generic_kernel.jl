@@ -602,7 +602,7 @@ function transform_kernel(func::Expr)
         $(use_2D_lin ? :(
                 $var_2D_lin = let
                     # We don't use multi-dimensional kernels since they are very in
-                    ix, iy = divrem($var_global_lin, __ranges_info[4])
+                    ix, iy = divrem($var_global_lin - 1, __ranges_info[4])
                     j = __ranges_info[1] + ix * __ranges_info[2] - 1  # first index in of the row
                     i = __ranges_info[3] + iy + j  # cell index
                     i
@@ -615,10 +615,9 @@ function transform_kernel(func::Expr)
     # Adjust the GPU parameters
     if indexing_type == :lin_1D
         # Note: For the initial index `i_0`, we subtract 1 because of how the main and inner ranges
-        # are defined, and subtract 1 because of the fact that the index returned by the `@index`
-        # starts at 1 and not 0.
+        # are defined.
         gpu_loop_params = (:(i_0::Int),)
-        gpu_loop_params_names = (:(first(loop_range) - 2),)
+        gpu_loop_params_names = (:(first(loop_range) - 1),)
         gpu_ndrange = :(length(loop_range))
     elseif indexing_type == :lin_2D
         gpu_loop_params = (:(__ranges_info::NTuple{4, Int}),)

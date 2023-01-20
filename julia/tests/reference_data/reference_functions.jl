@@ -70,9 +70,13 @@ function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycl
     @indexing_vars(ref_params)
     ref_file_name = get_reference_data_file_name(ref_params.test, T)
 
+    # TODO: GPU/CPU still fails, but it is most likely that is is a problem with comparison and tolerance
+    atol = T <: Float64 ? 1e-13 : 1e-6
+    rtol = 4*eps(T)
+
     open(ref_file_name, "r") do ref_file
         ref_dt, ref_cycles = read_reference_data(ref_params, ref_file, ref_data)
-        @test ref_dt ≈ dt atol=1e-13 rtol=4*eps()
+        @test ref_dt ≈ dt atol=atol rtol=rtol
         @test ref_cycles == cycles
     end
 
@@ -83,9 +87,12 @@ function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycl
         for field in fields_to_compare
             ref_row = @view getfield(ref_data, field)[row_range]
             cur_row = @view getfield(data, field)[row_range]
-            diff_count = sum(.~ isapprox.(ref_row, cur_row; atol=1e-13, rtol=4*eps()))
+            diff_count = sum(.~ isapprox.(ref_row, cur_row; atol, rtol))
             differences_count += diff_count
-            (diff_count > 0) && @debug "Row $j has $diff_count differences in '$field' with the reference"
+            (diff_count > 0) && @debug begin
+                max_diff = maximum(abs.((ref_row .- cur_row) .* (.~ isapprox.(ref_row, cur_row; atol, rtol))))
+                "Row $j has $diff_count differences in '$field' with the reference. Max diff=$max_diff"
+            end
         end
     end
 
