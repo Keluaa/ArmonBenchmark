@@ -15,9 +15,8 @@ export ArmonParameters, armon
 
 # TODO LIST
 # center the positions of the cells in the output file
-# Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
+# Remove most generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
-# Bug: fix dtCFL on AMDGPU
 # Bug: steps are not properly categorized and filtered at the output, giving wrong asynchronicity efficiency
 # Bug: some time measurements are incorrect on GPU
 
@@ -1131,30 +1130,6 @@ end
 end
 
 #
-# GPU-only Kernels
-#
-
-@kernel function gpu_dtCFL_reduction_euler_kernel!(dx, dy, out, umat, vmat, cmat, domain_mask)
-    i = @index(Global)
-
-    c = cmat[i]
-    u = umat[i]
-    v = vmat[i]
-    mask = domain_mask[i]
-
-    out[i] = mask * min(
-        dx / abs(max(abs(u + c), abs(u - c))),
-        dy / abs(max(abs(v + c), abs(v - c)))
-    )
-end
-
-
-@kernel function gpu_dtCFL_reduction_lagrange_kernel!(out, cmat, domain_mask)
-    i = @index(Global)
-    out[i] = 1. / (cmat[i] * domain_mask[i])
-end
-
-#
 # Acoustic Riemann problem solvers
 #
 
@@ -1424,22 +1399,6 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
     if params.cst_dt
         # Constant time step
         return Dt
-    elseif params.use_gpu && params.device isa ROCDevice
-        # AMDGPU doesn't support ArrayProgramming, however its implementation of `reduce` is quite
-        # fast. Therefore first we compute dt for all cells and store the result in a temporary
-        # array, then we reduce this array.
-        # TODO : fix this
-        if params.projection != :none
-            gpu_dtCFL_reduction_euler! = gpu_dtCFL_reduction_euler_kernel!(params.device, params.block_size)
-            gpu_dtCFL_reduction_euler!(dx, dy, work_array_1, umat, vmat, cmat, domain_mask;
-                ndrange=length(cmat), dependencies) |> wait
-            dt = reduce(min, work_array_1)
-        else
-            gpu_dtCFL_reduction_lagrange! = gpu_dtCFL_reduction_lagrange_kernel!(params.device, params.block_size)
-            gpu_dtCFL_reduction_lagrange!(work_array_1, cmat, domain_mask;
-                ndrange=length(cmat), dependencies) |> wait
-            dt = reduce(min, work_array_1) * min(dx, dy)
-        end
     elseif params.projection != :none
         if params.use_gpu
             wait(dependencies)
