@@ -308,8 +308,8 @@ end
 
 
 function get_current_energy_consumed()
-    job_id = get(ENV, "SLURM_JOBID", 0)
-    if job_id == 0
+    job_id = get(ENV, "SLURM_JOBID", "")
+    if isempty(job)
         @warn "SLURM_JOBID is not defined, cannot get the energy consumption" maxlog=1
         return 0
     end
@@ -389,7 +389,7 @@ function run_armon(options::CppOptions, verbose::Bool)
     
             run_cmd = get_run_command(args)
             cells_throughput, repeats_energy_consumed = run_and_parse_output(run_cmd, verbose, options.repeats, options.track_energy_consumption)
-            
+
             mean_energy_consumed = mean(repeats_energy_consumed)
 
             if length(repeats_energy_consumed) > 1
@@ -409,7 +409,7 @@ function run_armon(options::CppOptions, verbose::Bool)
 
             if options.track_energy_consumption && !isempty(energy_file_name)
                 open(energy_file_name, "a") do file
-                    println(file, cells[1], ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
+                    println(file, cells, ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
                         join(repeats_energy_consumed, ", "))
                 end
             end
