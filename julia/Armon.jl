@@ -1129,6 +1129,30 @@ end
     pstar[i] = 0
 end
 
+
+#
+# GPU-only Kernels
+#
+
+@kernel function gpu_dtCFL_reduction_euler_kernel!(dx, dy, out, umat, vmat, cmat, domain_mask)
+    i = @index(Global)
+
+    c = cmat[i]
+    u = umat[i]
+    v = vmat[i]
+    mask = domain_mask[i]
+
+    dt_x = dx / abs(max(abs(u + c), abs(u - c)) * mask)
+    dt_y = dy / abs(max(abs(v + c), abs(v - c)) * mask)
+    out[i] = min(dt_x, dt_y)
+end
+
+
+@kernel function gpu_dtCFL_reduction_lagrange_kernel!(out, cmat, domain_mask)
+    i = @index(Global)
+    out[i] = 1. / (cmat[i] * domain_mask[i])
+end
+
 #
 # Acoustic Riemann problem solvers
 #
@@ -1399,6 +1423,22 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
     if params.cst_dt
         # Constant time step
         return Dt
+    elseif params.use_gpu && params.device isa ROCDevice
+        # AMDGPU doesn't support ArrayProgramming, however its implementation of `reduce` is quite
+        # fast. Therefore first we compute dt for all cells and store the result in a temporary
+        # array, then we reduce this array.
+        # TODO : fix this
+        if params.projection != :none
+            gpu_dtCFL_reduction_euler! = gpu_dtCFL_reduction_euler_kernel!(params.device, params.block_size)
+            gpu_dtCFL_reduction_euler!(dx, dy, work_array_1, umat, vmat, cmat, domain_mask;
+                ndrange=length(cmat), dependencies) |> wait
+            dt = reduce(min, work_array_1)
+        else
+            gpu_dtCFL_reduction_lagrange! = gpu_dtCFL_reduction_lagrange_kernel!(params.device, params.block_size)
+            gpu_dtCFL_reduction_lagrange!(work_array_1, cmat, domain_mask;
+                ndrange=length(cmat), dependencies) |> wait
+            dt = reduce(min, work_array_1) * min(dx, dy)
+        end
     elseif params.projection != :none
         if params.use_gpu
             wait(dependencies)
