@@ -208,7 +208,7 @@ gnuplot_MPI_plot_command_1(data_file, legend_title, color_index, pt_index) = "'$
 gnuplot_MPI_plot_command_2(data_file, legend_title, color_index, pt_index) = "'$(data_file)' using 1:(\$2/\$3*100) axis x1y2 w lp lc $(color_index) pt $(pt_index-1) dt 4 title '$(legend_title)'"
 gnuplot_energy_plot_command(data_file, legend_title, color_index, pt_index; mode="lp") = "'$(data_file)' using 1:2:3 w $(mode) lc $(color_index) pt $(pt_index) t '$(legend_title)'"
 gnuplot_energy_plot_command_errorbars(data_file, legend_title, color_index, pt_index) = gnuplot_energy_plot_command(data_file, legend_title, color_index, pt_index; mode="yerrorlines")
-gnuplot_energy_vals_plot_command(data_file, legend_title, color_index, pt_index, rep)  = "'$(data_file)' u 1:$(rep+3) w lp lc $(color_index) dt 3 pt $(pt_index) t '$(legend_title)'"
+gnuplot_energy_vals_plot_command(data_file, legend_title, color_index, pt_index, rep) = "'$(data_file)' u 1:$(rep+3) w lp lc $(color_index) dt 3 pt $(pt_index) t '$(legend_title)'"
 
 sub_script_content(job_name, index, partition, nodes, processes, cores_per_process, max_time, ref_command, commands, next_script) = """
 #!/bin/bash

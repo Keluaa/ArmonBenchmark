@@ -15,9 +15,8 @@ export ArmonParameters, armon
 
 # TODO LIST
 # center the positions of the cells in the output file
-# Remove all generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
+# Remove most generics : 'where {T, V <: AbstractVector{T}}' etc... when T and V are not used in the method. Omitting the 'where' will not change anything.
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
-# Bug: fix dtCFL on AMDGPU
 # Bug: steps are not properly categorized and filtered at the output, giving wrong asynchronicity efficiency
 # Bug: some time measurements are incorrect on GPU
 
@@ -1136,6 +1135,7 @@ end
     pstar[i] = 0
 end
 
+
 #
 # GPU-only Kernels
 #
@@ -1148,10 +1148,9 @@ end
     v = vmat[i]
     mask = domain_mask[i]
 
-    out[i] = mask * min(
-        dx / abs(max(abs(u + c), abs(u - c))),
-        dy / abs(max(abs(v + c), abs(v - c)))
-    )
+    dt_x = dx / abs(max(abs(u + c), abs(u - c)) * mask)
+    dt_y = dy / abs(max(abs(v + c), abs(v - c)) * mask)
+    out[i] = min(dt_x, dt_y)
 end
 
 
