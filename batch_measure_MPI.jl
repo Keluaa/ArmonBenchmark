@@ -189,7 +189,6 @@ $(log_scale ? "set logscale x" : "")
 `echo "$graph_file_name" >> $plots_update_file`
 plot """
 
-
 base_gnuplot_energy_script_commands(graph_file_name, title, log_scale, legend_pos) = """
 set terminal pdfcairo color size 10in, 6in
 set output '$graph_file_name'
@@ -421,9 +420,9 @@ function parse_measure_params(file_line_parser)
             limit_to_max_mem = parse(Bool, value)
         elseif option == "track_energy"
             track_energy = parse(Bool, value)
-        elseif options == "energy_plot"
+        elseif option == "energy_plot"
             energy_plot = parse(Bool, value)
-        elseif options == "energy_plot_reps"
+        elseif option == "energy_plot_reps"
             energy_plot_reps = parse(Bool, value)
         elseif option == "time_hist"
             time_histogram = parse(Bool, value)
