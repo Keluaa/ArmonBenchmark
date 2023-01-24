@@ -20,7 +20,9 @@ end
 
 @testset "Kernel" begin
     @testset begin
-        # CPU / GPU compilation
-        # with/without threads + with/without SIMD
+        # TODO: CPU / GPU compilation
+        # TODO: with/without threads + with/without SIMD
+        # TODO: equivalence 1D/2D (need correct indexing)
+        # TODO: equivalence CPU/CPU+simd/CPU+threads/CPU+simd+threads/GPU
     end
 end

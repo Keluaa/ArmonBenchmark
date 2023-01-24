@@ -84,8 +84,8 @@ function omp_bind_threads(offset::Int, places::Symbol, bind::Symbol; hyperthread
         return
     end
 
-    info = sysinfo()
-    
+    info = ThreadPinning.sysinfo()
+
     if places == :threads
         hyperthreading = true
         cpuid_places = [info.cpuids]

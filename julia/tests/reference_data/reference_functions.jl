@@ -64,21 +64,19 @@ function read_reference_data(ref_params::ArmonParameters{T}, ref_file::IO,
 end
 
 
-function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycles::Int, 
-        data::ArmonData{V}, ref_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+# TODO: GPU/CPU still fails, but it is most likely that is is a problem with comparison and tolerance
+abs_tol(::Type{Float64}) = 1e-13
+abs_tol(::Type{Float32}) = 1e-6
+abs_tol(::Flt) where {Flt <: AbstractFloat} = abs_tol(Flt)
+rel_tol(::Type{Flt}) where {Flt <: AbstractFloat} = 4*eps(Flt)
+rel_tol(::Flt) where {Flt <: AbstractFloat} = rel_tol(Flt)
+
+
+function count_differences(ref_params::ArmonParameters{T}, 
+        data::ArmonData{V}, ref_data::ArmonData{V};
+        atol=abs_tol(T), rtol=rel_tol(T)) where {T, V <: AbstractArray{T}}
     (; nx, ny) = ref_params
     @indexing_vars(ref_params)
-    ref_file_name = get_reference_data_file_name(ref_params.test, T)
-
-    # TODO: GPU/CPU still fails, but it is most likely that is is a problem with comparison and tolerance
-    atol = T <: Float64 ? 1e-13 : 1e-6
-    rtol = 4*eps(T)
-
-    open(ref_file_name, "r") do ref_file
-        ref_dt, ref_cycles = read_reference_data(ref_params, ref_file, ref_data)
-        @test ref_dt ≈ dt atol=atol rtol=rtol
-        @test ref_cycles == cycles
-    end
 
     differences_count = 0
     fields_to_compare = (:x, :y, :rho, :umat, :vmat, :pmat)
@@ -97,4 +95,21 @@ function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycl
     end
 
     return differences_count
+end
+
+
+function compare_with_reference_data(ref_params::ArmonParameters{T}, dt::T, cycles::Int, 
+        data::ArmonData{V}, ref_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+    ref_file_name = get_reference_data_file_name(ref_params.test, T)
+
+    atol = abs_tol(T)
+    rtol = rel_tol(T)
+
+    open(ref_file_name, "r") do ref_file
+        ref_dt, ref_cycles = read_reference_data(ref_params, ref_file, ref_data)
+        @test ref_dt ≈ dt atol=atol rtol=rtol
+        @test ref_cycles == cycles
+    end
+
+    return count_differences(ref_params, data, ref_data; atol, rtol)
 end

@@ -1,17 +1,27 @@
 
 using Printf
-import .Armon: @i, @indexing_vars, ArmonData, init_test, time_loop
+import .Armon: @i, @indexing_vars, ArmonData, init_test, time_loop, write_sub_domain_file, test_name
 
 
 function cmp_cpu_with_reference(ref_params)
     dt, cycles, data = run_armon_reference(ref_params)
-    ref_data = ArmonData(typeof(ref_params.Dt), ref_params.nbcell, ref_params.comm_array_size)
-    return compare_with_reference_data(ref_params, dt, cycles, data, ref_data)
+    T = typeof(ref_params.Dt)
+    ref_data = ArmonData(T, ref_params.nbcell, ref_params.comm_array_size)
+    
+    differences_count = compare_with_reference_data(ref_params, dt, cycles, data, ref_data)
+
+    if differences_count > 0 && WRITE_FAILED
+        file_name = "test_$(test_name(ref_params.test))_$(T)"
+        ref_params.single_comm_per_axis_pass && (file_name *= "_single_comm")
+        write_sub_domain_file(ref_params, data, file_name; no_msg=true)
+    end
+
+    return differences_count
 end
 
 
 @testset "Convergence" begin
-    @testset "$test with $type" for type in (Float32, Float64), 
+    @testset "$test with $type" for type in (Float32,  Float64),
                                     test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov)
         @test begin
             ref_params = get_reference_params(test, type)

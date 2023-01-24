@@ -1,5 +1,5 @@
 
-import Base: oneto, length, size, axes, isempty, first, last, in
+import Base: oneto, length, size, axes, isempty, first, last, in, show
 
 #
 # Range utilities
@@ -59,6 +59,8 @@ expand_dir(dr::DomainRange, dir::Axis, n::Int = 1)  = apply_along_direction(dr, 
 inflate_dir(dr::DomainRange, dir::Axis, n::Int = 1) = apply_along_direction(dr, dir, inflate, n)
 
 linear_range(dr::DomainRange) = first(dr):last(dr)
+
+show(io::IO, dr::DomainRange) = print(io, "DomainRange{$(dr.col), $(dr.row)}")
 
 #
 # DomainRanges: represents the different sub-domains of a domain for a sweep along a direction

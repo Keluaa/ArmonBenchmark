@@ -10,7 +10,7 @@ scheme = :GAD_minmod
 riemann = :acoustic
 riemann_limiter = :minmod
 nghost = 2
-cfl = 0.6
+cfl = 0.
 Dt = 0.
 maxtime = 0.0
 maxcycle = 500
@@ -31,7 +31,7 @@ gpu = :CUDA
 threads_places = :cores
 threads_proc_bind = :close
 dimension = 2
-output_precision = 6
+output_precision = nothing
 compare = false
 compare_ref = false
 comparison_tol = 1e-10
@@ -67,6 +67,7 @@ time_histogram = false
 flatten_time_dims = false
 time_MPI_graph = false
 repeats = 1
+no_precompilation = false
 
 
 dim_index = findfirst(x->x=="--dim", ARGS)
@@ -147,8 +148,8 @@ while i <= length(ARGS)
     elseif arg == "--compare-ref"
         global compare_ref = parse(Bool, ARGS[i+1])
         global i += 1
-    elseif arg == "--comparision-tolerance"
-        global comparison_tol = parse(Float64, ARSG[i+1])
+    elseif arg == "--comparison-tolerance"
+        global comparison_tol = parse(Float64, ARGS[i+1])
         global i += 1
 
     # Multithreading params
@@ -286,6 +287,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--track-energy"
         global track_energy = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--no-precomp"
+        global no_precompilation = parse(Bool, ARGS[i+1])
         global i += 1
 
     # Measurement output params
@@ -584,7 +588,7 @@ function do_measure(data_file_name, energy_file_name, hw_c_file_name, test, cell
         Dt, cst_dt, dt_on_even_cycles=false, axis_splitting=splitting,
         maxtime, maxcycle, silent, output_file, write_output, hw_counters_output_file=hw_c_file_name,
         use_threading, use_simd, use_gpu,
-        use_MPI=false, px=0, py=0,
+        use_MPI=false, px=1, py=1,
         single_comm_per_axis_pass=false, reorder_grid=false, async_comms=false
     )
 
@@ -620,20 +624,20 @@ function do_measure(data_file_name, energy_file_name, hw_c_file_name, test, cell
     mean_energy_consumed = mean(energy_consumed)
     std_energy_consumed = std(energy_consumed; corrected=true, mean=mean_energy_consumed)
 
-    @printf("%8.3f ± %3.1f Giga cells/sec %s\n", cells_per_sec, std_cells_per_sec, get_duration_string(duration))
+    @printf("%8.3f ± %3.1f Giga cells/sec %s\n", mean_cells_per_sec, std_cells_per_sec, get_duration_string(duration))
 
     # Append the result to the data file
     if !isempty(data_file_name)
         open(data_file_name, "a") do data_file
             if dimension == 1
-                println(data_file, cells, ", ", cells_per_sec, ", ", std_cells_per_sec)
+                println(data_file, cells, ", ", mean_cells_per_sec, ", ", std_cells_per_sec)
             else
-                println(data_file, cells[1] * cells[2], ", ", cells_per_sec, ", ", std_cells_per_sec)
+                println(data_file, cells[1] * cells[2], ", ", mean_cells_per_sec, ", ", std_cells_per_sec)
             end
         end
     end
 
-    if options.track_energy && !isempty(energy_file_name)
+    if track_energy && !isempty(energy_file_name)
         open(energy_file_name, "a") do file
             println(file, prod(cells), ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
                 join(energy_consumed, ", "))
@@ -805,12 +809,14 @@ end
 if is_root
     loading_end_time = time_ns()
     @printf("Loading time: %3.1f sec\n", (loading_end_time - loading_start_time) / 1e9)
-    println("Compiling...")
-    compile_start_time = time_ns()
+    if !no_precompilation
+        println("Compiling...")
+        compile_start_time = time_ns()
+    end
 end
 
 
-for test in tests
+!no_precompilation && for test in tests
     # We redirect stdout so that in case 'silent < 5', output functions are pre-compiled and so they 
     # don't influence the timing results.
     # 'devnull' is not used here since 'println' and others will not go through their normal code paths.
@@ -828,7 +834,7 @@ for test in tests
 end
 
 
-if is_root
+if is_root && !no_precompilation
     compile_end_time = time_ns()
     @printf(" (time: %3.1f sec)\n", (compile_end_time - compile_start_time) / 1e9)
 end

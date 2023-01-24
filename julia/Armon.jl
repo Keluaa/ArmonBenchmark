@@ -107,6 +107,8 @@ test_from_name(::Val{:Sedov})     = Sedov
 test_from_name(::Val{s}) where s = error("Unknown test case: '$s'")
 test_from_name(s::Symbol) = test_from_name(Val(s))
 
+test_name(::Test) where {Test <: TestCase} = Test.name.name
+
 default_domain_size(::Type{<:TestCase}) = (1, 1)
 default_domain_size(::Type{Sedov}) = (2, 2)
 
@@ -373,9 +375,13 @@ function ArmonParameters(;
         error("Expected a TestCase type or a symbol, got: $test")
     end
 
+    if single_comm_per_axis_pass
+        error("single_comm_per_axis_pass=true is broken")
+    end
+
     # MPI
     if use_MPI
-        !MPI.Initialized() && error("'use_mpi=true' but MPI has not yet been initialized")
+        !MPI.Initialized() && error("'use_MPI=true' but MPI has not yet been initialized")
 
         rank = MPI.Comm_rank(COMM)
         proc_size = MPI.Comm_size(COMM)
@@ -486,7 +492,7 @@ function ArmonParameters(;
     else
         comm_array_size = 0
     end
-    
+
     return ArmonParameters{flt_type}(
         test, riemann, scheme, riemann_limiter,
         nghost, nx, ny, dx, domain_size, origin,
@@ -1179,6 +1185,50 @@ function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V},
     end
 end
 
+
+function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
+        dt::T, domain_ranges::DomainRanges, label::Symbol;
+        dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}}
+
+    if label == :inner
+        range = inner_fluxes_domain(domain_ranges)
+    elseif label == :outer_lb
+        range = outer_fluxes_lb_domain(domain_ranges)
+        label = :outer
+        sides = (:left, :bottom)
+    elseif label == :outer_rt
+        range = outer_fluxes_rt_domain(domain_ranges)
+        label = :outer
+        sides = (:right, :top)
+    elseif label == :full
+        range = full_fluxes_domain(domain_ranges)
+        sides = (:left, :bottom, :right, :top)
+    else
+        error("Wrong region label: $label")
+    end
+
+    if params.use_MPI && label != :inner
+        if params.current_axis == X_axis
+            sides = filter(in((:left, :right)), sides)
+        else  # Y_axis
+            sides = filter(in((:top, :bottom)), sides)
+        end
+
+        # Extend the range if there is a neighbour in the current direction
+        for side in sides
+            params.neighbours[side] == MPI.PROC_NULL && continue
+            # TODO: compute the '1' dynamically depending on the stencil of each kernel
+            if side in (:left, :bottom)
+                range = prepend_dir(range, params.current_axis, 1)
+            else
+                range = expand_dir(range, params.current_axis, 1)
+            end
+        end
+    end
+
+    return numericalFluxes!(params, data, dt, range, label; dependencies, no_threading)
+end
+
 #
 # Equations of State
 #
@@ -1342,16 +1392,15 @@ function write_border_array!(params::ArmonParameters{T}, data::ArmonData{V}, val
 end
 
 
-function exchange_with_neighbour(params::ArmonParameters{T}, array::V, neighbour_rank::Int,
-        cart_comm::MPI.Comm) where {T, V <: AbstractArray{T}}
+function exchange_with_neighbour(params::ArmonParameters{T}, array::V, neighbour_rank::Int) where {T, V <: AbstractArray{T}}
     @perf_task "comms" "MPI_sendrecv" @time_expr_a "boundaryConditions!_MPI" MPI.Sendrecv!(array, 
-        neighbour_rank, 0, array, neighbour_rank, 0, cart_comm)
+        neighbour_rank, 0, array, neighbour_rank, 0, params.cart_comm)
 end
 
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::W, axis::Axis; 
         dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
-    (; neighbours, cart_comm, cart_coords) = params
+    (; neighbours, cart_coords) = params
     # TODO : use active RMA instead? => maybe but it will (maybe) not work with GPUs: 
     #   https://www.open-mpi.org/faq/?category=runcuda
     # TODO : use CUDA/ROCM-aware MPI
@@ -1394,7 +1443,7 @@ function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, hos
         else
             read_event = read_border_array!(params, data, comm_array, side; 
                 dependencies=prev_event, no_threading)
-            Event(exchange_with_neighbour, params, comm_array, neighbour, cart_comm;
+            Event(exchange_with_neighbour, params, comm_array, neighbour; 
                 dependencies=read_event) |> wait
             prev_event = write_border_array!(params, data, comm_array, side; 
                 no_threading)
@@ -1554,6 +1603,8 @@ function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_
     if params.use_MPI && !params.single_comm_per_axis_pass
         # Additional communications phase needed to get the new values of the lagrangian cells
         # TODO: put this outside of the function
+        # TODO: this should be done also in the non-MPI case, because of cellUpdate! changing more
+        #  cells that it should.
         dependencies = boundaryConditions!(params, data, host_array, params.current_axis; dependencies)
     end
 
@@ -1737,8 +1788,8 @@ function write_data_to_file(params::ArmonParameters, data::ArmonData,
 end
 
 
-function build_file_path(params::ArmonParameters, file_name::String; no_cleanup=false)
-    (; output_dir, use_MPI, is_root, cart_coords, cart_comm) = params
+function build_file_path(params::ArmonParameters, file_name::String)
+    (; output_dir, use_MPI, is_root, cart_coords) = params
 
     file_path = joinpath(output_dir, file_name)
 
@@ -1746,16 +1797,7 @@ function build_file_path(params::ArmonParameters, file_name::String; no_cleanup=
         mkpath(output_dir)
     end
 
-    if use_MPI && !no_cleanup
-        if is_root
-            # Advanced globing to remove all files sharing the same file name
-            remove_all_outputs = "rm -f $(file_path)_*([0-9])x*([0-9])"
-            run(`bash -O extglob -c $remove_all_outputs`)
-        end
-
-        # Wait for the root command to complete
-        params.use_MPI && MPI.Barrier(cart_comm)
-
+    if use_MPI
         (cx, cy) = cart_coords
         params.use_MPI && (file_path *= "_$(cx)x$(cy)")
     end
@@ -1768,6 +1810,7 @@ function write_sub_domain_file(params::ArmonParameters, data::ArmonData, file_na
     (; silent, nx, ny, is_root, nghost) = params
 
     output_file_path = build_file_path(params, file_name)
+
     open(output_file_path, "w") do file
         col_range = 1:ny
         row_range = 1:nx
@@ -1871,7 +1914,7 @@ end
 function read_sub_domain_file!(params::ArmonParameters, data::ArmonData, file_name::String)
     (; nx, ny, nghost) = params
 
-    file_path = build_file_path(params, file_name; no_cleanup=true)
+    file_path = build_file_path(params, file_name)
 
     open(file_path, "r") do file
         col_range = 1:ny
@@ -1890,7 +1933,7 @@ end
 #
 
 function compare_data(label::String, params::ArmonParameters{T}, 
-        ref_data::ArmonData{V}, our_data::ArmonData{V}) where {T, V <: AbstractArray{T}}
+        ref_data::ArmonData{V}, our_data::ArmonData{V}; mask=nothing) where {T, V <: AbstractArray{T}}
     (; row_length, nghost, nbcell, comparison_tolerance) = params
     different = false
     fields_to_compare = (:x, :y, :rho, :umat, :vmat, :pmat)
@@ -1900,6 +1943,7 @@ function compare_data(label::String, params::ArmonParameters{T},
 
         diff_mask = .~ isapprox.(ref_val, our_val; atol=comparison_tolerance)
         !params.write_ghosts && (diff_mask .*= our_data.domain_mask)
+        !isnothing(mask) && (diff_mask .*= mask)
         diff_count = sum(diff_mask)
 
         if diff_count > 0
@@ -1923,14 +1967,42 @@ function compare_data(label::String, params::ArmonParameters{T},
 end
 
 
+function domain_mask_with_ghosts(params::ArmonParameters{T}, mask::V) where {T, V <: AbstractArray{T}}
+    (; nbcell, nx, ny, nghost, row_length) = params
+
+    r = params.extra_ring_width + nghost
+    axis = params.current_axis
+
+    for i in 1:nbcell
+        ix = ((i-1) % row_length) - nghost
+        iy = ((i-1) ÷ row_length) - nghost
+
+        mask[i] = (
+               (-r ≤ ix < nx+r && -r ≤ iy < ny+r)  # The sub-domain region plus a ring of ghost cells...
+            && ( 0 ≤ ix < nx   ||  0 ≤ iy < ny  )  # ...while excluding the corners of the sub-domain...
+            &&((axis == X_axis &&  0 ≤ iy < ny  )  # ...and excluding the ghost cells outside of the
+            || (axis == Y_axis &&  0 ≤ ix < nx  )) # current axis
+        ) ? 1 : 0
+    end
+end
+
+
 function compare_with_file(params::ArmonParameters{T}, 
         data::ArmonData{V}, file_name::String, label::String) where {T, V <: AbstractArray{T}}
     ref_data = ArmonData(T, params.nbcell, params.comm_array_size)
     read_sub_domain_file!(params, ref_data, file_name)
-    different = compare_data(label, params, ref_data, data)
+
+    if params.use_MPI && params.write_ghosts
+        domain_mask_with_ghosts(params, ref_data.domain_mask)
+        different = compare_data(label, params, ref_data, data; mask=ref_data.domain_mask)
+    else
+        different = compare_data(label, params, ref_data, data)
+    end
+
     if params.use_MPI
         different = MPI.Allreduce(different, |, params.cart_comm)
     end
+
     return different
 end
 
@@ -2014,8 +2086,8 @@ function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where
     end
 
     if params.use_MPI
-        total_mass   = MPI.Reduce(total_mass,   MPI.Op(+, T), params.cart_comm)
-        total_energy = MPI.Reduce(total_energy, MPI.Op(+, T), params.cart_comm)
+        total_mass   = MPI.Allreduce(total_mass,   MPI.SUM, params.cart_comm)
+        total_energy = MPI.Allreduce(total_energy, MPI.SUM, params.cart_comm)
     end
 
     return total_mass, total_energy
@@ -2093,8 +2165,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                     @async begin
                         event_2 = update_EOS!(params, data, 
                             inner_domain(domain_ranges), :inner; dependencies=prev_event)
-                        event_2 = numericalFluxes!(params, data, prev_dt * dt_factor, 
-                            inner_fluxes_domain(domain_ranges), :inner; dependencies=event_2)
+                        event_2 = numericalFluxes!(params, data, prev_dt * dt_factor, domain_ranges, :inner; dependencies=event_2)
                         wait(event_2)
                     end
 
@@ -2112,11 +2183,9 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                             dependencies=event_1, no_threading)
 
                         event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
-                            outer_fluxes_lb_domain(domain_ranges), :outer; 
-                            dependencies=event_1, no_threading)
+                            domain_ranges, :outer_lb; dependencies=event_1, no_threading)
                         event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
-                            outer_fluxes_rt_domain(domain_ranges), :outer; 
-                            dependencies=event_1, no_threading)
+                            domain_ranges, :outer_rt; dependencies=event_1, no_threading)
                         wait(event_1)
                     end
                 end
@@ -2133,8 +2202,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                 step_checkpoint(params, data, cpu_data, "boundaryConditions", cycle, axis; 
                     dependencies=event) && @goto stop
 
-                event = numericalFluxes!(params, data, prev_dt * dt_factor, 
-                    full_fluxes_domain(domain_ranges), :full; dependencies=event)
+                event = numericalFluxes!(params, data, prev_dt * dt_factor, domain_ranges, :full; dependencies=event)
                 step_checkpoint(params, data, cpu_data, "numericalFluxes", cycle, axis;
                     dependencies=event) && @goto stop
 

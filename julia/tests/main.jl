@@ -8,6 +8,22 @@ end
 using .Armon
 using Test
 
+WRITE_FAILED = parse(Bool, get(ENV, "WRITE_FAILED", "false"))  # TODO: impl for non-mpi tests
+NO_MPI = parse(Bool, get(ENV, "NO_MPI", "false"))
+
+if !NO_MPI
+    using MPI
+    MPI.Init()
+    is_root = MPI.Comm_rank(MPI.COMM_WORLD) == 0
+    world_size = MPI.Comm_size(MPI.COMM_WORLD)
+    if is_root && world_size > 1
+        println("Testing using $world_size processes")
+    end
+else
+    is_root = true
+end
+
+
 include("reference_data/reference_functions.jl")
 
 
@@ -20,7 +36,7 @@ if isinteractive()
      - stability      Type stability
      - domains        Domain 2D indexing
      - kernels        Compilation and correctness of indexing in generic kernels (CPU & GPU)
-     - convergence    Convergence to the refenrence solutions
+     - convergence    Convergence to the reference solutions
      - conservation   Check that the energy and mass for each are kept constant throughout a lot of cycles.
      - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
      - performance    Checks for any regression in performance
@@ -50,11 +66,19 @@ end
 
 
 function do_tests(tests_to_do)
-    println("Testing: ", join(tests_to_do, ", "))
+    is_root && println("Testing: ", join(tests_to_do, ", "))
+
+    !is_root && (Test.TESTSET_PRINT_ENABLE[] = false)
 
     ts = @testset "Armon tests" begin
         for test in tests_to_do
-            if     test == :quality        include("code_quality.jl")
+            if !is_root
+                if     test == :async      include("async.jl")
+                elseif test == :mpi        include("mpi.jl")
+                else
+                    # the test is for only a single process
+                end
+            elseif test == :quality        include("code_quality.jl")
             elseif test == :stability      include("type_stability.jl")
             elseif test == :domains        include("domains.jl")
             elseif test == :convergence    include("convergence.jl")
@@ -68,13 +92,14 @@ function do_tests(tests_to_do)
                 error("Unknown test set: $test")
             end
 
-            # TODO : suceptibility test comparing a result with different rounding modes
-            # TODO : test lagrangian only mode
+            # TODO: susceptibility test comparing a result with different rounding modes
+            # TODO: idempotence of `measure_time=true/false`
+            # TODO: test lagrangian only mode (or remove it)
         end
     end
 
     # TODO: in Julia 1.8, there is one more option: 'showtimings' which display the time for each test
-    if isinteractive()
+    if is_root && isinteractive()
         Test.print_test_results(ts)
     end
 end
