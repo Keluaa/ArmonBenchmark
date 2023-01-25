@@ -42,7 +42,7 @@ end
 function make_simd_loop(expr::Expr; choice=:dynamic)
     with = :(@fastmath @inbounds @simd ivdep $(expr))
     without = :(@inbounds $(expr))
-    
+
     if choice == :dynamic
         return quote
             if params.use_simd
@@ -142,20 +142,23 @@ function make_simd_threaded_iter(range, expr::Expr; threading=:dynamic, simd=:dy
         # Add in the loop body, before the first statement: `i = range_var[__i_idx] - 1 + __j`
         first_expr_idx = loop_body.args[1] isa LineNumberNode ? 2 : 1
         insert!(loop_body.args, first_expr_idx, :($i = __loop_range[__i_idx] - 1 + __j))
-        
+
         # By adding `__j_idx` and `__j_iter`, we can know where we are in the total iterations with
         # `__j_iter + __i_idx`
-        main_loop_idx = :((__j_idx, __j))
-        main_loop_expr = :(enumerate($(range)))
-        init_inner_loop = :(__j_iter = (__j_idx - 1) * length(__loop_range))
+        main_loop_idx = :(__j_idx)
+        main_loop_expr = :(Base.OneTo(length(__main_range)))
+        init_inner_loop = quote
+            __j = first(__main_range) + step(__main_range) * (__j_idx - 1)
+            __j_iter = (__j_idx - 1) * length(__loop_range)
+        end
     else
         main_loop_idx = :(__j)
-        main_loop_expr = range
+        main_loop_expr = :(__main_range)
         init_inner_loop = Expr(:block)
     end
 
     return quote
-        let __loop_range = $loop_range, __loop_length = length(__loop_range)
+        let __main_range = $range, __loop_range = $loop_range, __loop_length = length(__loop_range)
             $(make_threaded_loop(:(for $main_loop_idx in $main_loop_expr
                 $init_inner_loop
                 $(make_simd_loop(loop_expr, choice=simd))
