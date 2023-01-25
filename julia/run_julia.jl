@@ -530,6 +530,14 @@ function get_current_energy_consumed()
         return 0
     end
 
+    local_id = get(ENV, "SLURM_LOCALID", -1)
+    if local_id == -1
+        @warn "SLURM_LOCALID is not defined, cannot get the energy consumption of each node" maxlog=1
+        return 0
+    elseif local_id != 0
+        return -1  # Only a single process will monitor the energy consumption on each node
+    end
+
     format = "jobid,ConsumedEnergyRaw"
     slurm_cmd = `sstat -j $job_id -a -P -o $format`
     output = read(slurm_cmd, String)
@@ -554,12 +562,12 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
 
     for i in 1:repeats
         with_profiling && @resume_profiling()
-        
+
         _, cycles, cells_per_sec, time_contrib, async_efficiency = armon(params)
 
         with_profiling && @pause_profiling()
 
-        if track_energy
+        if track_energy && prev_energy ≥ 0
             current_energy = get_current_energy_consumed()
             energy_consumed[i] = current_energy - prev_energy
             prev_energy = current_energy
@@ -568,7 +576,7 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
         vals_cells_per_sec[i] = cells_per_sec
         total_cycles += cycles
         mean_async_efficiency += async_efficiency
-        
+
         if MIN_TIME_CONTRIB
             total_time_contrib = reduce_time_contribution(total_time_contrib, time_contrib)
         else
@@ -577,7 +585,7 @@ function run_armon(params::ArmonParameters, with_profiling::Bool)
     end
 
     mean_async_efficiency /= repeats
-    
+
     return total_cycles, vals_cells_per_sec, energy_consumed, total_time_contrib, mean_async_efficiency
 end
 
@@ -703,88 +711,81 @@ function do_measure_MPI(data_file_name, comm_file_name, energy_file_name, hw_c_f
 
     if track_energy
         merged_energy_consumed = MPI.Gather(energy_consumed, 0, MPI.COMM_WORLD)
-        mean_energy_consumed = MPI.Reduce(sum(energy_consumed) / repeats, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
+        mean_energy_consumed = MPI.Reduce(sum(energy_consumed) / repeats, MPI.SUM, 0, MPI.COMM_WORLD)
     else
         merged_energy_consumed = energy_consumed
         mean_energy_consumed = 0
     end
 
-    if is_root
-        if cycles <= 5
-            println("not enough cycles ($cycles), cannot get an accurate measurement")
-            return time_contrib
+    !is_root && return time_contrib  # Only the root process does the output
+
+    if cycles <= 5
+        println("not enough cycles ($cycles), cannot get an accurate measurement")
+        return time_contrib
+    end
+
+    if length(merged_vals_cells_per_sec) > 1
+        std_cells_per_sec = std(merged_vals_cells_per_sec; corrected=true) * sqrt(params.proc_size)
+    else
+        std_cells_per_sec = 0
+    end
+
+    @printf("%8.3f ± %4.2f Giga cells/sec", total_cells_per_sec, std_cells_per_sec)
+
+    # Append the result to the data file
+    if !isempty(data_file_name)
+        open(data_file_name, "a") do data_file
+            if dimension == 1
+                println(data_file, cells, ", ", total_cells_per_sec, ", ", std_cells_per_sec)
+            else
+                println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec, ", ", std_cells_per_sec)
+            end
+        end
+    end
+
+    if !isempty(energy_file_name)
+        open(energy_file_name, "a") do file
+            println(file, prod(cells), ", ", mean_energy_consumed, ", ", join(merged_energy_consumed, ", "))
+        end
+    end
+
+    # Rebuild the time contribution array
+    for (i, (step_label, _)) in enumerate(time_contrib)
+        time_contrib[i] = step_label => merged_time_contrib_vals[i]
+    end
+
+    if time_MPI_graph
+        # Sum the time of each MPI communications. Time positions with a label ending with '_MPI'
+        # count as time spent in MPI, and this time is part of a step not ending with MPI.
+        total_time = 0.
+        total_MPI_time = 0.
+        for (step_label, step_time) in time_contrib
+            if endswith(step_label, "_MPI")
+                total_MPI_time += step_time
+            end
+            total_time += step_time
         end
 
-        if length(merged_vals_cells_per_sec) > 1
-            std_cells_per_sec = std(merged_vals_cells_per_sec; corrected=true) * sqrt(params.proc_size)
-        else
-            std_cells_per_sec = 0
-        end
-
-        if length(merged_energy_consumed) > 1
-            std_energy_consumed = std(merged_energy_consumed; corrected=true) * sqrt(params.proc_size)
-        else
-            std_energy_consumed = 0
-        end
-
-        @printf("%8.3f ± %4.2f Giga cells/sec", total_cells_per_sec, std_cells_per_sec)
+        # ns to sec
+        total_time /= 1e9
+        total_MPI_time /= 1e9
 
         # Append the result to the data file
-        if !isempty(data_file_name)
-            open(data_file_name, "a") do data_file
+        if !isempty(comm_file_name)
+            open(comm_file_name, "a") do data_file
                 if dimension == 1
-                    println(data_file, cells, ", ", total_cells_per_sec, ", ", std_cells_per_sec)
+                    println(data_file, cells, ", ", total_MPI_time, ", ", total_time)
                 else
-                    println(data_file, cells[1] * cells[2], ", ", total_cells_per_sec, ", ", std_cells_per_sec)
+                    println(data_file, cells[1] * cells[2], ", ", total_MPI_time, ", ", total_time)
                 end
             end
         end
 
-        if !isempty(energy_file_name)
-            open(energy_file_name, "a") do file
-                println(file, prod(cells), ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
-                    join(energy_consumed, ", "))
-            end
-        end
-        
-        # Rebuild the time contribution array
-        for (i, (step_label, _)) in enumerate(time_contrib)
-            time_contrib[i] = step_label => merged_time_contrib_vals[i]
-        end
-
-        if time_MPI_graph
-            # Sum the time of each MPI communications. Time positions with a label ending with '_MPI'
-            # count as time spent in MPI, and this time is part of a step not ending with MPI.
-            total_time = 0.
-            total_MPI_time = 0.
-            for (step_label, step_time) in time_contrib
-                if endswith(step_label, "_MPI")
-                    total_MPI_time += step_time
-                end
-                total_time += step_time
-            end
-            
-            # ns to sec
-            total_time /= 1e9
-            total_MPI_time /= 1e9
-
-            # Append the result to the data file
-            if !isempty(comm_file_name)
-                open(comm_file_name, "a") do data_file
-                    if dimension == 1
-                        println(data_file, cells, ", ", total_MPI_time, ", ", total_time)
-                    else
-                        println(data_file, cells[1] * cells[2], ", ", total_MPI_time, ", ", total_time)
-                    end
-                end
-            end
-
-            @printf(", %5.1f%% of MPI time (async: %5.1f%%)",
-                total_MPI_time / total_time * 100, async_efficiency * 100)
-        end
-
-        @printf(" %s\n", get_duration_string(duration))
+        @printf(", %5.1f%% of MPI time (async: %5.1f%%)",
+            total_MPI_time / total_time * 100, async_efficiency * 100)
     end
+
+    @printf(" %s\n", get_duration_string(duration))
 
     return time_contrib
 end
