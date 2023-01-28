@@ -19,6 +19,7 @@ export ArmonParameters, armon
 # Bug: `conservation_vars` doesn't give correct values with MPI, even though the solution is correct
 # Bug: steps are not properly categorized and filtered at the output, giving wrong asynchronicity efficiency
 # Bug: some time measurements are incorrect on GPU
+# Result struct/dict which holds all measured values (+ data if needed)
 
 # MPI Init
 
