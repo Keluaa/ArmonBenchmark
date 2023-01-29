@@ -351,6 +351,10 @@ function ArmonParameters(;
         error("The dimensions of the global domain ($nx x $ny) are not divisible by the number of processors ($px x $py)")
     end
 
+    if projection == :none
+        error("Lagrangian mode unsupported")
+    end
+
     if isnothing(stencil_width)
         stencil_width = min_nghost
     elseif stencil_width < min_nghost
@@ -897,29 +901,14 @@ end
 
 
 @generic_kernel function cell_update!(s::Int, dx::T, dt::T, 
-        ustar::V, pstar::V, rho::V, u::V, Emat::V, domain_mask::V) where {T, V <: AbstractArray{T}}
+        ustar::V, pstar::V, rho::V, u::V, Emat::V) where {T, V <: AbstractArray{T}}
     @kernel_options(add_time, label=cellUpdate!)
 
-    i = @index_1D_lin()
-    mask = domain_mask[i]
+    i = @index_2D_lin()
     dm = rho[i] * dx
-    rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]) * mask)
-    u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             ) * mask
-    Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s]) * mask
-end
-
-
-@generic_kernel function cell_update_lagrange!(ifin_::Int, s::Int, dt::T, 
-        x_::V, ustar::V, domain_mask::V) where {T, V <: AbstractArray{T}}
-    @kernel_options(add_time, label=cell_update!)
-
-    i = @index_1D_lin()
-
-    x_[i] += dt * ustar[i] * domain_mask[i]
-
-    if i == ifin_
-        x_[i+s] += dt * ustar[i+s] * domain_mask[i+s]
-    end
+    rho[i]   = dm / (dx + dt * (ustar[i+s] - ustar[i]))
+    u[i]    += dt / dm * (pstar[i]            - pstar[i+s]             )
+    Emat[i] += dt / dm * (pstar[i] * ustar[i] - pstar[i+s] * ustar[i+s])
 end
 
 
@@ -1152,12 +1141,6 @@ end
     dt_x = dx / abs(max(abs(u + c), abs(u - c)) * mask)
     dt_y = dy / abs(max(abs(v + c), abs(v - c)) * mask)
     out[i] = min(dt_x, dt_y)
-end
-
-
-@kernel function gpu_dtCFL_reduction_lagrange_kernel!(out, cmat, domain_mask)
-    i = @index(Global)
-    out[i] = 1. / (cmat[i] * domain_mask[i])
 end
 
 #
@@ -1474,58 +1457,37 @@ function dtCFL(params::ArmonParameters{T}, data::ArmonData{V}, prev_dt::T;
         # Constant time step
         return Dt
     elseif params.use_gpu && params.device isa ROCDevice
-        # AMDGPU doesn't support ArrayProgramming, however its implementation of `reduce` is quite
-        # fast. Therefore first we compute dt for all cells and store the result in a temporary
-        # array, then we reduce this array.
-        # TODO : fix this
-        if params.projection != :none
-            gpu_dtCFL_reduction_euler! = gpu_dtCFL_reduction_euler_kernel!(params.device, params.block_size)
-            gpu_dtCFL_reduction_euler!(dx, dy, work_array_1, umat, vmat, cmat, domain_mask;
-                ndrange=length(cmat), dependencies) |> wait
-            dt = reduce(min, work_array_1)
-        else
-            gpu_dtCFL_reduction_lagrange! = gpu_dtCFL_reduction_lagrange_kernel!(params.device, params.block_size)
-            gpu_dtCFL_reduction_lagrange!(work_array_1, cmat, domain_mask;
-                ndrange=length(cmat), dependencies) |> wait
-            dt = reduce(min, work_array_1) * min(dx, dy)
-        end
-    elseif params.projection != :none
-        if params.use_gpu
-            wait(dependencies)
-            # We need the absolute value of the divisor since the result of the max can be negative,
-            # because of some IEEE 754 non-compliance since fast math is enabled when compiling this
-            # code for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
-            # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
-            dt_x = @inbounds reduce(min, @views (dx ./ abs.(
-                max.(
-                    abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
-                    abs.(umat[ideb:ifin] .- cmat[ideb:ifin])
-                ) .* domain_mask[ideb:ifin])))
-            dt_y = @inbounds reduce(min, @views (dy ./ abs.(
-                max.(
-                    abs.(vmat[ideb:ifin] .+ cmat[ideb:ifin]), 
-                    abs.(vmat[ideb:ifin] .- cmat[ideb:ifin])
-                ) .* domain_mask[ideb:ifin])))
-            dt = min(dt_x, dt_y)
-        else
-            @batch threadlocal=typemax(T) for i in ideb:ifin
-                dt_x = dx / (max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])) * domain_mask[i])
-                dt_y = dy / (max(abs(vmat[i] + cmat[i]), abs(vmat[i] - cmat[i])) * domain_mask[i])
-                threadlocal = min(threadlocal, dt_x, dt_y)
-            end
-            dt = minimum(threadlocal)
-        end
+        # AMDGPU supports ArrayProgramming, but AMDGPU.mapreduce! is not as efficient as 
+        # CUDA.mapreduce! for large broadcasted arrays. Therefore we first compute all time
+        # steps and store them in a work array to then reduce it.
+        gpu_dtCFL_reduction_euler! = gpu_dtCFL_reduction_euler_kernel!(params.device, params.block_size)
+        gpu_dtCFL_reduction_euler!(dx, dy, work_array_1, umat, vmat, cmat, domain_mask;
+            ndrange=length(cmat), dependencies) |> wait
+        dt = reduce(min, work_array_1)
+    elseif params.use_gpu
+        wait(dependencies)
+        # We need the absolute value of the divisor since the result of the max can be negative,
+        # because of some IEEE 754 non-compliance since fast math is enabled when compiling this
+        # code for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
+        # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
+        dt_x = @inbounds reduce(min, @views (dx ./ abs.(
+            max.(
+                abs.(umat[ideb:ifin] .+ cmat[ideb:ifin]), 
+                abs.(umat[ideb:ifin] .- cmat[ideb:ifin])
+            ) .* domain_mask[ideb:ifin])))
+        dt_y = @inbounds reduce(min, @views (dy ./ abs.(
+            max.(
+                abs.(vmat[ideb:ifin] .+ cmat[ideb:ifin]), 
+                abs.(vmat[ideb:ifin] .- cmat[ideb:ifin])
+            ) .* domain_mask[ideb:ifin])))
+        dt = min(dt_x, dt_y)
     else
-        if params.use_gpu
-            wait(dependencies)
-            dt = reduce(min, @views (1. ./ (cmat .* domain_mask)))
-        else
-            @batch threadlocal=typemax(T) for i in ideb:ifin
-                threadlocal = min(threadlocal, 1. / (cmat[i] * domain_mask[i]))
-            end
-            dt = minimum(threadlocal)
+        @batch threadlocal=typemax(T) for i in ideb:ifin
+            dt_x = dx / (max(abs(umat[i] + cmat[i]), abs(umat[i] - cmat[i])) * domain_mask[i])
+            dt_y = dy / (max(abs(vmat[i] + cmat[i]), abs(vmat[i] - cmat[i])) * domain_mask[i])
+            threadlocal = min(threadlocal, dt_x, dt_y)
         end
-        dt *= min(dx, dy)
+        dt = minimum(threadlocal)
     end
 
     if !isfinite(dt) || dt ≤ 0
@@ -1558,30 +1520,20 @@ end
 # Lagrangian cell update
 #
 
-function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T;
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, domain_ranges::DomainRanges;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
     (; ideb, ifin) = params
 
-    # TODO : use the new ranges functions to achieve this
+    update_range = full_domain(domain_ranges)
+
     if params.single_comm_per_axis_pass
-        (; nx, ny) = params
-        @indexing_vars(params)
         r = params.extra_ring_width
-        first_i = @i(1-r, 1-r)
-        last_i = @i(nx+r, ny+r)
-    else
-        first_i = ideb
-        last_i = ifin
+        update_range = expand_dir(update_range, X_axis, r)
+        update_range = expand_dir(update_range, Y_axis, r)
     end
 
     u = params.current_axis == X_axis ? data.umat : data.vmat
-    event = cell_update!(params, data, first_i:last_i, dt, u; dependencies)
-    if params.projection == :none
-        x = params.current_axis == X_axis ? data.x : data.y
-        event = cell_update_lagrange!(params, data, first_i:last_i, last_i, dt, x; dependencies=event)
-    end
-
-    return event
+    return cell_update!(params, data, update_range, dt, u; dependencies)
 end
 
 #
@@ -2050,34 +2002,15 @@ function conservation_vars(params::ArmonParameters{T}, data::ArmonData{V}) where
     total_energy::T = zero(T)
 
     if params.use_gpu
-        if params.projection == :none
-            total_mass = @inbounds reduce(+, @views (
-                rho[ideb:ifin] .* domain_mask[ideb:ifin]
-                .* (x[ideb+1:ifin+1] .- x[ideb:ifin])
-                .* (y[ideb+row_length:ifin+row_length] .- y[ideb:ifin])))
-            total_energy = @inbounds reduce(+, @views (
-                rho[ideb:ifin] .* Emat[ideb:ifin] .* domain_mask[ideb:ifin]
-                .* (x[ideb+1:ifin+1] .- x[ideb:ifin])
-                .* (y[ideb+row_length:ifin+row_length] .- y[ideb:ifin])))
-        else
-            total_mass = @inbounds reduce(+, @views (
-                rho[ideb:ifin] .* domain_mask[ideb:ifin] .* (dx * dx)))
-            total_energy = @inbounds reduce(+, @views (
-                rho[ideb:ifin] .* Emat[ideb:ifin] .* domain_mask[ideb:ifin] .* (dx * dx)))
-        end
+        total_mass = @inbounds reduce(+, @views (
+            rho[ideb:ifin] .* domain_mask[ideb:ifin] .* (dx * dx)))
+        total_energy = @inbounds reduce(+, @views (
+            rho[ideb:ifin] .* Emat[ideb:ifin] .* domain_mask[ideb:ifin] .* (dx * dx)))
     else
-        if params.projection == :none
-            @batch threadlocal=zeros(T, 2) for i in ideb:ifin
-                ds = (x[i+1] - x[i]) * (y[i+row_length] - y[i])
-                threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
-                threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
-            end
-        else
-            ds = dx * dx
-            @batch threadlocal=zeros(T, 2) for i in ideb:ifin
-                threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
-                threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
-            end
+        ds = dx * dx
+        @batch threadlocal=zeros(T, 2) for i in ideb:ifin
+            threadlocal[1] += rho[i] * ds           * domain_mask[i]  # mass
+            threadlocal[2] += rho[i] * ds * Emat[i] * domain_mask[i]  # energy
         end
 
         threadlocal  = sum(threadlocal)  # Reduce the result of each thread
