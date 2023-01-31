@@ -1392,8 +1392,8 @@ function create_all_data_files_and_plot(measure::MeasureParams, skip_first::Int,
                 end
 
                 if measure.energy_plot
-                    energy_plot_file_name = data_file_name_base * "_Energy.csv"
-                    do_combinaison && (open(energy_plot_file_name, "w") do _ end)  # Create/Clear the file
+                    energy_plot_file_name = data_file_name_base * "_ENERGY.csv"
+                    do_combinaison && (open(energy_plot_file_name, "w") do _ end)  # Create/Clear the file
                     if measure.error_bars
                         plot_cmd = gnuplot_energy_plot_command_errorbars(data_file_name, legend, color_index, point_type)
                     else

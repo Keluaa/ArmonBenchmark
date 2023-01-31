@@ -374,8 +374,13 @@ function run_armon(options::CppOptions, verbose::Bool)
             data_file_name = ""
         else
             data_file_name = options.base_file_name * test
-            ergy_file_name = data_file_name * "_ENERGY.csv"
+            energy_file_name = data_file_name * "_ENERGY.csv"
             data_file_name *= ".csv"
+
+            data_dir = dirname(data_file_name)
+            if !isdir(data_dir)
+                mkpath(data_dir)
+            end
         end
 
         for cells in options.cells_list

@@ -866,6 +866,11 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
         hw_c_file_name = data_file_name * "_hw_counters.csv"
         ergy_file_name = data_file_name * "_ENERGY.csv"
         data_file_name *= ".csv"
+
+        data_dir = dirname(data_file_name)
+        if !isdir(data_dir)
+            mkpath(data_dir)
+        end
     end
 
     total_time_contrib = nothing
