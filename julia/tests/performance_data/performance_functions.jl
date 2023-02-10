@@ -3,7 +3,7 @@ using TOML
 using ThreadPinning
 using KernelAbstractions
 import .Armon: ArmonData, memory_required_for, init_test, data_to_gpu, MinmodLimiter
-import .Armon: @indexing_vars, @i, DomainRange, compute_domain_ranges, full_domain, get_device_array, linear_range
+import .Armon: @indexing_vars, @i, DomainRange, steps_ranges, get_device_array, linear_range
 
 
 include("device_info.jl")
@@ -174,8 +174,8 @@ function measure_kernel_performance(params::ArmonParameters{T}, data::ArmonData{
         inner_range = 1:nx
         range = DomainRange((main_range, inner_range))
     else
-        drs = compute_domain_ranges(params)
-        range = full_domain(drs)
+        steps = steps_ranges(params)
+        range = steps.real_domain
     end
 
     dt = T(1e-6)

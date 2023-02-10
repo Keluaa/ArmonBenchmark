@@ -1,9 +1,6 @@
 
-import .Armon: DomainRange, DomainRanges
 import .Armon: shift, expand, prepend, inflate, shift_dir, inflate_dir, X_axis, Y_axis
-import .Armon: full_domain, inner_domain, outer_lb_domain, outer_rt_domain,
-    full_fluxes_domain, inner_fluxes_domain, outer_fluxes_lb_domain, outer_fluxes_rt_domain,
-    full_domain_projection_advection, linear_range
+import .Armon: DomainRange, StepsRanges, steps_ranges, update_axis_parameters, connect_ranges
 
 
 @testset "Domains" begin
@@ -108,5 +105,51 @@ import .Armon: full_domain, inner_domain, outer_lb_domain, outer_rt_domain,
         @test length(iydr) == length(dr) + 2n * length(inner_r)
         @test first(iydr)  == first(dr) - n * step(main_r)
         @test last(iydr)   == last(dr)  + n * step(main_r)
+    end
+
+    @testset "StepsRanges $(nx)×$(ny) $ng ghosts" for (nx, ny, ng) in (
+                                                            (13, 7, 4), (13, 7, 3), (7, 7, 5),
+                                                            (7, 13, 4), (7, 13, 3), (7, 7, 5),
+                                                            (40, 40, 5))
+        p = ArmonParameters(;
+            scheme = :GAD, projection = :euler_2nd,
+            nghost = ng, nx, ny,
+            use_MPI = false
+        )
+
+        @testset "$axis" for axis in (X_axis, Y_axis)
+            update_axis_parameters(p, axis)
+            steps = steps_ranges(p)
+
+            splitted_range = Base.Fix2(getfield, axis == X_axis ? :row : :col)
+
+            if isempty(steps.inner_EOS)
+                merged_EOS_range = splitted_range(steps.outer_lb_EOS)
+            else
+                merged_EOS_range = connect_ranges(
+                    splitted_range(steps.outer_lb_EOS),
+                    splitted_range(steps.inner_EOS))
+            end
+
+            merged_EOS_range = connect_ranges(
+                merged_EOS_range,
+                splitted_range(steps.outer_rt_EOS))
+
+            @test splitted_range(steps.EOS) == merged_EOS_range
+
+            if isempty(steps.inner_fluxes)
+                merged_fluxes_range = splitted_range(steps.outer_lb_fluxes)
+            else
+                merged_fluxes_range = connect_ranges(
+                    splitted_range(steps.outer_lb_fluxes),
+                    splitted_range(steps.inner_fluxes))
+            end
+
+            merged_fluxes_range = connect_ranges(
+                merged_fluxes_range,
+                splitted_range(steps.outer_rt_fluxes))
+
+            @test splitted_range(steps.fluxes) == merged_fluxes_range
+        end
     end
 end

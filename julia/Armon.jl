@@ -20,6 +20,7 @@ export ArmonParameters, armon
 # Bug: steps are not properly categorized and filtered at the output, giving wrong asynchronicity efficiency
 # Bug: some time measurements are incorrect on GPU
 # Result struct/dict which holds all measured values (+ data if needed)
+# Neighbour enum + `has_neighbour(params, side)` method
 
 # MPI Init
 
@@ -287,7 +288,7 @@ end
 # Constructor for ArmonParameters
 function ArmonParameters(;
         ieee_bits = 64,
-        test = :Sod, riemann = :acoustic, scheme = :GAD_minmod, projection = :euler,
+        test = :Sod, riemann = :acoustic, scheme = :GAD, projection = :euler,
         riemann_limiter = :minmod,
         nghost = 2, nx = 10, ny = 10, stencil_width = nothing,
         domain_size = nothing, origin = nothing,
@@ -723,24 +724,6 @@ function memory_required_for(N, communication_array_size, float_type)
 end
 
 #
-# Domain ranges
-#
-
-include("domain_ranges.jl")
-
-#
-# Threading and SIMD control macros
-#
-
-include("generic_kernel.jl")
-
-#
-# Execution Time Measurement
-#
-
-include("timing_macros.jl")
-
-# 
 # Indexing macros
 #
 
@@ -769,6 +752,24 @@ macro i(i, j)
         index_start + $(j) * idx_row + $(i) * idx_col
     end)
 end
+
+#
+# Domain ranges
+#
+
+include("domain_ranges.jl")
+
+#
+# Threading and SIMD control macros
+#
+
+include("generic_kernel.jl")
+
+#
+# Execution Time Measurement
+#
+
+include("timing_macros.jl")
 
 #
 # Kernels
@@ -1170,43 +1171,23 @@ end
 
 
 function numericalFluxes!(params::ArmonParameters{T}, data::ArmonData{V}, 
-        dt::T, domain_ranges::DomainRanges, label::Symbol;
+        dt::T, steps::StepsRanges, label::Symbol;
         dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}}
 
     if label == :inner
-        range = inner_fluxes_domain(domain_ranges)
+        range = steps.inner_fluxes
     elseif label == :outer_lb
-        range = outer_fluxes_lb_domain(domain_ranges)
+        range = steps.outer_lb_fluxes
         label = :outer
-        sides = (:left, :bottom)
     elseif label == :outer_rt
-        range = outer_fluxes_rt_domain(domain_ranges)
+        range = steps.outer_rt_fluxes
         label = :outer
-        sides = (:right, :top)
     elseif label == :full
-        range = full_fluxes_domain(domain_ranges)
-        sides = (:left, :bottom, :right, :top)
+        range = steps.fluxes
+    elseif label == :test
+        range = steps.real_domain
     else
         error("Wrong region label: $label")
-    end
-
-    if params.use_MPI && label != :inner
-        if params.current_axis == X_axis
-            sides = filter(in((:left, :right)), sides)
-        else  # Y_axis
-            sides = filter(in((:top, :bottom)), sides)
-        end
-
-        # Extend the range if there is a neighbour in the current direction
-        for side in sides
-            params.neighbours[side] == MPI.PROC_NULL && continue
-            # TODO: compute the '1' dynamically depending on the stencil of each kernel
-            if side in (:left, :bottom)
-                range = prepend_dir(range, params.current_axis, 1)
-            else
-                range = expand_dir(range, params.current_axis, 1)
-            end
-        end
     end
 
     return numericalFluxes!(params, data, dt, range, label; dependencies, no_threading)
@@ -1232,7 +1213,24 @@ end
 
 
 function update_EOS!(params::ArmonParameters, data::ArmonData,
-        range::DomainRange, label::Symbol; dependencies=NoneEvent(), no_threading=false)
+        steps::StepsRanges, label::Symbol; dependencies=NoneEvent(), no_threading=false)
+
+    if label == :inner
+        range = steps.inner_EOS
+    elseif label == :outer_lb
+        range = steps.outer_lb_EOS
+        label = :outer
+    elseif label == :outer_rt
+        range = steps.outer_rt_EOS
+        label = :outer
+    elseif label == :full
+        range = steps.EOS
+    elseif label == :test
+        range = steps.real_domain
+    else
+        error("Wrong region label: $label")
+    end
+
     return update_EOS!(params, data, params.test, range, label; dependencies, no_threading)
 end
 
@@ -1250,37 +1248,9 @@ end
 
 function boundaryConditions!(params::ArmonParameters{T}, data::ArmonData{V}, side::Symbol;
         dependencies=NoneEvent(), no_threading=false) where {T, V <: AbstractArray{T}}
-    (; row_length, nx, ny) = params
-    @indexing_vars(params)
 
     (u_factor::T, v_factor::T) = boundaryCondition(side, params.test)
-
-    stride::Int = 1
-    d::Int = 1
-
-    if side == :left
-        stride = row_length
-        i_start = @i(0,1)
-        loop_range = 1:ny
-        d = 1
-    elseif side == :right
-        stride = row_length
-        i_start = @i(nx+1,1)
-        loop_range = 1:ny
-        d = -1
-    elseif side == :top
-        stride = 1
-        i_start = @i(1,ny+1)
-        loop_range = 1:nx
-        d = -row_length
-    elseif side == :bottom
-        stride = 1
-        i_start = @i(1,0)
-        loop_range = 1:nx
-        d = row_length
-    else
-        error("Unknown side: $side")
-    end
+    (i_start, loop_range, stride, d) = boundary_conditions_indexes(params, side)
 
     i_start -= stride  # Adjust for the fact that `@index_1D_lin()` is 1-indexed
 
@@ -1520,20 +1490,11 @@ end
 # Lagrangian cell update
 #
 
-function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, domain_ranges::DomainRanges;
+function cellUpdate!(params::ArmonParameters{T}, data::ArmonData{V}, dt::T, steps::StepsRanges;
         dependencies=NoneEvent()) where {T, V <: AbstractArray{T}}
-    (; ideb, ifin) = params
-
-    update_range = full_domain(domain_ranges)
-
-    if params.single_comm_per_axis_pass
-        r = params.extra_ring_width
-        update_range = expand_dir(update_range, X_axis, r)
-        update_range = expand_dir(update_range, Y_axis, r)
-    end
-
+    range = steps.cell_update
     u = params.current_axis == X_axis ? data.umat : data.vmat
-    return cell_update!(params, data, update_range, dt, u; dependencies)
+    return cell_update!(params, data, range, dt, u; dependencies)
 end
 
 #
@@ -1548,8 +1509,9 @@ function slope_minmod(uᵢ₋::T, uᵢ::T, uᵢ₊::T, r₋::T, r₊::T) where T
 end
 
 
-function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::W, 
-        dt::T; dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
+function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_array::W,
+        steps::StepsRanges, dt::T;
+        dependencies=NoneEvent()) where {T, V <: AbstractArray{T}, W <: AbstractArray{T}}
     params.projection == :none && return dependencies
 
     if params.use_MPI && !params.single_comm_per_axis_pass
@@ -1561,25 +1523,22 @@ function projection_remap!(params::ArmonParameters{T}, data::ArmonData{V}, host_
     end
 
     (; work_array_1, work_array_2, work_array_3, work_array_4) = data
-    domain_ranges = compute_domain_ranges(params)
-    advection_range = full_domain_projection_advection(domain_ranges)
-
     advection_ρ  = work_array_1
     advection_uρ = work_array_2
     advection_vρ = work_array_3
     advection_Eρ = work_array_4
 
     if params.projection == :euler
-        event = first_order_euler_remap!(params, data, advection_range, dt,
+        event = first_order_euler_remap!(params, data, steps.advection, dt,
             advection_ρ, advection_uρ, advection_vρ, advection_Eρ; dependencies)
     elseif params.projection == :euler_2nd
-        event = second_order_euler_remap!(params, data, advection_range, dt,
+        event = second_order_euler_remap!(params, data, steps.advection, dt,
             advection_ρ, advection_uρ, advection_vρ, advection_Eρ; dependencies)
     else
         error("Unknown projection scheme: $(params.projection)")
     end
 
-    return euler_projection!(params, data, full_domain(domain_ranges), dt,
+    return euler_projection!(params, data, steps.projection, dt,
         advection_ρ, advection_uρ, advection_vρ, advection_Eρ; dependencies=event)
 end
 
@@ -1636,80 +1595,6 @@ function split_axes(params::ArmonParameters{T}, cycle::Int) where T
     else
         error("Unknown axes splitting method: $(params.axis_splitting)")
     end
-end
-
-#
-# Inner / Outer domains definition
-#
-
-function compute_domain_ranges(params::ArmonParameters)
-    (; nx, ny, nghost, row_length, current_axis) = params
-    @indexing_vars(params)
-
-    # Full range
-    col_range = @i(1,1):row_length:@i(1,ny)
-    row_range = 1:nx
-    full_range = DomainRange(col_range, row_range)
-
-    # Inner range
-
-    if current_axis == X_axis
-        # Parse the cells row by row, excluding 'nghost' columns at the left and right
-        col_range = @i(1,1):row_length:@i(1,ny)
-        row_range = nghost+1:nx-nghost
-    else
-        # Parse the cells row by row, excluding 'nghost' rows at the top and bottom
-        col_range = @i(1,nghost+1):row_length:@i(1,ny-nghost)
-        row_range = 1:nx
-    end
-
-    inner_range = DomainRange(col_range, row_range)
-
-    # Outer range: left/bottom
-
-    if current_axis == X_axis
-        # Parse the cells row by row, for the first 'nghost' columns on the left
-        col_range = @i(1,1):row_length:@i(1,ny)
-        row_range = 1:nghost
-    else
-        # Parse the cells row by row, for the first 'nghost' rows at the bottom
-        col_range = @i(1,1):row_length:@i(1,nghost)
-        row_range = 1:nx
-    end
-    
-    outer_lb_range = DomainRange(col_range, row_range)
-
-    # Outer range: right/top
-    if current_axis == X_axis
-        # Parse the cells row by row, for the last 'nghost' columns on the right
-        col_range = @i(1,1):row_length:@i(1,ny)
-        row_range = nx-nghost+1:nx
-    else
-        # Parse the cells row by row, for the last 'nghost' rows at the top
-        col_range = @i(1,ny-nghost+1):row_length:@i(1,ny)
-        row_range = 1:nx
-    end
-    outer_rt_range = DomainRange(col_range, row_range)
-
-    if params.single_comm_per_axis_pass
-        r = params.extra_ring_width
-
-        # Add 'r' columns/rows on each of the 4 sides
-        full_range  = DomainRange(inflate(full_range.col,  r), inflate(full_range.row,  r))
-        inner_range = DomainRange(inflate(inner_range.col, r), inflate(inner_range.row, r))
-
-        if current_axis == X_axis
-            # Shift the outer domain to the left and right by 'r' cells, and add 'r' rows at the top and bottom
-            outer_lb_range = DomainRange(inflate(outer_lb_range.col, r), shift(outer_lb_range.row, -r))
-            outer_rt_range = DomainRange(inflate(outer_rt_range.col, r), shift(outer_rt_range.row,  r))
-        else
-            # Shift the outer domain to the top and bottom by 'r' cells, and add 'r' columns at the left and right
-            outer_lb_range = DomainRange(shift(outer_lb_range.col, -r), inflate(outer_lb_range.row, r))
-            outer_rt_range = DomainRange(shift(outer_rt_range.col,  r), inflate(outer_rt_range.row, r))
-        end
-    end
-
-    return DomainRanges(full_range, inner_range, outer_lb_range, outer_rt_range, current_axis)
 end
 
 #
@@ -2064,12 +1949,12 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
     end
 
     update_axis_parameters(params, first(split_axes(params, cycle))[1])
-    domain_ranges = compute_domain_ranges(params)
+    steps = steps_ranges(params)
 
     prev_event = NoneEvent()
 
     # Finalize the initialisation by calling the EOS on the entire domain
-    update_EOS!(params, data, full_domain(domain_ranges), :full) |> wait
+    update_EOS!(params, data, steps, :full) |> wait
     step_checkpoint(params, data, cpu_data, "update_EOS_init", cycle, params.current_axis) && @goto stop
 
     # Main solver loop
@@ -2091,14 +1976,26 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
 
         for (axis, dt_factor) in split_axes(params, cycle)
             update_axis_parameters(params, axis)
-            domain_ranges = compute_domain_ranges(params)
+            steps = steps_ranges(params)
+
+            # Future async structure:
+            # - update_EOS outer lb/rt
+            # - async BC (outer lb/rt)
+            # - update_EOS inner
+            # - fluxes inner
+            # - join async BC
+            # - fluxes outer lb/rt
+
+            # Sync structure:
+            # - update_EOS full
+            # - sync BC (outer lb/rt)
+            # - fluxes full
 
             @perf_task "loop" "EOS+comms+fluxes" @time_expr_c "EOS+comms+fluxes" if params.async_comms
                 @sync begin
                     @async begin
-                        event_2 = update_EOS!(params, data, 
-                            inner_domain(domain_ranges), :inner; dependencies=prev_event)
-                        event_2 = numericalFluxes!(params, data, prev_dt * dt_factor, domain_ranges, :inner; dependencies=event_2)
+                        event_2 = update_EOS!(params, data, steps, :inner; dependencies=prev_event)
+                        event_2 = numericalFluxes!(params, data, prev_dt * dt_factor, steps, :inner; dependencies=event_2)
                         wait(event_2)
                     end
 
@@ -2107,18 +2004,16 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                         # here we forcefully disable multi-threading.
                         no_threading = true
 
-                        event_1 = update_EOS!(outer_params, data, outer_lb_domain(domain_ranges), :outer; 
-                            dependencies=prev_event, no_threading)
-                        event_1 = update_EOS!(outer_params, data, outer_rt_domain(domain_ranges), :outer; 
-                            dependencies=event_1, no_threading)
+                        event_1 = update_EOS!(outer_params, data, steps, :outer_lb; dependencies=prev_event, no_threading)
+                        event_1 = update_EOS!(outer_params, data, steps, :outer_rt; dependencies=event_1, no_threading)
 
                         event_1 = boundaryConditions!(outer_params, data, host_array, axis; 
                             dependencies=event_1, no_threading)
 
                         event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
-                            domain_ranges, :outer_lb; dependencies=event_1, no_threading)
+                            steps, :outer_lb; dependencies=event_1, no_threading)
                         event_1 = numericalFluxes!(outer_params, data, prev_dt * dt_factor, 
-                            domain_ranges, :outer_rt; dependencies=event_1, no_threading)
+                            steps, :outer_rt; dependencies=event_1, no_threading)
                         wait(event_1)
                     end
                 end
@@ -2126,7 +2021,7 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                 step_checkpoint(params, data, cpu_data, "EOS+comms+fluxes", cycle, axis) && @goto stop
                 event = NoneEvent()
             else
-                event = update_EOS!(params, data, full_domain(domain_ranges), :full; 
+                event = update_EOS!(params, data, steps, :full; 
                     dependencies=prev_event)
                 step_checkpoint(params, data, cpu_data, "update_EOS", cycle, axis; 
                     dependencies=event) && @goto stop
@@ -2135,19 +2030,19 @@ function time_loop(params::ArmonParameters{T}, data::ArmonData{V},
                 step_checkpoint(params, data, cpu_data, "boundaryConditions", cycle, axis; 
                     dependencies=event) && @goto stop
 
-                event = numericalFluxes!(params, data, prev_dt * dt_factor, domain_ranges, :full; dependencies=event)
+                event = numericalFluxes!(params, data, prev_dt * dt_factor, steps, :full; dependencies=event)
                 step_checkpoint(params, data, cpu_data, "numericalFluxes", cycle, axis;
                     dependencies=event) && @goto stop
 
                 params.measure_time && wait(event)
             end
 
-            @perf_task "loop" "cellUpdate" event = cellUpdate!(params, data, prev_dt * dt_factor;
+            @perf_task "loop" "cellUpdate" event = cellUpdate!(params, data, prev_dt * dt_factor, steps;
                 dependencies=event)
             step_checkpoint(params, data, cpu_data, "cellUpdate", cycle, axis; 
                 dependencies=event) && @goto stop
 
-            @perf_task "loop" "euler_proj" event = projection_remap!(params, data, host_array,
+            @perf_task "loop" "euler_proj" event = projection_remap!(params, data, host_array, steps,
                 prev_dt * dt_factor; dependencies=event)
             step_checkpoint(params, data, cpu_data, "projection_remap", cycle, axis;
                 dependencies=event) && @goto stop

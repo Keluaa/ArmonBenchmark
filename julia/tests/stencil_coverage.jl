@@ -1,15 +1,13 @@
 
-cd(@__DIR__)
-
 if !@isdefined(Armon)
-    include("../Armon.jl")
+    include(joinpath(@__DIR__, "../Armon.jl"))
 end
 
 using .Armon
 using Test
 
 
-include("../kernel_stencil.jl")
+include(joinpath(@__DIR__, "../kernel_stencil.jl"))
 
 
 lin_idx(p, i, j) = p.index_start + j * p.idx_row + i * p.idx_col
@@ -193,11 +191,13 @@ function print_data_stencil(data::Armon.ArmonData{<:ImprintingArray}; indent="")
 end
 
 
-function compute_kernel_ranges()
+function compute_kernel_ranges(scheme::Symbol = :GAD, projection::Symbol = :euler_2nd)
+    println("Kernel ranges for $scheme and $projection:")
+
     params = ArmonParameters(;
         :ieee_bits => sizeof(Float64)*8,
-        :test => :Sod, :scheme => :GAD, :projection => :euler_2nd, :riemann_limiter => :minmod,
-        :nghost => 5, :nx => 1, :ny => 1,
+        :test => :Sod, :scheme => scheme, :projection => projection, :riemann_limiter => :minmod,
+        :nghost => 5, :nx => 13, :ny => 7,
         :cfl => 0,
         :silent => 5, :write_output => false, :measure_time => false,
         :use_MPI => false,
@@ -209,17 +209,21 @@ function compute_kernel_ranges()
     dt = params.Dt
 
     steps = [
-        # (d, drs) -> (Armon.dtCFL, Armon.dtCFL(params, d, dt)),
-        (d, drs) -> (Armon.update_EOS!, Armon.update_EOS!(params, d, Armon.full_domain(drs), :full)),
-        (d, drs) -> (Armon.boundaryConditions!, Armon.boundaryConditions!(params, d, host_array, params.current_axis)),
-        (d, drs) -> (Armon.numericalFluxes!, Armon.numericalFluxes!(params, d, dt, drs, :full)),
-        (d, drs) -> (Armon.cellUpdate!, Armon.cellUpdate!(params, d, dt, drs)),
-        (d, drs) -> (Armon.projection_remap!, Armon.projection_remap!(params, d, host_array, dt)),
+        # (d, stp) -> (Armon.dtCFL, Armon.dtCFL(params, d, dt)),
+        (d, stp) -> (Armon.update_EOS!, Armon.update_EOS!(params, d, stp, :test)),
+        (d, stp) -> (Armon.boundaryConditions!, Armon.boundaryConditions!(params, d, host_array, params.current_axis)),
+        (d, stp) -> (Armon.numericalFluxes!, Armon.numericalFluxes!(params, d, dt, stp, :test)),
+        (d, stp) -> (Armon.cellUpdate!, Armon.cellUpdate!(params, d, dt, stp)),
+        (d, stp) -> (
+            Armon.projection_remap!, 
+            (Armon.projection_remap!(params, d, host_array,  dt);
+             Armon.projection_remap!(params, d, host_array, -dt))
+        ),
     ]
 
     for axis in (Armon.X_axis, Armon.Y_axis)
         Armon.update_axis_parameters(params, axis)
-        domain_ranges = Armon.compute_domain_ranges(params)
+        ranges = Armon.steps_ranges(params)
 
         steps_range = Dict{Symbol, MVector{2, Tuple{Int, Int}}}()
         current_stencils = nothing
@@ -228,7 +232,7 @@ function compute_kernel_ranges()
 
         for step in Iterators.reverse(steps)
             data = imprinting_data(params)
-            func, _ = step(data, domain_ranges)
+            func, _ = step(data, ranges)
             step_name = typeof(func).name.name
 
             step_range = MVector{2, Tuple{Int, Int}}((0, 0), (0, 0))

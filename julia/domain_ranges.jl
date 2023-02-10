@@ -14,6 +14,21 @@ prepend(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):last(r)
 inflate(r::AbstractUnitRange, n::Int = 1) = (first(r)-n):(last(r)+n)
 inflate(r::OrdinalRange,      n::Int = 1) = (first(r)-step(r)*n):step(r):(last(r)+step(r)*n)
 
+function connect_ranges(r1::AbstractUnitRange, r2::AbstractUnitRange)
+    last(r1) > first(r2) && return connect_ranges(r2, r1)
+    !isempty(intersect(r1, r2)) && error("$r1 and $r2 intersect")
+    last(r1) + 1 != first(r2) && error("$r1 doesn't touch $r2")
+    return first(r1):last(r2)
+end
+
+function connect_ranges(r1::OrdinalRange, r2::OrdinalRange)
+    last(r1) > first(r2) && return connect_ranges(r2, r1)
+    !isempty(intersect(r1, r2)) && error("$r1 and $r2 intersect")
+    step(r1) != step(r2) && error("$r1 and $r2 have different steps")
+    last(r1) + step(r1) != first(r2) && error("$r1 doesn't touch $r2")
+    return first(r1):step(r1):last(r2)
+end
+
 #
 # DomainRange: Two dimensional range to index a 2D array stored with contiguous rows
 #
@@ -58,36 +73,165 @@ prepend_dir(dr::DomainRange, dir::Axis, n::Int = 1) = apply_along_direction(dr, 
 expand_dir(dr::DomainRange, dir::Axis, n::Int = 1)  = apply_along_direction(dr, dir, expand, n)
 inflate_dir(dr::DomainRange, dir::Axis, n::Int = 1) = apply_along_direction(dr, dir, inflate, n)
 
+direction_length(dr::DomainRange, dir::Axis) = dir == X_axis ? length(dr.row) : length(dr.col)
+
 linear_range(dr::DomainRange) = first(dr):last(dr)
 
 show(io::IO, dr::DomainRange) = print(io, "DomainRange{$(dr.col), $(dr.row)}")
 
 #
-# DomainRanges: represents the different sub-domains of a domain for a sweep along a direction
+# Steps ranges
 #
 
-struct DomainRanges
-    full::DomainRange
-    inner::DomainRange
-    outer_lb::DomainRange  # left/bottom
-    outer_rt::DomainRange  # right/top
+struct StepsRanges
     direction::Axis
+    real_domain::DomainRange
+
+    EOS::DomainRange
+    fluxes::DomainRange
+    cell_update::DomainRange
+    advection::DomainRange
+    projection::DomainRange
+
+    outer_lb_EOS::DomainRange
+    outer_rt_EOS::DomainRange
+    outer_lb_fluxes::DomainRange
+    outer_rt_fluxes::DomainRange
+    inner_EOS::DomainRange
+    inner_fluxes::DomainRange
 end
 
-full_domain(dr::DomainRanges) = dr.full
-inner_domain(dr::DomainRanges) = dr.inner
-outer_lb_domain(dr::DomainRanges) = dr.outer_lb
-outer_rt_domain(dr::DomainRanges) = dr.outer_rt
 
-# For fluxes only, we shift the computation to the right/top by one column/row since the flux at
-# index 'i' is the flux between the cells 'i-s' and 'i', but we also need the fluxes on the other
-# side, between the cells 'i' and 'i+s'. Therefore we need this shift to compute all fluxes needed 
-# later, but only on outer right side.
+function old_compute_domain_ranges(params::ArmonParameters, drs#= ::DomainRanges =#)
+    (; nx, ny, nghost, row_length, current_axis) = params
+    @indexing_vars(params)
 
-# TODO: fix incorrect domain for GAD fluxes
-full_fluxes_domain(dr::DomainRanges) = inflate_dir(expand_dir(dr.full, dr.direction, 1), dr.direction, 1)
-inner_fluxes_domain(dr::DomainRanges) = expand_dir(dr.inner, dr.direction, 1)
-outer_fluxes_lb_domain(dr::DomainRanges) = dr.outer_lb
-outer_fluxes_rt_domain(dr::DomainRanges) = shift_dir(dr.outer_rt, dr.direction, 1)
+    ax = current_axis
 
-full_domain_projection_advection(dr::DomainRanges) = inflate_dir(dr.full, dr.direction)
+    real_range = drs.full
+
+    EOS_range = real_range
+    fluxes_range = inflate_dir(expand_dir(real_range, ax, 1), ax, 1)
+    cell_update_range = real_range
+    advection_range = inflate_dir(real_range, ax)
+    projection_range = real_range
+    outer_lb_EOS_range = drs.outer_lb
+    outer_rt_EOS_range = drs.outer_rt
+    outer_lb_fluxes_range = drs.outer_lb
+    outer_rt_fluxes_range = shift_dir(drs.outer_rt, ax, 1)
+    inner_EOS_range = drs.inner
+    inner_fluxes_range = expand_dir(drs.inner, ax, 1)
+
+    return StepsRanges(
+        ax, real_range,
+        EOS_range, fluxes_range, 
+        cell_update_range, advection_range, projection_range,
+        outer_lb_EOS_range, outer_rt_EOS_range,
+        outer_lb_fluxes_range, outer_rt_fluxes_range,
+        inner_EOS_range, inner_fluxes_range
+    )
+end
+
+
+function steps_ranges(params::ArmonParameters)
+    (; nx, ny, nghost, row_length, current_axis) = params
+    @indexing_vars(params)
+
+    ax = current_axis
+
+    # Extra cells to compute in each step
+    extra_FLX = 1
+    extra_UP = 1
+
+    if params.projection == :euler
+        # No change
+    elseif params.projection == :euler_2nd
+        extra_FLX += 1
+        extra_UP  += 1
+    else
+        error("Unknown scheme: $(params.projection)")
+    end
+
+    # Real domain
+    col_range = @i(1,1):row_length:@i(1,ny)
+    row_range = 1:nx
+    real_range = DomainRange(col_range, row_range)
+
+    # Steps ranges, computed so that there is no need for an extra BC step before the projection
+    EOS_range = real_range  # The BC overwrites any changes to the ghost cells right after
+    fluxes_range = inflate_dir(real_range, ax, extra_FLX)
+    cell_update_range = inflate_dir(real_range, ax, extra_UP)
+    advection_range = expand_dir(real_range, ax, 1)
+    projection_range = real_range
+
+    # Fluxes are computed between 'i-s' and 'i', we need one more cell on the right to have all fluxes
+    fluxes_range = expand_dir(fluxes_range, ax, 1)
+
+    # Inner ranges: real domain without sides
+    inner_EOS_range = inflate_dir(EOS_range, ax, -nghost)
+    inner_fluxes_range = inner_EOS_range
+
+    rt_offset = direction_length(inner_EOS_range, ax)
+
+    # Outer ranges: sides of the real domain
+    if ax == X_axis
+        outer_lb_EOS_range = DomainRange(col_range, row_range[1:nghost])
+    else
+        outer_lb_EOS_range = DomainRange(col_range[1:nghost], row_range)
+    end
+
+    outer_rt_EOS_range = shift_dir(outer_lb_EOS_range, ax, nghost + rt_offset)
+
+    if rt_offset == 0
+        # Correction when the side regions overlap
+        overlap_width = direction_length(real_range, ax) - 2*nghost
+        outer_rt_EOS_range = expand_dir(outer_rt_EOS_range, ax, overlap_width)
+    end
+    
+    outer_lb_fluxes_range = prepend_dir(outer_lb_EOS_range, ax, extra_FLX)
+    outer_rt_fluxes_range = expand_dir(outer_rt_EOS_range, ax, extra_FLX + 1)
+
+    return StepsRanges(
+        ax, real_range,
+        EOS_range, fluxes_range, 
+        cell_update_range, advection_range, projection_range,
+        outer_lb_EOS_range, outer_rt_EOS_range,
+        outer_lb_fluxes_range, outer_rt_fluxes_range,
+        inner_EOS_range, inner_fluxes_range
+    )
+end
+
+
+function boundary_conditions_indexes(params::ArmonParameters, side::Symbol)
+    (; row_length, nx, ny) = params
+    @indexing_vars(params)
+
+    stride::Int = 1
+    d::Int = 1
+
+    if side == :left
+        stride = row_length
+        i_start = @i(0,1)
+        loop_range = 1:ny
+        d = 1
+    elseif side == :right
+        stride = row_length
+        i_start = @i(nx+1,1)
+        loop_range = 1:ny
+        d = -1
+    elseif side == :top
+        stride = 1
+        i_start = @i(1,ny+1)
+        loop_range = 1:nx
+        d = -row_length
+    elseif side == :bottom
+        stride = 1
+        i_start = @i(1,0)
+        loop_range = 1:nx
+        d = row_length
+    else
+        error("Unknown side: $side")
+    end
+
+    return i_start, loop_range, stride, d
+end

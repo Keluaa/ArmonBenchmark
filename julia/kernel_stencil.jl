@@ -60,7 +60,7 @@ function Base.getindex(arr::ImprintingArray{T, N}, i::Int) where {T, N}
     indexes = idx_to_multi_dims(i, arr.dims, arr.offset)
     arr.min_get .= min.(arr.min_get, indexes)
     arr.max_get .= max.(arr.max_get, indexes)
-    return zero(T)
+    return one(T)
 end
 
 
@@ -68,7 +68,7 @@ function Base.setindex!(arr::ImprintingArray{T, N}, _, i::Int) where {T, N}
     indexes = idx_to_multi_dims(i, arr.dims, arr.offset)
     arr.min_set .= min.(arr.min_set, indexes)
     arr.max_set .= max.(arr.max_set, indexes)
-    return zero(T)
+    return one(T)
 end
 
 
