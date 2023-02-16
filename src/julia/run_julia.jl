@@ -2,8 +2,11 @@
 using Printf
 using Statistics
 
-include("omp_simili.jl")
-include("vtune_lib.jl")
+include(joinpath(@__DIR__, "omp_simili.jl"))
+
+armon_path = joinpath(@__DIR__, "../../julia/")
+
+include(joinpath(armon_path, "src/vtune_lib.jl"))
 using .VTune
 
 scheme = :GAD_minmod
@@ -349,8 +352,7 @@ if is_root
     loading_start_time = time_ns()
 end
 
-include("Armon.jl")
-using .Armon
+using Armon
 
 # Create a communicator for each node of the MPI world
 node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.COMM_TYPE_SHARED, rank)

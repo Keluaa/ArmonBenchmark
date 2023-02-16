@@ -126,27 +126,27 @@ end
 no_cluster_cmd(armon_options, nprocs) = `mpiexecjl -n $(nprocs) $(armon_options)`
 cluster_cmd(armon_options, cluster_options) = `ccc_mprun $(cluster_options) $(armon_options)`
 
-julia_options = ["-O3", "--check-bounds=no", "--project"]
+required_modules = ["cuda", #="rocm",=# "hwloc", "mpi"]
+
+julia_script_path = joinpath(@__DIR__, "julia/run_julia.jl")
+kokkos_script_path = joinpath(@__DIR__, "kokkos/run_kokkos.jl")
+cpp_script_path = joinpath(@__DIR__, "cpp/run_cpp.jl")
+
+project_dir = joinpath(@__DIR__, "..")
+data_dir = joinpath(project_dir, "data")
+plot_scripts_dir = joinpath(project_dir, "plot_scripts")
+plots_dir = joinpath(project_dir, "plots")
+plots_update_file = joinpath(plots_dir, "last_update")
+sub_scripts_dir = joinpath(project_dir, "sub_scripts")
+sub_scripts_output_dir = joinpath(project_dir, "jobs_output")
+
+julia_options = ["-O3", "--check-bounds=no", "--project=$project_dir"]
 julia_options_no_cluster = ["-O3", "--check-bounds=no"]
 armon_base_options = [
     "--write-output", "0",
     "--verbose", "2"
 ]
 max_node_cores = 128  # Maximum number of cores in a node
-
-required_modules = ["cuda", #="rocm",=# "hwloc", "mpi"]
-
-julia_script_path = "./julia/run_julia.jl"
-kokkos_script_path = "./kokkos/run_kokkos.jl"
-cpp_script_path = "./cpp/run_cpp.jl"
-
-data_dir = "./data/"
-plot_scripts_dir = "./plot_scripts/"
-plots_dir = "./plots/"
-plots_update_file = plots_dir * "last_update"
-sub_scripts_dir = "./sub_scripts/"
-sub_scripts_output_dir = "./jobs_output/"
-
 
 base_gnuplot_script_commands(graph_file_name, title, log_scale, legend_pos) = """
 set terminal pdfcairo color size 10in, 6in
@@ -488,20 +488,21 @@ function parse_measure_params(file_line_parser)
 
     params_and_legends = collect(zip(armon_params, armon_params_legends, armon_params_names))
 
-    mkpath(data_dir * name)
-    gnuplot_script = plot_scripts_dir * gnuplot_script
-    plot_file = plots_dir * plot_file
+    mkpath(joinpath(data_dir, name))
+    gnuplot_script = joinpath(plot_scripts_dir, gnuplot_script)
+    plot_file = joinpath(plots_dir, plot_file)
 
-    gnuplot_hist_script = plot_scripts_dir * name * "_hist.plot"
-    hist_plot_file = plots_dir * name * "_hist.pdf"
+    gnuplot_hist_script = joinpath(plot_scripts_dir, name * "_hist.plot")
+    hist_plot_file = joinpath(plots_dir, name * "_hist.pdf")
 
-    gnuplot_MPI_script = plot_scripts_dir * name * "_MPI_time.plot"
-    time_MPI_plot_file = plots_dir * name * "_MPI_time.pdf"
+    gnuplot_MPI_script = joinpath(plot_scripts_dir, name * "_MPI_time.plot")
+    time_MPI_plot_file = joinpath(plots_dir, name * "_MPI_time.pdf")
 
-    energy_script = plot_scripts_dir * name * "_Energy.plot"
-    energy_plot_file = plots_dir * name * "_Energy.pdf"
+    energy_script = joinpath(plot_scripts_dir, name * "_Energy.plot")
+    energy_plot_file = joinpath(plots_dir, name * "_Energy.pdf")
 
-    return MeasureParams(device, node, distributions, processes, node_count, max_time, use_MPI,
+    return MeasureParams(
+        device, node, distributions, processes, node_count, max_time, use_MPI,
         create_sub_job_chain, add_reference_job, one_job_per_cell,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,
@@ -511,7 +512,8 @@ function parse_measure_params(file_line_parser)
         use_max_threads, cst_cells_per_process, limit_to_max_mem, track_energy,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file,
-        energy_plot, energy_plot_reps, energy_script, energy_plot_file)
+        energy_plot, energy_plot_reps, energy_script, energy_plot_file
+    )
 end
 
 

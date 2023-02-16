@@ -36,8 +36,8 @@ mutable struct KokkosOptions
 end
 
 
-project_dir = @__DIR__()
-run_dir = project_dir * "/../data"
+project_dir = joinpath(@__DIR__, "../../kokkos")
+run_dir = joinpath(project_dir, "../data")
 make_options = ["--no-print-directory"]
 
 # Julia adds its libs to the ENV, which can interfere with cmake
@@ -249,11 +249,11 @@ function init_cmake(options::KokkosOptions)
     ]
 
     if options.gpu == "CUDA"
-        build_dir = project_dir * "/cmake-build-cuda"
+        build_dir = joinpath(project_dir, "cmake-build-cuda")
         target_exe = "armon_cuda"
         push!(cmake_options, "-DKokkos_ENABLE_CUDA=ON")
     elseif options.gpu == "ROCM"
-        build_dir = project_dir * "/cmake-build-hip"
+        build_dir = joinpath(project_dir, "cmake-build-hip")
         target_exe = "armon_hip"
         append!(cmake_options, [
             "-DKokkos_ENABLE_HIP=ON",
@@ -262,7 +262,7 @@ function init_cmake(options::KokkosOptions)
             "-DCMAKE_CXX_COMPILER=hipcc"
         ])
     else
-        build_dir = project_dir * "/cmake-build-openmp"
+        build_dir = joinpath(project_dir, "cmake-build-openmp")
         target_exe = "armon_openmp"
     end
 

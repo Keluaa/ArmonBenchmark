@@ -32,11 +32,10 @@ mutable struct CppOptions
 end
 
 
-project_dir = @__DIR__()
+project_dir = joinpath(@__DIR__, "../../cpp")
 exe_name = "armon.exe"
-exe_path = project_dir * "/$exe_name"
-last_compile_options_file = project_dir * "/last_compile_options.txt"
-run_dir = project_dir * "/../data"
+exe_path = joinpath(project_dir, "$exe_name")
+last_compile_options_file = joinpath(project_dir, "last_compile_options.txt")
 default_make_options = ["--no-print-directory"]
 
 
