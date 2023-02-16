@@ -1,0 +1,370 @@
+
+function parse_measure_params(file_line_parser)
+    backends = [Julia]
+    compilers = [GCC]
+    device = CPU
+    node = "a100"
+    distributions = ["block"]
+    processes = [1]
+    node_count = [1]
+    max_time = 3600  # 1h
+    create_sub_job_chain = false
+    add_reference_job = false
+    one_job_per_cell = false
+    threads = [4]
+    ieee_bits = [64]
+    block_sizes = [1024]
+    use_simd = [true]
+    jl_places = ["cores"]
+    jl_proc_bind = ["close"]
+    omp_places = ["cores"]
+    omp_proc_bind = ["close"]
+    dimension = [2]
+    async_comms = [false]
+    cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
+    domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
+    process_grids = ["1,1"]
+    process_grid_ratios = nothing
+    tests_list = ["Sod"]
+    axis_splitting = ["Sequential"]
+    armon_params = [[
+        "--write-output", "0",
+        "--verbose", "2"
+    ]]
+    armon_params_legends = [""]
+    armon_params_names = [""]
+    use_MPI = true
+    name = nothing
+    repeats = 1
+    gnuplot_script = nothing
+    plot_file = nothing
+    log_scale = true
+    error_bars = false
+    plot_title = nothing
+    verbose = false
+    use_max_threads = false
+    cst_cells_per_process = false
+    limit_to_max_mem = false
+
+    track_energy = false
+    energy_plot = false
+    energy_plot_reps = false
+
+    time_histogram = false
+    flatten_time_dims = false
+
+    time_MPI_plot = false
+
+    last_i = 0
+    for (i, line) in file_line_parser
+        last_i = i
+        line = chomp(line)
+        if line == "-"; break; end    # End of this measure
+        if line == ""; continue; end  # Empty line
+        if startswith(line, '#'); continue; end # Comment
+        if isnothing(findfirst('=', line))
+            error("Missing '=' at line $(i)")
+        end
+
+        option, value = split(line, '=') .|> strip
+        if option == "backends"
+            raw_backends = split(value, ',') .|> strip .|> lowercase
+            backends = []
+            for raw_backend in raw_backends
+                if raw_backend == "julia"
+                    push!(backends, Julia)
+                elseif raw_backend == "kokkos"
+                    push!(backends, Kokkos)
+                elseif raw_backend == "cpp"
+                    push!(backends, CPP)
+                else
+                    error("Unknown backend: $raw_backend, at line $i")
+                end
+            end
+        elseif option == "device"
+            if value == "CPU"
+                device = CPU
+            elseif value == "CUDA"
+                device = CUDA
+            elseif value == "ROCM"
+                device = ROCM
+            else
+                error("Unknown device: $value, at line $i")
+            end
+        elseif option == "compilers"
+            raw_compilers = split(value, ',') .|> strip .|> lowercase
+            compilers = []
+            for raw_compiler in raw_compilers
+                if raw_compiler == "gcc"
+                    push!(compilers, GCC)
+                elseif raw_compiler == "clang"
+                    push!(compilers, Clang)
+                elseif raw_compiler == "icc"
+                    push!(compilers, ICC)
+                else
+                    error("Unknown compiler: $raw_compiler, at line $i")
+                end
+            end
+        elseif option == "node"
+            node = value
+        elseif option == "distributions"
+            distributions = split(value, ',')
+        elseif option == "processes"
+            processes = parse.(Int, split(value, ','))
+        elseif option == "node_count"
+            node_count = parse.(Int, split(value, ','))
+        elseif option == "max_time"
+            max_time = parse(Int, value)
+        elseif option == "create_sub_job_chain"
+            create_sub_job_chain = parse(Bool, value)
+        elseif option == "add_reference_job"
+            add_reference_job = parse(Bool, value)
+        elseif option == "one_job_per_cell"
+            one_job_per_cell = parse(Bool, value)
+        elseif option == "threads"
+            threads = parse.(Int, split(value, ','))
+        elseif option == "block_sizes"
+            block_sizes = parse.(Int, split(value, ','))
+        elseif option == "ieee_bits"
+            ieee_bits = parse.(Int, split(value, ','))
+        elseif option == "use_simd"
+            use_simd = parse.(Int, split(value, ','))
+        elseif option == "jl_places"
+            jl_places = split(value, ',')
+        elseif option == "jl_proc_bind"
+            jl_proc_bind = split(value, ',')
+        elseif option == "omp_places"
+            omp_places = split(value, ',')
+        elseif option == "omp_proc_bind"
+            omp_proc_bind = split(value, ',')
+        elseif option == "dim"
+            dimension = parse.(Int, split(value, ','))
+        elseif option == "async_comms"
+            async_comms = parse.(Bool, split(value, ','))
+        elseif option == "jl_mpi_impl"
+            @warn "'jl_mpi_impl' option is ignored" maxlog=1
+        elseif option == "cells"
+            cells_list = value
+        elseif option == "domains"
+            domain_list = value
+        elseif option == "process_grids"
+            process_grids = split(value, ';')
+        elseif option == "process_grid_ratios"
+            process_grid_ratios = split(value, ';')
+        elseif option == "tests"
+            tests_list = split(value, ',')
+        elseif option == "transpose"
+            @warn "'transpose' option is ignored" maxlog=1
+        elseif option == "splitting"
+            axis_splitting = split(value, ',')
+        elseif option == "armon"
+            armon_params = split.(split(value, ';') .|> strip, ' ')
+        elseif option == "legends"
+            armon_params_legends = split(value, ';') .|> strip
+        elseif option == "name_suffixes"
+            armon_params_names = split(value, ';') .|> strip
+        elseif option == "use_MPI"
+            use_MPI = parse(Bool, value)
+        elseif option == "name"
+            name = value
+        elseif option == "repeats"
+            repeats = parse(Int, value)
+        elseif option == "gnuplot"
+            gnuplot_script = value
+        elseif option == "plot"
+            plot_file = value
+        elseif option == "title"
+            plot_title = value
+        elseif option == "log_scale"
+            log_scale = parse(Bool, value)
+        elseif option == "error_bars"
+            error_bars = parse(Bool, value)
+        elseif option == "verbose"
+            verbose = parse(Bool, value)
+        elseif option == "use_max_threads"
+            use_max_threads = parse(Bool, value)
+        elseif option == "cst_cells_per_process"
+            cst_cells_per_process = parse(Bool, value)
+        elseif option == "limit_to_max_mem"
+            limit_to_max_mem = parse(Bool, value)
+        elseif option == "track_energy"
+            track_energy = parse(Bool, value)
+        elseif option == "energy_plot"
+            energy_plot = parse(Bool, value)
+        elseif option == "energy_plot_reps"
+            energy_plot_reps = parse(Bool, value)
+        elseif option == "time_hist"
+            time_histogram = parse(Bool, value)
+        elseif option == "flat_hist_dims"
+            flatten_time_dims = parse(Bool, value)
+        elseif option == "time_MPI_plot"
+            time_MPI_plot = parse(Bool, value)
+        else
+            error("Unknown option: $option, at line $i")
+        end
+    end
+
+    # Post processing
+
+    cells_list = convert.(Int, parse.(Float64, split(cells_list, ',')))
+
+    domain_list = split(domain_list, ';')
+    domain_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
+                   for cells_domain in domain_list]
+
+    if !isnothing(process_grid_ratios)
+        # Make sure that all ratios are compatible with all processes counts
+        process_grid_ratios = [parse.(Int, split(ratio, ',')) for ratio in process_grid_ratios]
+        process_grids = [[1, 1]] # Provide a dummy grid
+    else
+        # Use the explicitly defined process grid.
+        process_grids = [parse.(Int, split(process_grid, ',')) for process_grid in process_grids]
+    end
+
+    if isnothing(name)
+        error("Expected a name for the measurement at line ", last_i)
+    end
+    if isnothing(gnuplot_script)
+        gnuplot_script = name * ".plot"
+    end
+    if isnothing(plot_file)
+        # By default, same name as the plot script but as a'.pdf' file
+        plot_file = gnuplot_script[1:findlast('.', gnuplot_script)-1] * ".pdf"
+    end
+    if isnothing(plot_title)
+        plot_title = "You forgot to add a title"
+    end
+
+    if !isnothing(process_grid_ratios) && any(dimension .== 1)
+        error("'process_grid_ratio' is incompatible with 1D") 
+    end
+
+    if time_histogram && length(tests_list) > 1
+        error("The histogram can only be made when there is only a single test to do")
+    end
+
+    if time_MPI_plot && !use_MPI
+        error("Cannot make an MPI communications time graph without using MPI")
+    end
+
+    if length(armon_params) != length(armon_params_legends)
+        error("Expected $(length(armon_params)) legends, got $(length(armon_params_legends))")
+    end
+
+    if length(armon_params) != length(armon_params_names)
+        error("Expected $(length(armon_params)) names, got $(length(armon_params_names))")
+    end
+
+    params_and_legends = collect(zip(armon_params, armon_params_legends, armon_params_names))
+
+    mkpath(joinpath(data_dir, name))
+    gnuplot_script = joinpath(plot_scripts_dir, gnuplot_script)
+    plot_file = joinpath(plots_dir, plot_file)
+
+    gnuplot_hist_script = joinpath(plot_scripts_dir, name * "_hist.plot")
+    hist_plot_file = joinpath(plots_dir, name * "_hist.pdf")
+
+    gnuplot_MPI_script = joinpath(plot_scripts_dir, name * "_MPI_time.plot")
+    time_MPI_plot_file = joinpath(plots_dir, name * "_MPI_time.pdf")
+
+    energy_script = joinpath(plot_scripts_dir, name * "_Energy.plot")
+    energy_plot_file = joinpath(plots_dir, name * "_Energy.pdf")
+
+    return MeasureParams(
+        device, node, distributions, processes, node_count, max_time, use_MPI,
+        create_sub_job_chain, add_reference_job, one_job_per_cell,
+        backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
+        dimension, async_comms, ieee_bits, block_sizes,
+        cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
+        axis_splitting, params_and_legends,
+        name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose,
+        use_max_threads, cst_cells_per_process, limit_to_max_mem, track_energy,
+        time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
+        time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file,
+        energy_plot, energy_plot_reps, energy_script, energy_plot_file
+    )
+end
+
+
+function parse_measure_script_file(file::IOStream, name::String)
+    measures::Vector{MeasureParams} = []
+    file_line_parser = enumerate(eachline(file))
+    while !eof(file)
+        measure = try
+            parse_measure_params(file_line_parser)
+        catch e
+            println("Error while parsing measure $(length(measures)+1) of file '$name':")
+            rethrow(e)
+        end
+        push!(measures, measure)
+    end
+    return measures
+end
+
+
+const USAGE = """
+Usage: 
+julia batch_measure.jl [--override-node=<node>,<new node>]
+                       [--start-at=<measure index>]
+                       [--do-only=<measures count>]
+                       [--skip-first=<combinaison count>]
+                       [--count=<combinaison count>]
+                       [--help|-h]
+                       <script files>...'
+"""
+
+
+function parse_arguments()
+    if length(ARGS) == 0
+        error("Invalid number of arguments.\n" * USAGE)
+    end
+
+    start_at = 1
+    skip_first = 0
+    comb_count = typemax(Int)
+    do_only = typemax(Int)
+
+    node_overrides = Dict{String, String}()
+
+    measures::Vector{MeasureParams} = []
+
+    for arg in ARGS
+        if (startswith(arg, "-"))
+            # Batch parameter
+            if (startswith(arg, "--override-node="))
+                node, replacement_node = split(split(arg, '=')[2], ',')
+                node_overrides[node] = replacement_node
+            elseif (startswith(arg, "--start-at="))
+                value = split(arg, '=')[2]
+                start_at = parse(Int, value)
+            elseif (startswith(arg, "--skip-first="))
+                value = split(arg, '=')[2]
+                skip_first = parse(Int, value)
+            elseif (startswith(arg, "--do-only="))
+                value = split(arg, '=')[2]
+                do_only = parse(Int, value)
+            elseif (startswith(arg, "--count="))
+                value = split(arg, '=')[2]
+                comb_count = parse(Int, value)
+            elseif arg == "--help" || arg == "-h"
+                println(USAGE)
+                exit(0)
+            else
+                error("Wrong batch option: " * arg * "\n" * USAGE)
+            end
+        else
+            # Measure file
+            script_file = open(arg, "r")
+            append!(measures, parse_measure_script_file(script_file, arg))
+            close(script_file)
+        end
+    end
+
+    for (node, replacement_node) in node_overrides
+        for measure in measures
+            measure.node == node && (measure.node = replacement_node)
+        end
+    end
+
+    return measures, start_at, do_only, skip_first, comb_count
+end

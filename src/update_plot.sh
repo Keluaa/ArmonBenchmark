@@ -28,7 +28,7 @@ do
             $display_cmd $line 2> /dev/null
         done < "$last_update_file_path"
 
-        # Clear the file
+        # Clear the file
         truncate -s 0 $last_update_file_path
     fi
     sleep 0.1

@@ -32,11 +32,10 @@ mutable struct CppOptions
 end
 
 
-project_dir = @__DIR__()
+project_dir = joinpath(@__DIR__, "../../cpp")
 exe_name = "armon.exe"
-exe_path = project_dir * "/$exe_name"
-last_compile_options_file = project_dir * "/last_compile_options.txt"
-run_dir = project_dir * "/../data"
+exe_path = joinpath(project_dir, "$exe_name")
+last_compile_options_file = joinpath(project_dir, "last_compile_options.txt")
 default_make_options = ["--no-print-directory"]
 
 
@@ -374,8 +373,13 @@ function run_armon(options::CppOptions, verbose::Bool)
             data_file_name = ""
         else
             data_file_name = options.base_file_name * test
-            ergy_file_name = data_file_name * "_ENERGY.csv"
+            energy_file_name = data_file_name * "_ENERGY.csv"
             data_file_name *= ".csv"
+
+            data_dir = dirname(data_file_name)
+            if !isdir(data_dir)
+                mkpath(data_dir)
+            end
         end
 
         for cells in options.cells_list
