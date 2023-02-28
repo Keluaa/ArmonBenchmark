@@ -16,6 +16,7 @@ end
 
 
 backend_disp_name(::JuliaParams) = "Julia"
+backend_run_dir(::JuliaParams) = joinpath(@__DIR__, "../../julia")
 
 
 function run_backend_msg(measure::MeasureParams, julia_params::JuliaParams, cluster_params::ClusterParams)
@@ -51,10 +52,15 @@ end
 
 function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params::ClusterParams, base_file_name::String)
     armon_options = [
-        "julia", "-t", params.threads
+        "julia", "-t", params.threads,
+        "-O3", "--check-bounds=no",
+        "--project=$(backend_run_dir(params))"
     ]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
     push!(armon_options, julia_script_path)
+
+    if !measure.make_sub_script
+        push!(armon_options, "--color=yes")
+    end
 
     if measure.device == CUDA
         append!(armon_options, ["--gpu", "CUDA"])
@@ -111,18 +117,14 @@ function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params
         "--verbose", (measure.verbose ? 2 : 5),
         "--gnuplot-hist-script", measure.gnuplot_hist_script,
         "--time-histogram", measure.time_histogram,
-        "--time-MPI-graph", measure.time_MPI_plot,
-        "--gnuplot-MPI-script", measure.gnuplot_MPI_script,
         "--use-mpi", measure.use_MPI,
-        "--limit-to-mem", measure.limit_to_max_mem,
-        "--track-energy", measure.track_energy
+        "--limit-to-mem", measure.limit_to_max_mem
     ])
 
     if params.dimension > 1
         append!(armon_options, [
             "--async-comms", params.async_comms,
-            "--splitting", join(measure.axis_splitting, ','),
-            "--flat-dims", measure.flatten_time_dims
+            "--splitting", join(measure.axis_splitting, ',')
         ])
 
         if isnothing(measure.process_grid_ratios)
@@ -139,76 +141,8 @@ function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params
         end
     end
 
-    additionnal_options, _, _ = params.options
-    append!(armon_options, additionnal_options)
-
-    return armon_options
-end
-
-
-function run_backend_reference(measure::MeasureParams, params::JuliaParams, cluster_params::ClusterParams)
-    armon_options = [
-        "julia", "-t", params.threads
-    ]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
-    push!(armon_options, julia_script_path)
-
-    if measure.device == CUDA
-        append!(armon_options, ["--gpu", "CUDA"])
-    elseif measure.device == ROCM
-        append!(armon_options, ["--gpu", "ROCM"])
-    else
-        # no option needed for CPU
-    end
-
-    if params.dimension == 1
-        cells_list = [1000]
-        cells_list_str = join(cells_list, ',')
-    else
-        cells_list = params.dimension == 2 ? [[360,360]] : [[60,60,60]]
-        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
-    end
-
-    append!(armon_options, armon_base_options)
-    append!(armon_options, [
-        "--dim", params.dimension,
-        "--block-size", 256,
-        "--use-simd", params.use_simd,
-        "--ieee", 64,
-        "--cycle", 1,
-        "--tests", measure.tests_list[1],
-        "--cells-list", cells_list_str,
-        "--threads-places", params.jl_places,
-        "--threads-proc-bind", params.jl_proc_bind,
-        "--repeats", 1,
-        "--verbose", 5,
-        "--time-histogram", false,
-        "--time-MPI-graph", false,
-        "--use-mpi", measure.use_MPI
-    ])
-
-    if params.dimension > 1
-        append!(armon_options, [
-            "--async-comms", params.async_comms,
-            "--splitting", measure.axis_splitting[1]
-        ])
-
-        if isnothing(measure.process_grid_ratios)
-            push!(armon_options, "--proc-grid", join([
-                join(string.(process_grid), ',') 
-                for process_grid in measure.process_grids
-            ], ';'))
-        else
-            push!(armon_options, "--proc-grid-ratio", join([
-                join(string.(ratio), ',')
-                for ratio in measure.process_grid_ratios
-                if check_ratio_for_grid(cluster_params.processes, ratio)
-            ], ';'))
-        end
-    end
-
-    additionnal_options, _, _ = params.options
-    append!(armon_options, additionnal_options)
+    additional_options, _, _ = params.options
+    append!(armon_options, additional_options)
 
     return armon_options
 end
@@ -245,4 +179,3 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
 
     return name * "_", legend
 end
-

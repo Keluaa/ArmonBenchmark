@@ -15,6 +15,7 @@ end
 
 
 backend_disp_name(::KokkosParams) = "C++ Kokkos"
+backend_run_dir(::KokkosParams) = joinpath(@__DIR__, "../../kokkos")
 
 
 function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, cluster_params::ClusterParams)

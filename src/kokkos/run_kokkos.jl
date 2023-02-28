@@ -32,7 +32,6 @@ mutable struct KokkosOptions
     gnuplot_script::String
     repeats::Int
     compiler::String
-    track_energy_consumption::Bool
 end
 
 
@@ -54,8 +53,7 @@ function KokkosOptions(;
         num_threads = 1, threads_places = "cores", threads_proc_bind = "close",
         dimension = 2, axis_splitting = [], tests = [], cells_list = [],
         base_file_name = "", gnuplot_script = "", repeats = 1,
-        compiler = "clang",
-        track_energy_consumption = false)
+        compiler = "clang")
     return KokkosOptions(
         scheme, riemann, riemann_limiter,
         nghost, cfl, Dt, maxtime, maxcycle,
@@ -65,8 +63,7 @@ function KokkosOptions(;
         num_threads, threads_places, threads_proc_bind,
         dimension, axis_splitting, tests, cells_list,
         base_file_name, gnuplot_script, repeats,
-        compiler,
-        track_energy_consumption
+        compiler
     )
 end
 
@@ -149,12 +146,12 @@ function parse_arguments(args::Vector{String})
         elseif arg == "--threads-proc-bind"
             options.threads_proc_bind = args[i+1]
             i += 1
-    
+
         # GPU params
         elseif arg == "--gpu"
             options.gpu = uppercase(args[i+1])
             i += 1
-    
+
         # 2D only params
         elseif arg == "--splitting"
             if options.dimension != 2
@@ -162,7 +159,7 @@ function parse_arguments(args::Vector{String})
             end
             options.axis_splitting = split(args[i+1], ',')
             i += 1
-    
+
         # List params
         elseif arg == "--tests"
             options.tests = split(args[i+1], ',')
@@ -186,10 +183,7 @@ function parse_arguments(args::Vector{String})
         elseif arg == "--repeats"
             options.repeats = parse(Int, args[i+1])
             i += 1
-        elseif arg == "--track-energy"
-            options.track_energy_consumption = parse(Bool, args[i+1])
-            i += 1
-    
+
         # Measurement output params
         elseif arg == "--data-file"
             options.base_file_name = args[i+1]
@@ -237,7 +231,7 @@ end
 
 function init_cmake(options::KokkosOptions)
     use_SIMD = options.use_simd
-    use_single_presicion = options.ieee_bits == 32
+    use_single_precision = options.ieee_bits == 32
     compiler = lowercase(options.compiler)
     dim = options.dimension
 
@@ -245,7 +239,7 @@ function init_cmake(options::KokkosOptions)
         "-DCMAKE_BUILD_TYPE=Release",
         "-DKokkos_ENABLE_OPENMP=ON",
         "-DKokkos_ENABLE_SIMD=$(use_SIMD ? "ON" : "OFF")",
-        "-DUSE_SINGLE_PRECISION=$(use_single_presicion ? "ON" : "OFF")",
+        "-DUSE_SINGLE_PRECISION=$(use_single_precision ? "ON" : "OFF")",
     ]
 
     if options.gpu == "CUDA"
@@ -361,44 +355,15 @@ function get_run_command(exe_path, args)
 end
 
 
-function get_current_energy_consumed()
-    job_id = get(ENV, "SLURM_JOBID", 0)
-    if job_id == 0
-        @warn "SLURM_JOBID is not defined, cannot get the energy consumption" maxlog=1
-        return 0
-    end
-
-    format = "jobid,ConsumedEnergyRaw"
-    slurm_cmd = `sstat -j $job_id -a -P -o $format`
-    output = read(slurm_cmd, String)
-
-    parsed = output |> strip |> split
-    parsed = map(step -> split(step, '|'), parsed)
-    current_job_step = last(parsed)
-
-    length(current_job_step) != 2 && error("Expected two columns in the output. Output:\n$output\n")
-
-    return parse(Int, last(current_job_step))  # In Joules
-end
-
-
-function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, track_energy::Bool)
+function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int)
     if verbose
         println(cmd)
     end
 
     vals_cells_per_sec = Vector{Float64}(undef, repeats)
-    energy_consumed = zeros(Int, repeats)
-    prev_energy = track_energy ? get_current_energy_consumed() : 0
 
     for i in 1:repeats
         output = read(cmd, String)
-
-        if track_energy
-            current_energy = get_current_energy_consumed()
-            energy_consumed[i] = current_energy - prev_energy
-            prev_energy = current_energy
-        end
 
         mega_cells_per_sec_raw = match(r"Cells/sec:\s*\K[0-9\.]+", output)
 
@@ -413,7 +378,7 @@ function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, track_energ
         vals_cells_per_sec[i] = giga_cells_per_sec
     end
 
-    return vals_cells_per_sec, energy_consumed
+    return vals_cells_per_sec
 end
 
 
@@ -433,7 +398,6 @@ function run_armon(options::KokkosOptions, verbose::Bool)
                 data_file_name *= "_" * axis_splitting
             end
 
-            energy_file_name = data_file_name * "_ENERGY.csv"
             data_file_name *= ".csv"
 
             data_dir = dirname(data_file_name)
@@ -458,18 +422,9 @@ function run_armon(options::KokkosOptions, verbose::Bool)
             end
 
             run_cmd = get_run_command(exe_path, args)
-            repeats_cells_throughput, repeats_energy_consumed = run_and_parse_output(run_cmd, verbose, options.repeats, options.track_energy_consumption)
+            repeats_cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats)
 
             total_cells_per_sec = mean(repeats_cells_throughput)
-            mean_energy_consumed = mean(repeats_energy_consumed)
-
-            if length(repeats_cells_throughput) > 1
-                std_cells_per_sec = std(repeats_cells_throughput; corrected=true)
-                std_energy_consumed = std(repeats_energy_consumed; corrected=true)
-            else
-                std_cells_per_sec = 0
-                std_energy_consumed = 0
-            end
 
             @printf("%8.3f ± %4.2f Giga cells/sec\n", total_cells_per_sec, std_cells_per_sec)
 
@@ -477,13 +432,6 @@ function run_armon(options::KokkosOptions, verbose::Bool)
                 # Append the result to the output file
                 open(data_file_name, "a") do file
                     println(file, prod(cells), ", ", total_cells_per_sec)
-                end
-            end
-
-            if options.track_energy_consumption && !isempty(energy_file_name)
-                open(energy_file_name, "a") do file
-                    println(file, prod(cells), ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
-                        join(repeats_energy_consumed, ", "))
                 end
             end
 

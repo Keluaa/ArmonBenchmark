@@ -1,5 +1,5 @@
 
-function parse_measure_params(file_line_parser)
+function parse_measure_params(file_line_parser, script_dir)
     backends = [Julia]
     compilers = [GCC]
     device = CPU
@@ -8,8 +8,7 @@ function parse_measure_params(file_line_parser)
     processes = [1]
     node_count = [1]
     max_time = 3600  # 1h
-    create_sub_job_chain = false
-    add_reference_job = false
+    make_sub_script = false
     one_job_per_cell = false
     threads = [4]
     ieee_bits = [64]
@@ -36,8 +35,6 @@ function parse_measure_params(file_line_parser)
     use_MPI = true
     name = nothing
     repeats = 1
-    gnuplot_script = nothing
-    plot_file = nothing
     log_scale = true
     error_bars = false
     plot_title = nothing
@@ -46,9 +43,13 @@ function parse_measure_params(file_line_parser)
     cst_cells_per_process = false
     limit_to_max_mem = false
 
+    perf_plot = true
+    gnuplot_script = nothing
+    plot_file = nothing
+
     track_energy = false
+    energy_references = 3
     energy_plot = false
-    energy_plot_reps = false
 
     time_histogram = false
     flatten_time_dims = false
@@ -115,10 +116,8 @@ function parse_measure_params(file_line_parser)
             node_count = parse.(Int, split(value, ','))
         elseif option == "max_time"
             max_time = parse(Int, value)
-        elseif option == "create_sub_job_chain"
-            create_sub_job_chain = parse(Bool, value)
-        elseif option == "add_reference_job"
-            add_reference_job = parse(Bool, value)
+        elseif option == "make_sub_script"
+            make_sub_script = parse(Bool, value)
         elseif option == "one_job_per_cell"
             one_job_per_cell = parse(Bool, value)
         elseif option == "threads"
@@ -189,10 +188,12 @@ function parse_measure_params(file_line_parser)
             limit_to_max_mem = parse(Bool, value)
         elseif option == "track_energy"
             track_energy = parse(Bool, value)
+        elseif option == "energy_references"
+            energy_references = parse(Int, value)
         elseif option == "energy_plot"
             energy_plot = parse(Bool, value)
-        elseif option == "energy_plot_reps"
-            energy_plot_reps = parse(Bool, value)
+        elseif option == "perf_plot"
+            perf_plot = parse(Bool, value)
         elseif option == "time_hist"
             time_histogram = parse(Bool, value)
         elseif option == "flat_hist_dims"
@@ -255,9 +256,19 @@ function parse_measure_params(file_line_parser)
         error("Expected $(length(armon_params)) names, got $(length(armon_params_names))")
     end
 
+    if track_energy && !one_job_per_cell
+        error("Cannot track energy for jobs with multiple cell domains per step")
+    end
+
+    if track_energy && !make_sub_script
+        error("Cannot track energy outside of a submission script. `make_sub_script` should be `true`")
+    end
+
     params_and_legends = collect(zip(armon_params, armon_params_legends, armon_params_names))
 
-    mkpath(joinpath(data_dir, name))
+    plot_scripts_dir = joinpath(script_dir, PLOT_SCRIPTS_DIR_NAME)
+    plots_dir = joinpath(script_dir, PLOTS_DIR_NAME)
+
     gnuplot_script = joinpath(plot_scripts_dir, gnuplot_script)
     plot_file = joinpath(plots_dir, plot_file)
 
@@ -267,31 +278,33 @@ function parse_measure_params(file_line_parser)
     gnuplot_MPI_script = joinpath(plot_scripts_dir, name * "_MPI_time.plot")
     time_MPI_plot_file = joinpath(plots_dir, name * "_MPI_time.pdf")
 
-    energy_script = joinpath(plot_scripts_dir, name * "_Energy.plot")
-    energy_plot_file = joinpath(plots_dir, name * "_Energy.pdf")
+    energy_script = joinpath(plot_scripts_dir, name * "_energy.plot")
+    energy_plot_file = joinpath(plots_dir, name * "_energy.pdf")
 
     return MeasureParams(
         device, node, distributions, processes, node_count, max_time, use_MPI,
-        create_sub_job_chain, add_reference_job, one_job_per_cell,
+        make_sub_script, one_job_per_cell,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,
         cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
         axis_splitting, params_and_legends,
-        name, repeats, gnuplot_script, plot_file, log_scale, error_bars, plot_title, verbose,
-        use_max_threads, cst_cells_per_process, limit_to_max_mem, track_energy,
+        name, script_dir, repeats, log_scale, error_bars, plot_title,
+        verbose, use_max_threads, cst_cells_per_process, limit_to_max_mem,
+        track_energy, energy_references,
+        perf_plot, gnuplot_script, plot_file,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file,
-        energy_plot, energy_plot_reps, energy_script, energy_plot_file
+        energy_plot, energy_script, energy_plot_file
     )
 end
 
 
-function parse_measure_script_file(file::IOStream, name::String)
+function parse_measure_script_file(file::IOStream, name::String, script_dir::String)
     measures::Vector{MeasureParams} = []
     file_line_parser = enumerate(eachline(file))
     while !eof(file)
         measure = try
-            parse_measure_params(file_line_parser)
+            parse_measure_params(file_line_parser, script_dir)
         catch e
             println("Error while parsing measure $(length(measures)+1) of file '$name':")
             rethrow(e)
@@ -309,8 +322,10 @@ julia batch_measure.jl [--override-node=<node>,<new node>]
                        [--do-only=<measures count>]
                        [--skip-first=<combinaison count>]
                        [--count=<combinaison count>]
+                       [--no-overwrite=true|false]
+                       [--no-plot-update=true|false]
                        [--help|-h]
-                       <script files>...'
+                       <measurement files>...'
 """
 
 
@@ -319,10 +334,7 @@ function parse_arguments()
         error("Invalid number of arguments.\n" * USAGE)
     end
 
-    start_at = 1
-    skip_first = 0
-    comb_count = typemax(Int)
-    do_only = typemax(Int)
+    batch_options = BatchOptions()
 
     node_overrides = Dict{String, String}()
 
@@ -336,16 +348,22 @@ function parse_arguments()
                 node_overrides[node] = replacement_node
             elseif (startswith(arg, "--start-at="))
                 value = split(arg, '=')[2]
-                start_at = parse(Int, value)
+                batch_options.start_at = parse(Int, value)
             elseif (startswith(arg, "--skip-first="))
                 value = split(arg, '=')[2]
-                skip_first = parse(Int, value)
+                batch_options.skip_first = parse(Int, value)
             elseif (startswith(arg, "--do-only="))
                 value = split(arg, '=')[2]
-                do_only = parse(Int, value)
+                batch_options.do_only = parse(Int, value)
             elseif (startswith(arg, "--count="))
                 value = split(arg, '=')[2]
-                comb_count = parse(Int, value)
+                batch_options.comb_count = parse(Int, value)
+            elseif (startswith(arg, "--no-overwrite="))
+                value = split(arg, '=')[2]
+                batch_options.no_overwrite = parse(Bool, value)
+            elseif (startswith(arg, "--no-plot-update="))
+                value = split(arg, '=')[2]
+                batch_options.no_plot_update = parse(Bool, value)
             elseif arg == "--help" || arg == "-h"
                 println(USAGE)
                 exit(0)
@@ -355,7 +373,8 @@ function parse_arguments()
         else
             # Measure file
             script_file = open(arg, "r")
-            append!(measures, parse_measure_script_file(script_file, arg))
+            script_dir = dirname(arg)
+            append!(measures, parse_measure_script_file(script_file, arg, script_dir))
             close(script_file)
         end
     end
@@ -366,5 +385,5 @@ function parse_arguments()
         end
     end
 
-    return measures, start_at, do_only, skip_first, comb_count
+    return measures, batch_options
 end

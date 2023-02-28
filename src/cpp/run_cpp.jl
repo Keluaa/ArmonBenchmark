@@ -28,7 +28,6 @@ mutable struct CppOptions
     gnuplot_script::String
     repeats::Int
     compiler::String
-    track_energy_consumption::Bool
 end
 
 
@@ -48,8 +47,7 @@ function CppOptions(;
         num_threads = 1, threads_places = "cores", threads_proc_bind = "close",
         tests = [], cells_list = [],
         base_file_name = "", gnuplot_script = "", repeats = 1,
-        compiler = "clang",
-        track_energy_consumption = false)
+        compiler = "clang")
     return CppOptions(
         scheme, riemann_limiter,
         nghost, cfl, Dt, maxtime, maxcycle,
@@ -59,8 +57,7 @@ function CppOptions(;
         num_threads, threads_places, threads_proc_bind,
         tests, cells_list,
         base_file_name, gnuplot_script, repeats,
-        compiler,
-        track_energy_consumption
+        compiler
     )
 end
 
@@ -141,9 +138,6 @@ function parse_arguments(args::Vector{String})
         # Measurements params
         elseif arg == "--repeats"
             options.repeats = parse(Int, args[i+1])
-            i += 1
-        elseif arg == "--track-energy"
-            options.track_energy_consumption = parse(Bool, args[i+1])
             i += 1
 
         # Measurement output params
@@ -306,44 +300,15 @@ function get_run_command(args)
 end
 
 
-function get_current_energy_consumed()
-    job_id = get(ENV, "SLURM_JOBID", "")
-    if isempty(job)
-        @warn "SLURM_JOBID is not defined, cannot get the energy consumption" maxlog=1
-        return 0
-    end
-
-    format = "jobid,ConsumedEnergyRaw"
-    slurm_cmd = `sstat -j $job_id -a -P -o $format`
-    output = read(slurm_cmd, String)
-
-    parsed = output |> strip |> split
-    parsed = map(step -> split(step, '|'), parsed)
-    current_job_step = last(parsed)
-
-    length(current_job_step) != 2 && error("Expected two columns in the output. Output:\n$output\n")
-
-    return parse(Int, last(current_job_step))  # In Joules
-end
-
-
 function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, track_energy::Bool)
     if verbose
         println(cmd)
     end
 
     total_giga_cells_per_sec = 0
-    energy_consumed = zeros(Int, repeats)
-    prev_energy = track_energy ? get_current_energy_consumed() : 0
 
     for _ in 1:repeats
         output = read(cmd, String)
-
-        if track_energy
-            current_energy = get_current_energy_consumed()
-            energy_consumed[i] = current_energy - prev_energy
-            prev_energy = current_energy
-        end
 
         mega_cells_per_sec_raw = match(r"Cells/sec:\s*\K[0-9\.]+", output)
 
@@ -359,7 +324,7 @@ function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, track_energ
     end
 
     total_giga_cells_per_sec /= repeats
-    return total_giga_cells_per_sec, energy_consumed
+    return total_giga_cells_per_sec
 end
 
 
@@ -373,7 +338,6 @@ function run_armon(options::CppOptions, verbose::Bool)
             data_file_name = ""
         else
             data_file_name = options.base_file_name * test
-            energy_file_name = data_file_name * "_ENERGY.csv"
             data_file_name *= ".csv"
 
             data_dir = dirname(data_file_name)
@@ -392,15 +356,7 @@ function run_armon(options::CppOptions, verbose::Bool)
             @printf(" - %s, %11g cells: ", test, cells[1])
     
             run_cmd = get_run_command(args)
-            cells_throughput, repeats_energy_consumed = run_and_parse_output(run_cmd, verbose, options.repeats, options.track_energy_consumption)
-
-            mean_energy_consumed = mean(repeats_energy_consumed)
-
-            if length(repeats_energy_consumed) > 1
-                std_energy_consumed = std(repeats_energy_consumed; corrected=true)
-            else
-                std_energy_consumed = 0
-            end
+            cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats, options.track_energy_consumption)
 
             @printf("%8.2f Giga cells/sec\n", cells_throughput)
             
@@ -411,13 +367,6 @@ function run_armon(options::CppOptions, verbose::Bool)
                 end
             end
 
-            if options.track_energy_consumption && !isempty(energy_file_name)
-                open(energy_file_name, "a") do file
-                    println(file, cells, ", ", mean_energy_consumed, ", ", std_energy_consumed, ", ",
-                        join(repeats_energy_consumed, ", "))
-                end
-            end
-            
             if !isempty(options.gnuplot_script)
                 # Update the plot
                 # We redirect the output of gnuplot to null so that there is no warning messages displayed
