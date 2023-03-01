@@ -140,8 +140,6 @@ function parse_measure_params(file_line_parser, script_dir)
             dimension = parse.(Int, split(value, ','))
         elseif option == "async_comms"
             async_comms = parse.(Bool, split(value, ','))
-        elseif option == "jl_mpi_impl"
-            @warn "'jl_mpi_impl' option is ignored" maxlog=1
         elseif option == "cells"
             cells_list = value
         elseif option == "domains"
@@ -152,8 +150,6 @@ function parse_measure_params(file_line_parser, script_dir)
             process_grid_ratios = split(value, ';')
         elseif option == "tests"
             tests_list = split(value, ',')
-        elseif option == "transpose"
-            @warn "'transpose' option is ignored" maxlog=1
         elseif option == "splitting"
             axis_splitting = split(value, ',')
         elseif option == "armon"
@@ -257,7 +253,7 @@ function parse_measure_params(file_line_parser, script_dir)
     end
 
     if track_energy && !one_job_per_cell
-        error("Cannot track energy for jobs with multiple cell domains per step")
+        error("Cannot track energy for jobs with multiple cell domains per step. Use 'one_job_per_cell=true'")
     end
 
     if track_energy && !make_sub_script
@@ -266,20 +262,20 @@ function parse_measure_params(file_line_parser, script_dir)
 
     params_and_legends = collect(zip(armon_params, armon_params_legends, armon_params_names))
 
-    plot_scripts_dir = joinpath(script_dir, PLOT_SCRIPTS_DIR_NAME)
-    plots_dir = joinpath(script_dir, PLOTS_DIR_NAME)
+    rel_plot_scripts_dir = joinpath(".", PLOT_SCRIPTS_DIR_NAME)
+    rel_plots_dir = joinpath(".", PLOTS_DIR_NAME)
 
-    gnuplot_script = joinpath(plot_scripts_dir, gnuplot_script)
-    plot_file = joinpath(plots_dir, plot_file)
+    gnuplot_script = joinpath(rel_plot_scripts_dir, gnuplot_script)
+    plot_file = joinpath(rel_plots_dir, plot_file)
 
-    gnuplot_hist_script = joinpath(plot_scripts_dir, name * "_hist.plot")
-    hist_plot_file = joinpath(plots_dir, name * "_hist.pdf")
+    gnuplot_hist_script = joinpath(rel_plot_scripts_dir, name * "_hist.plot")
+    hist_plot_file = joinpath(rel_plots_dir, name * "_hist.pdf")
 
-    gnuplot_MPI_script = joinpath(plot_scripts_dir, name * "_MPI_time.plot")
-    time_MPI_plot_file = joinpath(plots_dir, name * "_MPI_time.pdf")
+    gnuplot_MPI_script = joinpath(rel_plot_scripts_dir, name * "_MPI_time.plot")
+    time_MPI_plot_file = joinpath(rel_plots_dir, name * "_MPI_time.pdf")
 
-    energy_script = joinpath(plot_scripts_dir, name * "_energy.plot")
-    energy_plot_file = joinpath(plots_dir, name * "_energy.pdf")
+    energy_script = joinpath(rel_plot_scripts_dir, name * "_energy.plot")
+    energy_plot_file = joinpath(rel_plots_dir, name * "_energy.pdf")
 
     return MeasureParams(
         device, node, distributions, processes, node_count, max_time, use_MPI,

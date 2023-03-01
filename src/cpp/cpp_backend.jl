@@ -15,18 +15,18 @@ end
 
 
 backend_disp_name(::CppParams) = "C++ OpenMP"
-backend_run_dir(::CppParams) = joinpath(@__DIR__, "../../cpp")
+backend_run_dir(::CppParams) = abspath(joinpath(@__DIR__, "../../cpp"))
 
 
-function run_backend_msg(measure::MeasureParams, cpp_params::CppParams, cluster_params::ClusterParams)
+function run_backend_msg(measure::MeasureParams, params::CppParams, cluster::ClusterParams)
     """Running C++ OpenMP backend with:
-     - $(cpp_params.threads) threads
-     - threads binding: $(cpp_params.omp_proc_bind), places: $(cpp_params.omp_places)
-     - $(cpp_params.use_simd == 1 ? "with" : "without") SIMD
+     - $(params.threads) threads
+     - threads binding: $(params.omp_proc_bind), places: $(params.omp_places)
+     - $(params.use_simd == 1 ? "with" : "without") SIMD
      - 1D
-     - compiled with $(cpp_params.compiler)
+     - compiled with $(params.compiler)
      - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
-     - with $(cluster_params.processes) processes on $(cluster_params.node_count) nodes ($(cluster_params.distribution) distribution)
+     - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
     """
 end
 
@@ -48,8 +48,8 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{CPP})
 end
 
 
-function run_backend(measure::MeasureParams, params::CppParams, cluster_params::ClusterParams, base_file_name::String)
-    if cluster_params.processes > 1
+function run_backend(measure::MeasureParams, params::CppParams, cluster::ClusterParams, base_file_name::String)
+    if cluster.processes > 1
         error("The C++ backend doesn't support MPI")
     end
 
@@ -62,7 +62,11 @@ function run_backend(measure::MeasureParams, params::CppParams, cluster_params::
     end
 
     armon_options = Any["julia"]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
+
+    if !measure.make_sub_script
+        push!(armon_options, "--color=yes")
+    end
+
     push!(armon_options, cpp_script_path)
 
     if measure.device != CPU
@@ -77,12 +81,12 @@ function run_backend(measure::MeasureParams, params::CppParams, cluster_params::
 
     if measure.cst_cells_per_process
         # Scale the cells by the number of processes
-        cells_list .*= cluster_params.processes
+        cells_list .*= cluster.processes
     end
 
     cells_list_str = join(cells_list, ',')
 
-    append!(armon_options, armon_base_options)
+    append!(armon_options, ARMON_BASE_OPTIONS)
     append!(armon_options, [
         "--use-simd", params.use_simd,
         "--ieee", params.ieee_bits,
@@ -98,8 +102,8 @@ function run_backend(measure::MeasureParams, params::CppParams, cluster_params::
         "--compiler", params.compiler
     ])
 
-    additionnal_options, _, _ = params.options
-    append!(armon_options, additionnal_options)
+    additional_options, _, _ = params.options
+    append!(armon_options, additional_options)
 
     return armon_options
 end

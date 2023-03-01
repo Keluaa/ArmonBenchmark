@@ -4,15 +4,10 @@ anim
 data
 plots
 plot_scripts
-sub_scripts
+jobs_scripts
 jobs_output
-cmp_data
-comp_cpu_gpu/out
 .idea
 .vscode
-
-output*
-*.gif
 
 Manifest.toml
 LocalPreferences.toml

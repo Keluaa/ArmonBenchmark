@@ -15,18 +15,18 @@ end
 
 
 backend_disp_name(::KokkosParams) = "C++ Kokkos"
-backend_run_dir(::KokkosParams) = joinpath(@__DIR__, "../../kokkos")
+backend_run_dir(::KokkosParams) = abspath(joinpath(@__DIR__, "../../kokkos"))
 
 
-function run_backend_msg(measure::MeasureParams, kokkos_params::KokkosParams, cluster_params::ClusterParams)
+function run_backend_msg(measure::MeasureParams, params::KokkosParams, cluster::ClusterParams)
     """Running C++ Kokkos backend with:
-     - $(kokkos_params.threads) threads
-     - threads binding: $(kokkos_params.omp_proc_bind), places: $(kokkos_params.omp_places)
-     - $(kokkos_params.use_simd == 1 ? "with" : "without") SIMD
-     - $(kokkos_params.dimension)D
-     - compiled with $(kokkos_params.compiler)
+     - $(params.threads) threads
+     - threads binding: $(params.omp_proc_bind), places: $(params.omp_places)
+     - $(params.use_simd == 1 ? "with" : "without") SIMD
+     - $(params.dimension)D
+     - compiled with $(params.compiler)
      - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
-     - with $(cluster_params.processes) processes on $(cluster_params.node_count) nodes ($(cluster_params.distribution) distribution)
+     - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
     """
 end
 
@@ -48,8 +48,8 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Kokkos})
 end
 
 
-function run_backend(measure::MeasureParams, params::KokkosParams, cluster_params::ClusterParams, base_file_name::String)
-    if cluster_params.processes > 1
+function run_backend(measure::MeasureParams, params::KokkosParams, cluster::ClusterParams, base_file_name::String)
+    if cluster.processes > 1
         error("The Kokkos backend doesn't support MPI yet")
     end
 
@@ -62,7 +62,11 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster_param
     end
 
     armon_options = Any["julia"]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
+
+    if !measure.make_sub_script
+        push!(armon_options, "--color=yes")
+    end
+
     push!(armon_options, kokkos_script_path)
 
     if measure.device == CUDA
@@ -82,12 +86,12 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster_param
     if measure.cst_cells_per_process
         # Scale the cells by the number of processes
         if params.dimension == 1
-            cells_list .*= cluster_params.processes
+            cells_list .*= cluster.processes
         else
             # We need to distribute the factor along each axis, while keeping the divisibility of 
             # the cells count, since it will be divided by the number of processes along each axis.
             # Therefore we make the new values multiples of 64, but this is still not perfect.
-            scale_factor = cluster_params.processes^(1/params.dimension)
+            scale_factor = cluster.processes^(1/params.dimension)
             cells_list = cells_list .* scale_factor
             cells_list .-= [cells .% 64 for cells in cells_list]
             cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
@@ -104,7 +108,7 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster_param
         cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
     end
 
-    append!(armon_options, armon_base_options)
+    append!(armon_options, ARMON_BASE_OPTIONS)
     append!(armon_options, [
         "--dim", params.dimension,
         "--use-simd", params.use_simd,
@@ -128,72 +132,11 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster_param
         ])
     end
 
-    additionnal_options, _, _ = params.options
-    append!(armon_options, additionnal_options)
+    additional_options, _, _ = params.options
+    append!(armon_options, additional_options)
 
     return armon_options
 end
-
-
-function run_backend_reference(measure::MeasureParams, params::KokkosParams, cluster_params::ClusterParams)
-    if cluster_params.processes > 1
-        error("The Kokkos backend doesn't support MPI yet")
-    end
-
-    if measure.limit_to_max_mem
-        @warn "The Kokkos backend doesn't support the 'limit_to_max_mem'" maxlog=1
-    end
-
-    if measure.time_histogram
-        @warn "The Kokkos backend doesn't support the 'time_histogram'" maxlog=1
-    end
-
-    armon_options = ["julia"]
-    append!(armon_options, isempty(measure.node) ? julia_options_no_cluster : julia_options)
-    push!(armon_options, kokkos_script_path)
-
-    if measure.device == CUDA
-        append!(armon_options, ["--gpu", "CUDA"])
-    elseif measure.device == ROCM
-        append!(armon_options, ["--gpu", "ROCM"])
-    else
-        # no option needed for CPU
-    end
-
-    if params.dimension == 1
-        cells_list = [1000]
-        cells_list_str = join(cells_list, ',')
-    else
-        cells_list = params.dimension == 2 ? [[360,360]] : [[60,60,60]]
-        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
-    end
-
-    append!(armon_options, armon_base_options)
-    append!(armon_options, [
-        "--dim", params.dimension,
-        "--use-simd", params.use_simd,
-        "--ieee", 64,
-        "--cycle", 1,
-        "--tests", measure.tests_list[1],
-        "--cells-list", cells_list_str,
-        "--threads-places", params.omp_places,
-        "--threads-proc-bind", params.omp_proc_bind,
-        "--repeats", 1,
-        "--verbose", 5
-    ])
-
-    if params.dimension > 1
-        append!(armon_options, [
-            "--splitting", measure.axis_splitting[1]
-        ])
-    end
-
-    additionnal_options, _, _ = params.options
-    append!(armon_options, additionnal_options)
-
-    return armon_options
-end
-
 
 
 function build_data_file_base_name(measure::MeasureParams, processes::Int, distribution::String,

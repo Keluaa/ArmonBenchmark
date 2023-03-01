@@ -16,18 +16,18 @@ end
 
 
 backend_disp_name(::JuliaParams) = "Julia"
-backend_run_dir(::JuliaParams) = joinpath(@__DIR__, "../../julia")
+backend_run_dir(::JuliaParams) = abspath(joinpath(@__DIR__, "../../julia"))
 
 
-function run_backend_msg(measure::MeasureParams, julia_params::JuliaParams, cluster_params::ClusterParams)
+function run_backend_msg(measure::MeasureParams, julia::JuliaParams, cluster::ClusterParams)
     """Running Julia with:
-    - $(julia_params.threads) threads
-    - threads binding: $(julia_params.jl_proc_bind), places: $(julia_params.jl_places)
-    - $(julia_params.use_simd == 1 ? "with" : "without") SIMD
-    - $(julia_params.dimension)D
-    - $(julia_params.async_comms ? "a" : "")synchronous communications
+    - $(julia.threads) threads
+    - threads binding: $(julia.jl_proc_bind), places: $(julia.jl_places)
+    - $(julia.use_simd == 1 ? "with" : "without") SIMD
+    - $(julia.dimension)D
+    - $(julia.async_comms ? "a" : "")synchronous communications
     - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
-    - with $(cluster_params.processes) processes on $(cluster_params.node_count) nodes ($(cluster_params.distribution) distribution)
+    - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
    """
 end
 
@@ -50,17 +50,18 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Julia})
 end
 
 
-function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params::ClusterParams, base_file_name::String)
+function run_backend(measure::MeasureParams, params::JuliaParams, cluster::ClusterParams, base_file_name::String)
     armon_options = [
         "julia", "-t", params.threads,
         "-O3", "--check-bounds=no",
         "--project=$(backend_run_dir(params))"
     ]
-    push!(armon_options, julia_script_path)
 
     if !measure.make_sub_script
         push!(armon_options, "--color=yes")
     end
+
+    push!(armon_options, julia_script_path)
 
     if measure.device == CUDA
         append!(armon_options, ["--gpu", "CUDA"])
@@ -79,12 +80,12 @@ function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params
     if measure.cst_cells_per_process
         # Scale the cells by the number of processes
         if params.dimension == 1
-            cells_list .*= cluster_params.processes
+            cells_list .*= cluster.processes
         else
             # We need to distribute the factor along each axis, while keeping the divisibility of 
             # the cells count, since it will be divided by the number of processes along each axis.
             # Therefore we make the new values multiples of 64, but this is still not perfect.
-            scale_factor = cluster_params.processes^(1/params.dimension)
+            scale_factor = cluster.processes^(1/params.dimension)
             cells_list = cells_list .* scale_factor
             cells_list .-= [cells .% 64 for cells in cells_list]
             cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
@@ -101,7 +102,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params
         cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
     end
 
-    append!(armon_options, armon_base_options)
+    append!(armon_options, ARMON_BASE_OPTIONS)
     append!(armon_options, [
         "--dim", params.dimension,
         "--block-size", 256,
@@ -112,14 +113,22 @@ function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params
         "--threads-places", params.jl_places,
         "--threads-proc-bind", params.jl_proc_bind,
         "--data-file", base_file_name,
-        "--gnuplot-script", measure.gnuplot_script,
         "--repeats", measure.repeats,
         "--verbose", (measure.verbose ? 2 : 5),
-        "--gnuplot-hist-script", measure.gnuplot_hist_script,
-        "--time-histogram", measure.time_histogram,
         "--use-mpi", measure.use_MPI,
         "--limit-to-mem", measure.limit_to_max_mem
     ])
+
+    if measure.perf_plot
+        append!(armon_options, ["--gnuplot-script", measure.gnuplot_script])
+    end
+
+    if measure.time_histogram
+        append!(armon_options, [
+            "--gnuplot-hist-script", measure.gnuplot_hist_script,
+            "--time-histogram", measure.time_histogram    
+        ])
+    end
 
     if params.dimension > 1
         append!(armon_options, [
@@ -136,7 +145,7 @@ function run_backend(measure::MeasureParams, params::JuliaParams, cluster_params
             push!(armon_options, "--proc-grid-ratio", join([
                 join(string.(ratio), ',')
                 for ratio in measure.process_grid_ratios
-                if check_ratio_for_grid(cluster_params.processes, ratio)
+                if check_ratio_for_grid(cluster.processes, ratio)
             ], ';'))
         end
     end
