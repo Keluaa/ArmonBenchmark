@@ -8,8 +8,11 @@ function parse_measure_params(file_line_parser, script_dir)
     processes = [1]
     node_count = [1]
     max_time = 3600  # 1h
+
     make_sub_script = false
     one_job_per_cell = false
+    one_script_per_step = false
+
     threads = [4]
     ieee_bits = [64]
     block_sizes = [1024]
@@ -120,6 +123,8 @@ function parse_measure_params(file_line_parser, script_dir)
             make_sub_script = parse(Bool, value)
         elseif option == "one_job_per_cell"
             one_job_per_cell = parse(Bool, value)
+        elseif option == "one_script_per_step"
+            one_script_per_step = parse(Bool, value)
         elseif option == "threads"
             threads = parse.(Int, split(value, ','))
         elseif option == "block_sizes"
@@ -279,7 +284,7 @@ function parse_measure_params(file_line_parser, script_dir)
 
     return MeasureParams(
         device, node, distributions, processes, node_count, max_time, use_MPI,
-        make_sub_script, one_job_per_cell,
+        make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,
         cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
@@ -320,6 +325,8 @@ julia batch_measure.jl [--override-node=<node>,<new node>]
                        [--count=<combinaison count>]
                        [--no-overwrite=true|false]
                        [--no-plot-update=true|false]
+                       [--step-scripts=true|false]
+                       [--sub-now]
                        [--help|-h]
                        <measurement files>...'
 """
@@ -360,6 +367,11 @@ function parse_arguments()
             elseif (startswith(arg, "--no-plot-update="))
                 value = split(arg, '=')[2]
                 batch_options.no_plot_update = parse(Bool, value)
+            elseif (startswith(arg, "--step-scripts"))
+                value = split(arg, '=')[2]
+                batch_options.one_script_per_step = parse(Bool, value)
+            elseif (startswith(arg, "--sub-now"))
+                batch_options.submit_now = true
             elseif arg == "--help" || arg == "-h"
                 println(USAGE)
                 exit(0)

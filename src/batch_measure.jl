@@ -15,11 +15,13 @@ mutable struct BatchOptions
     comb_count::Int
     no_overwrite::Bool
     no_plot_update::Bool
+    submit_now::Bool
+    one_script_per_step::Bool
 end
 
 
 function BatchOptions()
-    BatchOptions(1, typemax(Int), 0, typemax(Int), false, false)
+    BatchOptions(1, typemax(Int), 0, typemax(Int), false, false, false, false)
 end
 
 
@@ -36,6 +38,7 @@ mutable struct MeasureParams
     # Job params
     make_sub_script::Bool
     one_job_per_cell::Bool
+    one_script_per_step::Bool
 
     # Backend params
     backends::Vector{Backend}
@@ -327,6 +330,9 @@ function get_max_cores_of_partition(partition::String)
     end
 end
 
+
+submit_script(script_path) = run(`ccc_msub $script_path`)  # TODO: replace by `srun`
+
 #
 # Job steps and submission script
 #
@@ -380,7 +386,7 @@ cmd_to_string(cmd::Cmd) = string(cmd)[2:end-1]
 
 function options_to_str(opts::Vector)
     cmd_str = cmd_to_string(`$opts`)
-    return replace(cmd_str, '€' => '$')  # Workaround to build commands with variables
+    return replace(cmd_str, '€' => '$')  # Workaround to build commands using variables
 end
 
 
@@ -396,6 +402,9 @@ end
 
 
 function make_reference_job_from(step::JobStep)
+    # A reference job is only used to measure the energy consumption overhead, therefore it should
+    # only use a very limited number of cells, while using very similar code paths with the real
+    # steps.
     ref_step = deepcopy(step)
 
     i_cells = findfirst(v -> v == "--cells-list", ref_step.armon_options)
@@ -423,12 +432,15 @@ function make_reference_job_from(step::JobStep)
 end
 
 
-function create_sub_script(measure::MeasureParams, steps::Vector{JobStep}; header="")
-    script_path = joinpath(measure.script_dir, JOB_SCRIPS_DIR_NAME, measure.name * ".sh")
+function create_sub_script(measure::MeasureParams, steps::Vector{JobStep};
+        header="", name_suffix="", step_count=length(steps), step_idx_offset=0)
+    script_name = measure.name * name_suffix * ".sh"
+    script_path = joinpath(measure.script_dir, JOB_SCRIPS_DIR_NAME, script_name)
     open(script_path, "w") do script
         job_work_dir = abspath(measure.script_dir)
-        job_stdout_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, "$(measure.name)_%I_stdout.txt") |> abspath
-        job_stderr_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, "$(measure.name)_%I_stderr.txt") |> abspath
+        job_output_file_name = "$(measure.name)$(name_suffix)_%I"  # '%I' is replaced by the job ID
+        job_stdout_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stdout.txt") |> abspath
+        job_stderr_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stderr.txt") |> abspath
 
         job_processes = maximum(steps) do step
             step.cluster.processes
@@ -454,10 +466,12 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep}; heade
                 if jl_project_dir === nothing
                     jl_project_dir = proj_dir
                 end
+                # '€' instead of '\$' to escape the automatic escape mecanism of `Cmd`. It is
+                # replaced later in `options_to_str`
                 step.armon_options[i] = "--project=€JULIA_PROJECT"
             end
 
-            println(script, "JULIA_PROJECT='$jl_project_dir'")
+            !isnothing(jl_project_dir) && println(script, "JULIA_PROJECT='$jl_project_dir'")
         end
 
         if measure.track_energy
@@ -466,6 +480,7 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep}; heade
             println(script, "ADD_ENERGY_SCRIPT=\"", ADD_ENERGY_SCRIPT_PATH, '"')
         end
 
+        # Put the header in a `echo` call
         !isempty(header) && println(script, "\necho -e \"", replace(header, '\n' => "\n#"), "\"")
 
         step_idx = 0
@@ -477,16 +492,20 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep}; heade
             step_idx += 1
         end
 
-        step_count = length(steps)
         for (i_step, step) in enumerate(steps)
             step_file = basename(step.base_file_name)
             step_file = replace(step_file, r"_+$" => "")  # Remove tailling '_'
+            i_step += step_idx_offset
             println(script, "\necho \"== Step $i_step/$step_count: $step_file ==\"")
             step_idx = append_to_sub_script(script, measure, step, step_idx)
         end
 
         println(script, "\necho \"== All done ==\"")
     end
+
+    println("Created submission script '$script_name'")
+
+    return script_path
 end
 
 
@@ -538,6 +557,20 @@ function append_to_sub_script(script::IO, measure::MeasureParams, step::JobStep,
     end
 
     return step_idx
+end
+
+
+function create_script_for_each_step(measure::MeasureParams, steps::Vector{JobStep}; header="")
+    step_count = length(steps)
+    paths = []
+    for (i_step, step) in enumerate(steps)
+        name_suffix = basename(step.base_file_name)
+        name_suffix = "_" * replace(name_suffix, r"_+$" => "")
+        script_path = create_sub_script(measure, [step];
+            header, name_suffix, step_count, step_idx_offset=i_step-1)
+        push!(paths, script_path)
+    end
+    return paths
 end
 
 
@@ -780,7 +813,7 @@ function build_all_steps_of_measure(measure::MeasureParams, first_measure::Bool,
             end
 
             job_step = build_job_step(measure, backend_params, cluster_params)
-            push!(steps, job_step)
+            !isnothing(job_step) && push!(steps, job_step)
 
             comb_c += 1
         end
@@ -802,8 +835,11 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
         return
     end
 
+    sub_scripts = []
+
     no_overwrite = batch_options.no_overwrite
     no_plot_update = batch_options.no_plot_update
+    one_script_per_step = batch_options.one_script_per_step || measure.one_script_per_step
     first_measure = true
     for (i, measure) in measures_to_do
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
@@ -821,13 +857,25 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
         create_all_data_files(measure, job_steps; no_overwrite, no_plot_update)
 
         if measure.make_sub_script
-            create_sub_script(measure, job_steps;
-                header="==== Measurement $(i)/$(length(measures)): $(measure.name) ====")
+            header = "==== Measurement $(i)/$(length(measures)): $(measure.name) ===="
+            if one_script_per_step
+                script_paths = create_script_for_each_step(measure, job_steps; header)
+                append!(sub_scripts, script_paths)
+            else
+                script_path = create_sub_script(measure, job_steps; header)
+                push!(sub_scripts, script_path)
+            end
         else
             run_job_steps(measure, job_steps)
         end
 
         comb_end && return
+    end
+
+    if batch_options.submit_now
+        # We submit the scripts once all of them have been created, in case there is any errors for
+        # one of them
+        foreach(submit_script, sub_scripts)
     end
 end
 
