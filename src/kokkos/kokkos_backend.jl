@@ -122,8 +122,7 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster::Clus
         "--gnuplot-script", measure.gnuplot_script,
         "--repeats", measure.repeats,
         "--verbose", (measure.verbose ? 2 : 3),
-        "--compiler", params.compiler,
-        "--track-energy", measure.track_energy
+        "--compiler", params.compiler
     ])
 
     if params.dimension > 1

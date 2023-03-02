@@ -425,6 +425,7 @@ function run_armon(options::KokkosOptions, verbose::Bool)
             repeats_cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats)
 
             total_cells_per_sec = mean(repeats_cells_throughput)
+            std_cells_per_sec = 0  # TODO: add with MPI
 
             @printf("%8.3f ± %4.2f Giga cells/sec\n", total_cells_per_sec, std_cells_per_sec)
 

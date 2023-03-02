@@ -286,7 +286,7 @@ end
 # Slurm interaction
 #
 
-const IS_SLURM_AVAILABLE = try run(`type sinfo`); true catch; false end
+const IS_SLURM_AVAILABLE = try read(`type sinfo`); true catch; false end
 const CACHED_PARTITIONS_INFO = Dict{String, Dict}()
 
 function get_partition_info(partition::String)
@@ -427,8 +427,8 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep}; heade
     script_path = joinpath(measure.script_dir, JOB_SCRIPS_DIR_NAME, measure.name * ".sh")
     open(script_path, "w") do script
         job_work_dir = abspath(measure.script_dir)
-        job_stdout_file = joinpath(".", JOBS_OUTPUT_DIR_NAME, "stdout_$(measure.name)_%I.txt")
-        job_stderr_file = joinpath(".", JOBS_OUTPUT_DIR_NAME, "stderr_$(measure.name)_%I.txt")
+        job_stdout_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, "$(measure.name)_%I_stdout.txt") |> abspath
+        job_stderr_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, "$(measure.name)_%I_stderr.txt") |> abspath
 
         job_processes = maximum(steps) do step
             step.cluster.processes
@@ -466,22 +466,26 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep}; heade
             println(script, "ADD_ENERGY_SCRIPT=\"", ADD_ENERGY_SCRIPT_PATH, '"')
         end
 
-        !isempty(header) && println(script, "\n#", replace(header, '\n' => "\n#"), '\n')
+        !isempty(header) && println(script, "\necho -e \"", replace(header, '\n' => "\n#"), "\"")
 
         step_idx = 0
         if measure.track_energy
             # Julia warmup
             ref_step, _ = make_reference_job_from(first(steps))
-            println(script, "# Initial warmup")
+            println(script, "\n# Initial warmup")
             println(script, command_for_step(ref_step))
             step_idx += 1
         end
 
         step_count = length(steps)
         for (i_step, step) in enumerate(steps)
-            println(script, "\n# Step $i_step/$step_count")
+            step_file = basename(step.base_file_name)
+            step_file = replace(step_file, r"_+$" => "")  # Remove tailling '_'
+            println(script, "\necho \"== Step $i_step/$step_count: $step_file ==\"")
             step_idx = append_to_sub_script(script, measure, step, step_idx)
         end
+
+        println(script, "\necho \"== All done ==\"")
     end
 end
 
@@ -579,6 +583,7 @@ function build_job_step(measure::MeasureParams, backend::BackendParams, cluster:
 
     base_file_name, legend = build_data_file_base_name(measure,
         cluster.processes, cluster.distribution, cluster.node_count, backend)
+    base_file_name = joinpath(".", DATA_DIR_NAME, base_file_name)
     armon_options = run_backend(measure, backend, cluster, base_file_name)
 
     dimension = backend.dimension
@@ -715,11 +720,9 @@ function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
 
             incr_color = false
 
-            data_file_name, legend = build_armon_data_file_name(measure, step.dimension,
+            base_file_path, legend = build_armon_data_file_name(measure, step.dimension,
                 step.base_file_name, step.legend,
                 armon_params.test, armon_params.axis_splitting, process_grid)
-
-            base_file_path = joinpath(".", DATA_DIR_NAME, data_file_name)
 
             legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
 
@@ -819,7 +822,7 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
 
         if measure.make_sub_script
             create_sub_script(measure, job_steps;
-                header=" ==== Measurement $(i)/$(length(measures)): $(measure.name) ====")
+                header="==== Measurement $(i)/$(length(measures)): $(measure.name) ====")
         else
             run_job_steps(measure, job_steps)
         end

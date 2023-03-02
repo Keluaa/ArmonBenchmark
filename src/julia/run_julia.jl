@@ -57,7 +57,6 @@ reorder_grid = true
 async_comms = false
 
 measure_time = true
-track_energy = false
 
 base_file_name = ""
 gnuplot_script = ""
@@ -459,7 +458,7 @@ function timer_to_table(io::IO, timer::TimerOutput)
 end
 
 
-function merge_time_contribution(timer_1::TimerOutput, timer_2::TimerOutput)
+function merge_time_contribution(timer_1, timer_2)
     if any(isnothing, (timer_1, timer_2))
         # Return the first non-nothing timer, or nothing 
         return something(timer_1, timer_2, Some(nothing))
