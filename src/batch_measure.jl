@@ -839,10 +839,11 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
 
     no_overwrite = batch_options.no_overwrite
     no_plot_update = batch_options.no_plot_update
-    one_script_per_step = batch_options.one_script_per_step || measure.one_script_per_step
     first_measure = true
     for (i, measure) in measures_to_do
         println(" ==== Measurement $(i)/$(length(measures)): $(measure.name) ==== ")
+
+        one_script_per_step = batch_options.one_script_per_step || measure.one_script_per_step
 
         job_steps, comb_end = build_all_steps_of_measure(measure, first_measure, 
             batch_options.skip_first, batch_options.comb_count)

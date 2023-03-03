@@ -302,6 +302,7 @@ end
 
 function compile_backend(build_dir, target_exe)
     # TODO: put compilation files in a tmp dir in the script dir named with the job ID
+    println("Compiling Kokkkos...")
     run_cmd_print_on_error(Cmd(`make $make_options $target_exe`; env=cmake_env, dir=build_dir))
     exe_path = build_dir * "/src/$target_exe"
     if !isfile(exe_path)

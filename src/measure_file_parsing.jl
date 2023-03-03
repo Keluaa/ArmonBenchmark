@@ -7,7 +7,7 @@ function parse_measure_params(file_line_parser, script_dir)
     distributions = ["block"]
     processes = [1]
     node_count = [1]
-    max_time = 3600  # 1h
+    max_time = 1  # 1h
 
     make_sub_script = false
     one_job_per_cell = false
@@ -118,7 +118,7 @@ function parse_measure_params(file_line_parser, script_dir)
         elseif option == "node_count"
             node_count = parse.(Int, split(value, ','))
         elseif option == "max_time"
-            max_time = parse(Int, value)
+            max_time = parse(Float64, value)
         elseif option == "make_sub_script"
             make_sub_script = parse(Bool, value)
         elseif option == "one_job_per_cell"
@@ -213,6 +213,8 @@ function parse_measure_params(file_line_parser, script_dir)
     domain_list = split(domain_list, ';')
     domain_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
                    for cells_domain in domain_list]
+
+    max_time *= 3600  # Hours to seconds
 
     if !isnothing(process_grid_ratios)
         # Make sure that all ratios are compatible with all processes counts
