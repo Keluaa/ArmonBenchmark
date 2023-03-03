@@ -3,6 +3,9 @@ using Printf
 using Statistics
 
 
+include(joinpath(@__DIR__, "..", "common_utils.jl"))
+
+
 mutable struct KokkosOptions
     scheme::String
     riemann::String
@@ -298,6 +301,7 @@ end
 
 
 function compile_backend(build_dir, target_exe)
+    # TODO: put compilation files in a tmp dir in the script dir named with the job ID
     run_cmd_print_on_error(Cmd(`make $make_options $target_exe`; env=cmake_env, dir=build_dir))
     exe_path = build_dir * "/src/$target_exe"
     if !isfile(exe_path)
@@ -422,12 +426,18 @@ function run_armon(options::KokkosOptions, verbose::Bool)
             end
 
             run_cmd = get_run_command(exe_path, args)
+
+            time_start = time_ns()
             repeats_cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats)
+            time_end = time_ns()
+
+            duration = (time_end - time_start) / 1.0e9
 
             total_cells_per_sec = mean(repeats_cells_throughput)
-            std_cells_per_sec = 0  # TODO: add with MPI
+            std_cells_per_sec = 0  # TODO
 
-            @printf("%8.3f ± %4.2f Giga cells/sec\n", total_cells_per_sec, std_cells_per_sec)
+            @printf("%8.3f ± %4.2f Giga cells/sec %s\n", total_cells_per_sec, std_cells_per_sec,
+                get_duration_string(duration))
 
             if !isempty(data_file_name)
                 # Append the result to the output file

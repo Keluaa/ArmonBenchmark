@@ -3,6 +3,9 @@ using Printf
 using Statistics
 
 
+include(joinpath(@__DIR__, "..", "common_utils.jl"))
+
+
 mutable struct CppOptions
     scheme::String
     riemann_limiter::String
@@ -209,6 +212,7 @@ end
 
 
 function compile_backend(options::CppOptions)
+    # TODO: put compilation files in a tmp dir in the script dir named with the job ID
     make_options = []
     append!(make_options, default_make_options)
 
@@ -352,14 +356,19 @@ function run_armon(options::CppOptions, verbose::Bool)
                 "--cells", cells
             ]
             append!(args, base_args)
-    
+
             @printf(" - %s, %11g cells: ", test, cells[1])
     
             run_cmd = get_run_command(args)
-            cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats, options.track_energy_consumption)
 
-            @printf("%8.2f Giga cells/sec\n", cells_throughput)
-            
+            time_start = time_ns()
+            cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats, options.track_energy_consumption)
+            time_end = time_ns()
+
+            duration = (time_end - time_start) / 1.0e9
+
+            @printf("%8.2f Giga cells/sec %s\n", cells_throughput, get_duration_string(duration))
+
             if !isempty(data_file_name)
                 # Append the result to the output file
                 open(data_file_name, "a") do file
