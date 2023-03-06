@@ -94,12 +94,13 @@ end
 
 function gp_energy_plot_cmd(file, legend, color_idx, pt_idx, ref_idx, repeats;
         error_bars=false, mode=error_bars ? "yerrorlines" : "lp")
-    "'$file' $NEW_LINE  u 1:(\$2/(\$1-REF$(ref_idx)_mean)*1e6/$repeats) w $mode lc $color_idx pt $pt_idx t '$legend'"
+    # TODO: divide $1 by the number of cycles, and change the ylabel to 'cell-cycle'
+    "'$file' $NEW_LINE  u 1:((\$2-REF$(ref_idx)_mean)/(\$1)*1e6/$repeats) w $mode lc $color_idx pt $pt_idx t '$legend'"
 end
 
 
 function gp_energy_ref_cmd(energy_ref_file, ref_idx)
-    "stats '$energy_ref_file' using 2 name 'REF$(ref_idx)'"
+    "stats '$energy_ref_file' using 2 name 'REF$(ref_idx)' nooutput"
 end
 
 

@@ -32,6 +32,7 @@ mutable struct MeasureParams
     distributions::Vector{String}
     processes::Vector{Int}
     node_count::Vector{Int}
+    processes_per_node::Int
     max_time::Int
     use_MPI::Bool
 
@@ -76,6 +77,7 @@ mutable struct MeasureParams
     limit_to_max_mem::Bool
     track_energy::Bool
     energy_references::Int
+    process_scaling::Bool
 
     # > Performance plot
     perf_plot::Bool
@@ -100,7 +102,7 @@ mutable struct MeasureParams
 end
 
 
-struct ClusterParams
+mutable struct ClusterParams
     processes::Int
     distribution::String
     node_count::Int
@@ -158,12 +160,18 @@ include(joinpath(@__DIR__, "cpp/cpp_backend.jl"))
 #
 
 function build_cluster_combinaisons(measure::MeasureParams)
+    if measure.processes_per_node > 0
+        node_count = [0]
+    else
+        node_count = measure.node_count
+    end
+
     return Iterators.map(
         params->ClusterParams(params...),
         Iterators.product(
             measure.processes,
             measure.distributions,
-            measure.node_count
+            node_count
         )
     )
 end
@@ -252,9 +260,7 @@ function split_N(N::Int, R)
         try
             n_i = convert(Int, round(n_i; sigdigits=10))
         catch e
-            if e isa InexactError
-                println("The ratios $R cannot divide $N")
-            end
+            e isa InexactError && error("The ratios $R cannot divide $N")
             rethrow(e)
         end
         n[i] = n_i
@@ -378,7 +384,7 @@ end
 
 
 add_energy_data_command(step_idx, step_cells, file_var) = 
-    "sacct \$SACCT_OPTS -j \${SLURM_JOB_ID}.$step_idx | \$ADD_ENERGY_SCRIPT \$$file_var $step_cells"
+    "sleep 1 && sacct \$SACCT_OPTS -j \${SLURM_JOB_ID}.$step_idx | \$ADD_ENERGY_SCRIPT \$$file_var $step_cells"
 
 
 cmd_to_string(cmd::Cmd) = string(cmd)[2:end-1]
@@ -407,14 +413,17 @@ function make_reference_job_from(step::JobStep)
     # steps.
     ref_step = deepcopy(step)
 
-    i_cells = findfirst(v -> v == "--cells-list", ref_step.armon_options)
+    i_cells = findfirst(==("--cells-list"), ref_step.armon_options)
 
     # 60 cells per process in each direction
-    i_grid = findfirst(v -> v == "--proc-grid", ref_step.armon_options)
+    i_grid = findfirst(==("--proc-grid"), ref_step.armon_options)
+    i_ratio = findfirst(==("--proc-grid-ratio"), ref_step.armon_options)
+    proc_grid = nothing
     if isnothing(i_grid)
         if ref_step.dimension > 1
-            if ref_step.cluster.processes > 1
-                error("Missing '--proc-grid' in arguments list. Cannot make a reference job.")
+            if ref_step.cluster.processes > 1 && isnothing(i_ratio)
+                println(ref_step.armon_options)
+                error("Missing '--proc-grid' or '--proc-grid-ratio' in arguments list. Cannot make a reference job.")
             end
             proc_grid = repeat([1], ref_step.dimension)
         else
@@ -422,7 +431,13 @@ function make_reference_job_from(step::JobStep)
         end
     else
         proc_grid = ref_step.armon_options[i_grid+1]
-        proc_grid = parse.(Int, split(proc_grid, ','))
+        proc_grid = parse.(Int, split(split(proc_grid, ';')[1], ','))
+    end
+
+    if isnothing(proc_grid)
+        grid_ratios = ref_step.armon_options[i_ratio+1]
+        grid_ratios = parse.(Int, split(split(grid_ratios, ';')[1], ','))
+        proc_grid = split_N(cluster.processes, grid_ratios)
     end
 
     cells = proc_grid .* 60
@@ -513,9 +528,9 @@ function append_to_sub_script(script::IO, measure::MeasureParams, step::JobStep,
     if measure.one_job_per_cell
         if measure.track_energy
             # Add the data file variables
-            energy_ref_data = joinpath(".", DATA_DIR_NAME, step.base_file_name * "energy_ref.csv")
+            energy_ref_data = step.base_file_name * "energy_ref.csv"
             println(script, "ENERGY_REF_DATA=\"", energy_ref_data, '"')
-            energy_data = joinpath(".", DATA_DIR_NAME, step.base_file_name * "energy.csv")
+            energy_data = step.base_file_name * "energy.csv"
             println(script, "ENERGY_DATA=\"", energy_data, '"')
 
             # Add as many energy references as needed
@@ -614,10 +629,28 @@ function build_job_step(measure::MeasureParams, backend::BackendParams, cluster:
         return nothing
     end
 
+    if measure.process_scaling
+        tmp_cells_list = measure.cells_list
+        tmp_domain_list = measure.domain_list
+
+        processes_idx = findfirst(==(cluster.processes), measure.processes)
+
+        if backend.dimension == 1
+            measure.cells_list = measure.cells_list[processes_idx:processes_idx]
+        else
+            measure.domain_list = measure.domain_list[processes_idx:processes_idx]
+        end
+    end
+
     base_file_name, legend = build_data_file_base_name(measure,
         cluster.processes, cluster.distribution, cluster.node_count, backend)
-    base_file_name = joinpath(".", DATA_DIR_NAME, base_file_name)
+    base_file_name = joinpath(".", DATA_DIR_NAME, measure.name, base_file_name)
     armon_options = run_backend(measure, backend, cluster, base_file_name)
+
+    if measure.process_scaling
+        measure.cells_list = tmp_cells_list
+        measure.domain_list = tmp_domain_list
+    end
 
     dimension = backend.dimension
 
@@ -672,7 +705,7 @@ function build_data_file_base_name(measure::MeasureParams,
         legend *= ", $(processes) processes"
     end
 
-    if length(measure.node_count) > 1
+    if length(measure.node_count) > 1 || (measure.processes_per_node > 0 && length(measure.processes) > 1)
         name *= "_$(node_count)nodes"
         legend *= ", $(node_count) nodes"
     end
@@ -703,7 +736,7 @@ end
 
 function ensure_dirs_exist(measure::MeasureParams)
     for dir_name in [
-                DATA_DIR_NAME,
+                joinpath(DATA_DIR_NAME, measure.name),
                 PLOT_SCRIPTS_DIR_NAME,
                 PLOTS_DIR_NAME,
                 JOB_SCRIPS_DIR_NAME,
@@ -732,14 +765,14 @@ function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
 
     for step in steps
         if measure.energy_plot
-            ref_file_name = joinpath(".", DATA_DIR_NAME, step.base_file_name * "energy_ref.csv")
+            ref_file_name = step.base_file_name * "energy_ref.csv"
             ref_file_path = joinpath(measure.script_dir, ref_file_name)
             !no_overwrite && open(identity, ref_file_path, "w")
 
             ref_idx = length(energy_plot_refs) + 1
             push!(energy_plot_refs, gp_energy_ref_cmd(ref_file_name, ref_idx))
 
-            file_name = joinpath(".", DATA_DIR_NAME, step.base_file_name * "energy.csv")
+            file_name = step.base_file_name * "energy.csv"
             file_path = joinpath(measure.script_dir, file_name)
             !no_overwrite && open(identity, file_path, "w")
             legend = replace(step.legend, '_' => "\\_")
@@ -804,6 +837,10 @@ function build_all_steps_of_measure(measure::MeasureParams, first_measure::Bool,
     comb_i = 0
     comb_c = 0
     for cluster_params in build_cluster_combinaisons(measure)
+        if measure.processes_per_node > 0
+            cluster_params.node_count = cld(cluster_params.processes, measure.processes_per_node)
+        end
+
         for backend in measure.backends, backend_params in parse_combinaisons(measure, cluster_params, backend)
             comb_i += 1
             if first_measure && comb_i <= skip_first

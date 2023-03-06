@@ -7,6 +7,7 @@ function parse_measure_params(file_line_parser, script_dir)
     distributions = ["block"]
     processes = [1]
     node_count = [1]
+    processes_per_node = 0
     max_time = 1  # 1h
 
     make_sub_script = false
@@ -40,11 +41,12 @@ function parse_measure_params(file_line_parser, script_dir)
     repeats = 1
     log_scale = true
     error_bars = false
-    plot_title = nothing
+    plot_title = ""
     verbose = false
     use_max_threads = false
     cst_cells_per_process = false
     limit_to_max_mem = false
+    process_scaling = false
 
     perf_plot = true
     gnuplot_script = nothing
@@ -117,6 +119,8 @@ function parse_measure_params(file_line_parser, script_dir)
             processes = parse.(Int, split(value, ','))
         elseif option == "node_count"
             node_count = parse.(Int, split(value, ','))
+        elseif option == "processes_per_node"
+            processes_per_node = parse(Int, value)
         elseif option == "max_time"
             max_time = parse(Float64, value)
         elseif option == "make_sub_script"
@@ -191,6 +195,8 @@ function parse_measure_params(file_line_parser, script_dir)
             track_energy = parse(Bool, value)
         elseif option == "energy_references"
             energy_references = parse(Int, value)
+        elseif option == "process_scaling"
+            process_scaling = parse(Bool, value)
         elseif option == "energy_plot"
             energy_plot = parse(Bool, value)
         elseif option == "perf_plot"
@@ -234,9 +240,6 @@ function parse_measure_params(file_line_parser, script_dir)
     if isnothing(plot_file)
         # By default, same name as the plot script but as a'.pdf' file
         plot_file = gnuplot_script[1:findlast('.', gnuplot_script)-1] * ".pdf"
-    end
-    if isnothing(plot_title)
-        plot_title = "You forgot to add a title"
     end
 
     if !isnothing(process_grid_ratios) && any(dimension .== 1)
@@ -285,7 +288,7 @@ function parse_measure_params(file_line_parser, script_dir)
     energy_plot_file = joinpath(rel_plots_dir, name * "_energy.pdf")
 
     return MeasureParams(
-        device, node, distributions, processes, node_count, max_time, use_MPI,
+        device, node, distributions, processes, node_count, processes_per_node, max_time, use_MPI,
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,
@@ -293,7 +296,7 @@ function parse_measure_params(file_line_parser, script_dir)
         axis_splitting, params_and_legends,
         name, script_dir, repeats, log_scale, error_bars, plot_title,
         verbose, use_max_threads, cst_cells_per_process, limit_to_max_mem,
-        track_energy, energy_references,
+        track_energy, energy_references, process_scaling,
         perf_plot, gnuplot_script, plot_file,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file,
