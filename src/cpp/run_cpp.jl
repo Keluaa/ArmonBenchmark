@@ -30,6 +30,8 @@ mutable struct CppOptions
     base_file_name::String
     gnuplot_script::String
     repeats::Int
+    min_acquisition_time::Int
+    repeats_count_file::String
     compiler::String
 end
 
@@ -49,7 +51,8 @@ function CppOptions(;
         use_simd = true, use_std_vector = false,
         num_threads = 1, threads_places = "cores", threads_proc_bind = "close",
         tests = [], cells_list = [],
-        base_file_name = "", gnuplot_script = "", repeats = 1,
+        base_file_name = "", gnuplot_script = "", repeats = 1, min_acquisition_time = 0,
+        repeats_count_file = "",
         compiler = "clang")
     return CppOptions(
         scheme, riemann_limiter,
@@ -59,7 +62,8 @@ function CppOptions(;
         use_simd, use_std_vector,
         num_threads, threads_places, threads_proc_bind,
         tests, cells_list,
-        base_file_name, gnuplot_script, repeats,
+        base_file_name, gnuplot_script, repeats, min_acquisition_time,
+        repeats_count_file,
         compiler
     )
 end
@@ -142,6 +146,9 @@ function parse_arguments(args::Vector{String})
         elseif arg == "--repeats"
             options.repeats = parse(Int, args[i+1])
             i += 1
+        elseif arg == "--min-acquisition-time"
+            options.min_acquisition_time = parse(Int, args[i+1]) * 1e9
+            i += 1
 
         # Measurement output params
         elseif arg == "--data-file"
@@ -149,6 +156,9 @@ function parse_arguments(args::Vector{String})
             i += 1
         elseif arg == "--gnuplot-script"
             options.gnuplot_script = args[i+1]
+            i += 1
+        elseif arg == "--repeats-count-file"
+            options.repeats_count_file = args[i+1]
             i += 1
 
         # C++ backend options
@@ -304,14 +314,17 @@ function get_run_command(args)
 end
 
 
-function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, track_energy::Bool)
+function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, min_acquisition_time::Int)
     if verbose
         println(cmd)
     end
 
-    total_giga_cells_per_sec = 0
+    vals_cells_per_sec = Vector{Float64}()
 
-    for _ in 1:repeats
+    total_repeats = 0
+    acquisition_start = time_ns()
+
+    while total_repeats < repeats || (time_ns() - acquisition_start) < min_acquisition_time
         output = read(cmd, String)
 
         mega_cells_per_sec_raw = match(r"Cells/sec:\s*\K[0-9\.]+", output)
@@ -324,11 +337,12 @@ function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, track_energ
 
         mega_cells_per_sec = parse(Float64, mega_cells_per_sec_raw.match)
         giga_cells_per_sec = mega_cells_per_sec / 1e3
-        total_giga_cells_per_sec += giga_cells_per_sec
+        push!(vals_cells_per_sec, giga_cells_per_sec)
+
+        total_repeats += 1
     end
 
-    total_giga_cells_per_sec /= repeats
-    return total_giga_cells_per_sec
+    return total_repeats, vals_cells_per_sec
 end
 
 
@@ -362,22 +376,32 @@ function run_armon(options::CppOptions, verbose::Bool)
             ]
             append!(args, base_args)
 
-            @printf(" - %s, %11g cells: ", test, cells[1])
+            @printf(" - %s, %11g cells: ", test, prod(cells))
     
             run_cmd = get_run_command(args)
 
             time_start = time_ns()
-            cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats, options.track_energy_consumption)
+            actual_repeats, repeats_cells_throughput = run_and_parse_output(run_cmd, verbose, options.repeats, options.min_acquisition_time)
             time_end = time_ns()
 
             duration = (time_end - time_start) / 1.0e9
 
-            @printf("%8.2f Giga cells/sec %s\n", cells_throughput, get_duration_string(duration))
+            total_cells_per_sec = mean(repeats_cells_throughput)
+            std_cells_per_sec = length(repeats_cells_throughput) > 1 ? std(repeats_cells_throughput; corrected=true) : 0
+
+            @printf("%8.3f ± %4.2f Giga cells/sec %s", total_cells_per_sec, std_cells_per_sec,
+                get_duration_string(duration))
+
+            if actual_repeats != options.repeats
+                println(" ($actual_repeats repeats)")
+            else
+                println()
+            end
 
             if !isempty(data_file_name)
                 # Append the result to the output file
                 open(data_file_name, "a") do file
-                    println(file, cells, ", ", cells_throughput)
+                    println(file, prod(cells), ", ", total_cells_per_sec, std_cells_per_sec, actual_repeats)
                 end
             end
 
@@ -385,6 +409,12 @@ function run_armon(options::CppOptions, verbose::Bool)
                 # Update the plot
                 # We redirect the output of gnuplot to null so that there is no warning messages displayed
                 run(pipeline(`gnuplot $(options.gnuplot_script)`, stdout=devnull, stderr=devnull))
+            end
+
+            if !isempty(options.repeats_count_file)
+                open(options.repeats_count_file, "w") do file
+                    println(file, prod(cells), ",", actual_repeats)
+                end
             end
         end
     end

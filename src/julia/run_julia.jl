@@ -5,7 +5,7 @@ using TimerOutputs
 
 
 include(joinpath(@__DIR__, "omp_simili.jl"))
-include(joinpath(@__DIR__, "..", "common_utils.jl"))
+include(joinpath(@__DIR__, "../common_utils.jl"))
 
 armon_path = joinpath(@__DIR__, "../../julia/")
 
@@ -67,6 +67,8 @@ MPI_time_plot = false
 time_histogram = false
 repeats = 1
 no_precompilation = false
+min_acquisition_time = 0.0
+repeats_count_file = ""
 
 
 dim_index = findfirst(x->x=="--dim", ARGS)
@@ -246,6 +248,9 @@ while i <= length(ARGS)
     elseif arg == "--no-precomp"
         global no_precompilation = parse(Bool, ARGS[i+1])
         global i += 1
+    elseif arg == "--min-acquisition-time"
+        global min_acquisition_time = parse(Float64, ARGS[i+1])
+        global i += 1
 
     # Measurement output params
     elseif arg == "--data-file"
@@ -266,6 +271,9 @@ while i <= length(ARGS)
     elseif arg == "--gnuplot-MPI-script"
         global gnuplot_MPI_script = ARGS[i+1]
         global i += 1
+    elseif arg == "--repeats-count-file"
+        global repeats_count_file = ARGS[i+1]
+        global i += 1
     else
         println("Wrong option: ", arg)
         exit(1)
@@ -276,6 +284,8 @@ end
 if MPI_time_plot && !measure_time
     @error "'--time-MPI-graph true' needs '--measure-time true'"
 end
+
+min_acquisition_time *= 1e9  # sec to ns
 
 #
 # Muting mechanism for the 'no CUDA capable device detected' error of CUDA.jl 
@@ -488,21 +498,40 @@ end
 get_cpu_max_mem() = Int(Sys.total_memory())
 
 
-function run_armon(params::ArmonParameters)
-    vals_cells_per_sec = Vector{Float64}(undef, repeats)
-    total_time_contrib = nothing
-    total_cycles = 0
+function continue_acquisition(current_repeats, acquisition_start)
+    current_repeats < repeats && return true
 
-    for i in 1:repeats
-        stats = armon(params)
-
-        vals_cells_per_sec[i] = stats.giga_cells_per_sec
-        total_cycles += stats.cycles
-
-        total_time_contrib = merge_time_contribution(total_time_contrib, stats.timer)
+    if is_root
+        min_time_reached = (time_ns() - acquisition_start) >= min_acquisition_time
+    else
+        min_time_reached = true
     end
 
-    return total_cycles, vals_cells_per_sec, total_time_contrib
+    if use_MPI
+        min_time_reached = MPI.Bcast(min_time_reached, 0, MPI.COMM_WORLD)
+    end
+
+    return !min_time_reached
+end
+
+
+function run_armon(params::ArmonParameters)
+    vals_cells_per_sec = Vector{Float64}()
+    total_time_contrib = nothing
+    current_repeats = 0
+    acquisition_start = time_ns()
+
+    while continue_acquisition(current_repeats, acquisition_start)
+        stats = armon(params)
+
+        push!(vals_cells_per_sec, stats.giga_cells_per_sec)
+
+        total_time_contrib = merge_time_contribution(total_time_contrib, stats.timer)
+
+        current_repeats += 1
+    end
+
+    return current_repeats, vals_cells_per_sec, total_time_contrib
 end
 
 
@@ -533,7 +562,7 @@ function do_measure(data_file_name, test, cells, splitting)
     end
 
     time_start = time_ns()
-    cycles, vals_cells_per_sec, time_contrib = run_armon(params)
+    actual_repeats, vals_cells_per_sec, time_contrib = run_armon(params)
     time_end = time_ns()
 
     duration = (time_end - time_start) / 1.0e9
@@ -541,17 +570,23 @@ function do_measure(data_file_name, test, cells, splitting)
     mean_cells_per_sec = mean(vals_cells_per_sec)
     std_cells_per_sec = std(vals_cells_per_sec; corrected=true, mean=mean_cells_per_sec)
 
-    @printf("%8.3f ± %3.1f Giga cells/sec %s\n", mean_cells_per_sec, std_cells_per_sec, 
+    @printf("%8.3f ± %3.1f Giga cells/sec %s", mean_cells_per_sec, std_cells_per_sec, 
         get_duration_string(duration))
+
+    if actual_repeats != repeats
+        println(" ($actual_repeats repeats)")
+    else
+        println()
+    end
 
     if !isempty(data_file_name)
         # Append the result to the data file
         open(data_file_name, "a") do data_file
-            println(data_file, "$(prod(cells)), $mean_cells_per_sec, $std_cells_per_sec")
+            println(data_file, "$(prod(cells)), $mean_cells_per_sec, $std_cells_per_sec, $actual_repeats")
         end
     end
 
-    return time_contrib
+    return time_contrib, actual_repeats
 end
 
 
@@ -587,7 +622,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
     end
 
     time_start = time_ns()
-    _, vals_cells_per_sec, time_contrib = run_armon(params)
+    actual_repeats, vals_cells_per_sec, time_contrib = run_armon(params)
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
 
@@ -595,7 +630,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
 
     # Gather the throughput and energy measurements on the root process
     merged_vals_cells_per_sec = MPI.Gather(vals_cells_per_sec, 0, MPI.COMM_WORLD)
-    total_cells_per_sec = MPI.Reduce(sum(vals_cells_per_sec) / repeats, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
+    total_cells_per_sec = MPI.Reduce(sum(vals_cells_per_sec) / actual_repeats, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
 
     # Gather the total MPI communication time
     MPI_time = 0
@@ -611,8 +646,8 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
 
         total_cycle_time = TimerOutputs.time(flat_time_contrib["solver_cycle"])
 
-        total_cycle_time /= repeats
-        MPI_time /= repeats
+        total_cycle_time /= actual_repeats
+        MPI_time /= actual_repeats
     end
     total_MPI_time = MPI.Reduce(MPI_time, MPI.SUM, 0, MPI.COMM_WORLD)
 
@@ -629,7 +664,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
     # Append the result to the data file
     if !isempty(data_file_name)
         open(data_file_name, "a") do data_file
-            println(data_file, "$(prod(cells)), $total_cells_per_sec, $std_cells_per_sec")
+            println(data_file, "$(prod(cells)), $total_cells_per_sec, $std_cells_per_sec, $actual_repeats")
         end
     end
 
@@ -637,7 +672,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
 
     if !isempty(MPI_time_file_name)
         open(MPI_time_file_name, "a") do data_file
-            println(data_file, "$(prod(cells)), $total_MPI_time, $total_cycle_time")
+            println(data_file, "$(prod(cells)), $total_MPI_time, $total_cycle_time, $actual_repeats")
         end
     end
 
@@ -645,9 +680,15 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
         @printf(", %4.1f%% of MPI time, ", round(total_MPI_time / total_cycle_time * 100; digits=1))
     end
 
-    @printf(" %s\n", get_duration_string(duration))
+    @printf(" %s", get_duration_string(duration))
 
-    return time_contrib
+    if actual_repeats != repeats
+        println(" ($actual_repeats repeats)")
+    else
+        println()
+    end
+
+    return time_contrib, actual_repeats
 end
 
 
@@ -743,9 +784,10 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
 
     for cells in cells_list
         if use_MPI
-            time_contrib = do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitting, px, py)
+            time_contrib, actual_repeats = do_measure_MPI(
+                    data_file_name, MPI_time_file_name, test, cells, splitting, px, py)
         else
-            time_contrib = do_measure(data_file_name, test, cells, splitting)
+            time_contrib, actual_repeats = do_measure(data_file_name, test, cells, splitting)
         end
 
         if is_root
@@ -753,6 +795,12 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
 
             update_plot(gnuplot_script)
             update_plot(gnuplot_MPI_script)
+
+            if !isempty(repeats_count_file)
+                open(repeats_count_file, "w") do file
+                    println(file, prod(cells), ",", actual_repeats)
+                end
+            end
         end
     end
 

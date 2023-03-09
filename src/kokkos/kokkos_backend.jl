@@ -85,6 +85,7 @@ function build_job_step(measure::MeasureParams,
     options[:device] = measure.device
     options[:tests] = measure.tests_list
     options[:axis_splitting] = measure.axis_splitting
+    options[:min_acquisition] = measure.min_acquisition_time
 
     perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
     time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
@@ -99,6 +100,11 @@ function build_job_step(measure::MeasureParams,
         perf_plot, time_hist, time_MPI, energy_plot,
         options
     )
+end
+
+
+function adjust_reference_job(step::JobStep, ::Val{Kokkos})
+    step.options[:min_acquisition] = 0
 end
 
 
@@ -136,6 +142,7 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
         "--num-threads", step.backend.threads,
         "--threads-places", step.backend.omp_places,
         "--threads-proc-bind", step.backend.omp_proc_bind,
+        "--min-acquisition-time", step.options[:min_acquisition],
         "--repeats", step.repeats,
         "--verbose", step.options[:verbose],
         "--compiler", step.backend.compiler,
@@ -146,6 +153,12 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
         append!(armon_options, [
             "--data-file", step.base_file_name,
             "--gnuplot-script", step.perf_plot.plot_script
+        ])
+    end
+
+    if step.energy_plot.do_plot
+        append!(armon_options, [
+            "--repeats-count-file", step.energy_plot.data_file * ".TMP"
         ])
     end
 

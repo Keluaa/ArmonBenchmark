@@ -91,6 +91,7 @@ function build_job_step(measure::MeasureParams,
     options[:verbose] = measure.verbose ? 2 : 3
     options[:in_sub_script] = measure.make_sub_script
     options[:tests] = measure.tests_list
+    options[:min_acquisition] = measure.min_acquisition_time
 
     perf_plot = PlotInfo(base_file_name * "%s.csv", measure.perf_plot, measure.gnuplot_script)
     time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
@@ -105,6 +106,11 @@ function build_job_step(measure::MeasureParams,
         perf_plot, time_hist, time_MPI, energy_plot,
         options
     )
+end
+
+
+function adjust_reference_job(step::JobStep, ::Val{CPP})
+    step.options[:min_acquisition] = 0
 end
 
 
@@ -129,6 +135,7 @@ function build_backend_command(step::JobStep, ::Val{CPP})
         "--num-threads", step.backend.threads,
         "--threads-places", step.backend.omp_places,
         "--threads-proc-bind", step.backend.omp_proc_bind,
+        "--min-acquisition-time", step.options[:min_acquisition],
         "--repeats", step.repeats,
         "--verbose", step.options[:verbose],
         "--compiler", step.backend.compiler
@@ -138,6 +145,12 @@ function build_backend_command(step::JobStep, ::Val{CPP})
         append!(armon_options, [
             "--data-file", step.base_file_name,
             "--gnuplot-script", step.perf_plot.plot_script
+        ])
+    end
+
+    if step.energy_plot.do_plot
+        append!(armon_options, [
+            "--repeats-count-file", step.energy_plot.data_file * ".TMP"
         ])
     end
 

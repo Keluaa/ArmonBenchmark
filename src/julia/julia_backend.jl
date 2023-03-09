@@ -77,6 +77,7 @@ function build_job_step(measure::MeasureParams,
     options[:axis_splitting] = measure.axis_splitting
     options[:use_MPI] = measure.use_MPI
     options[:limit_to_max_mem] = measure.limit_to_max_mem
+    options[:min_acquisition] = measure.min_acquisition_time
 
     perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
     time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
@@ -91,6 +92,11 @@ function build_job_step(measure::MeasureParams,
         perf_plot, time_hist, time_MPI, energy_plot,
         options
     )
+end
+
+
+function adjust_reference_job(step::JobStep, ::Val{Julia})
+    step.options[:min_acquisition] = 0
 end
 
 
@@ -136,6 +142,7 @@ function build_backend_command(step::JobStep, ::Val{Julia})
         "--verbose", step.options[:verbose],
         "--use-mpi", step.options[:use_MPI],
         "--limit-to-mem", step.options[:limit_to_max_mem],
+        "--min-acquisition-time", step.options[:min_acquisition],
         "--async-comms", step.backend.async_comms,
         "--splitting", join(step.options[:axis_splitting], ','),
         "--proc-grid", join([join(grid, ',') for grid in step.proc_grids], ';')
@@ -164,6 +171,12 @@ function build_backend_command(step::JobStep, ::Val{Julia})
         append!(armon_options, [
             "--gnuplot-MPI-script", step.time_MPI.plot_script,
             "--time-MPI-graph", true
+        ])
+    end
+
+    if step.energy_plot.do_plot
+        append!(armon_options, [
+            "--repeats-count-file", step.energy_plot.data_file * ".TMP"
         ])
     end
 

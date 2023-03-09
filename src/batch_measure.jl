@@ -78,6 +78,7 @@ mutable struct MeasureParams
     track_energy::Bool
     energy_references::Int
     process_scaling::Bool
+    min_acquisition_time::Int
 
     # > Performance plot
     perf_plot::Bool
@@ -168,6 +169,7 @@ const ENERGY_ACCOUNTING_OPTIONS = [
 ]
 
 
+include(joinpath(@__DIR__, "common_utils.jl"))
 include(joinpath(@__DIR__, "gnuplot_commands.jl"))
 include(joinpath(@__DIR__, "measure_file_parsing.jl"))
 
@@ -402,8 +404,8 @@ function job_step_command_args(step::JobStep; in_sub_script=true)
 end
 
 
-add_energy_data_command(step_idx, step_cells, file_var) = 
-    "sleep 1 && sacct \$SACCT_OPTS -j \${SLURM_JOB_ID}.$step_idx | \$ADD_ENERGY_SCRIPT \$$file_var $step_cells"
+add_energy_data_command(step_idx, file_var, tmp_file_var) = 
+    "sleep 1 && sacct \$SACCT_OPTS -j \${SLURM_JOB_ID}.$step_idx | \$ADD_ENERGY_SCRIPT \$$file_var \$$tmp_file_var"
 
 
 build_backend_command(step::JobStep) = build_backend_command(step, Val(backend_type(step.backend)))
@@ -442,7 +444,7 @@ function make_reference_job_from(step::JobStep)
     ref_step = deepcopy(step)
 
     # 60 cells per process in each direction
-    cells = first(step.proc_grids) .* 60
+    cells = first(ref_step.proc_grids) .* 60
     ref_step.cells_list = [cells]
 
     ref_step.perf_plot.do_plot = false
@@ -450,7 +452,9 @@ function make_reference_job_from(step::JobStep)
     ref_step.time_MPI.do_plot = false
     ref_step.energy_plot.do_plot = false
 
-    return ref_step, prod(cells)
+    adjust_reference_job(ref_step, Val(backend_type(ref_step.backend)))
+
+    return ref_step
 end
 
 
@@ -490,7 +494,7 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep};
         step_idx = 0
         if measure.track_energy
             # Julia warmup
-            ref_step, _ = make_reference_job_from(first(steps))
+            ref_step = make_reference_job_from(first(steps))
             println(script, "\n# Initial warmup")
             println(script, command_for_step(ref_step))
             step_idx += 1
@@ -517,24 +521,24 @@ function append_to_sub_script(script::IO, measure::MeasureParams, step::JobStep,
     if measure.one_job_per_cell
         if measure.track_energy
             # Add the data file variables
-            step.energy_plot.data_file
             energy_ref_data = energy_ref_file(step)
-            println(script, "ENERGY_REF_DATA=\"", energy_ref_data, '"')
             energy_data = step.energy_plot.data_file
+            println(script, "ENERGY_REF_DATA=\"", energy_ref_data, '"')
             println(script, "ENERGY_DATA=\"", energy_data, '"')
+            println(script, "TMP_STEP_DATA=\"", energy_data, ".TMP\"")
 
             if step.energy_plot.do_plot
                 println(script, "ENERGY_PLOT_SCRIPT=\"", step.energy_plot.plot_script, '"')
             end
 
             # Add as many energy references as needed
-            ref_step, ref_cells = make_reference_job_from(step)
+            ref_step = make_reference_job_from(step)
             println(script, "\n# Energy references")
             println(script, "OPTIONS=\"", options_to_str(build_backend_command(ref_step)), '"')
             ref_step_cmd = options_to_str(job_step_command_args(ref_step)) * " \$OPTIONS"
             for _ in 1:measure.energy_references
                 println(script, ref_step_cmd)
-                println(script, add_energy_data_command(step_idx, ref_cells, "ENERGY_REF_DATA"))
+                println(script, add_energy_data_command(step_idx, "ENERGY_REF_DATA", "TMP_STEP_DATA"))
                 step_idx += 1
             end
 
@@ -562,8 +566,7 @@ function append_to_sub_script(script::IO, measure::MeasureParams, step::JobStep,
         for cells in step.cells_list
             println(script, step_cmd, " --cells-list ", join(cells, ','))
             if measure.track_energy
-                job_cells = prod(cells)
-                print(script, add_energy_data_command(step_idx, job_cells, "ENERGY_DATA"))
+                print(script, add_energy_data_command(step_idx, "ENERGY_DATA", "TMP_STEP_DATA"))
                 if step.energy_plot.do_plot
                     println(script, " && gnuplot \$ENERGY_PLOT_SCRIPT")
                 else
@@ -768,7 +771,7 @@ function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
             !no_overwrite && open(identity, file_path, "w")
             legend = replace(step.legend, '_' => "\\_")
             push!(energy_plot_cmds, gp_energy_plot_cmd(file_name, legend,
-                color_index, point_type, ref_idx, step.cycles, step.repeats))
+                color_index, point_type, ref_idx, step.cycles))
         end
 
         for armon_params in armon_combinaisons(measure, step.dimension)

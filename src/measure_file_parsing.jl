@@ -8,7 +8,7 @@ function parse_measure_params(file_line_parser, script_dir)
     processes = [1]
     node_count = [1]
     processes_per_node = 0
-    max_time = 1  # 1h
+    max_time = 3600
 
     make_sub_script = false
     one_job_per_cell = false
@@ -47,6 +47,7 @@ function parse_measure_params(file_line_parser, script_dir)
     use_max_threads = false
     limit_to_max_mem = false
     process_scaling = false
+    min_acquisition_time = 0
 
     perf_plot = true
     gnuplot_script = nothing
@@ -122,7 +123,7 @@ function parse_measure_params(file_line_parser, script_dir)
         elseif option == "processes_per_node"
             processes_per_node = parse(Int, value)
         elseif option == "max_time"
-            max_time = parse(Float64, value)
+            max_time = Int(round(duration_from_string(value)))
         elseif option == "make_sub_script"
             make_sub_script = parse(Bool, value)
         elseif option == "one_job_per_cell"
@@ -197,6 +198,8 @@ function parse_measure_params(file_line_parser, script_dir)
             energy_references = parse(Int, value)
         elseif option == "process_scaling"
             process_scaling = parse(Bool, value)
+        elseif option == "min_acquisition_time"
+            min_acquisition_time = Int(round(duration_from_string(value)))
         elseif option == "energy_plot"
             energy_plot = parse(Bool, value)
         elseif option == "perf_plot"
@@ -219,8 +222,6 @@ function parse_measure_params(file_line_parser, script_dir)
     domain_list = split(domain_list, ';')
     domain_list = [convert.(Int, parse.(Float64, split(cells_domain, ',')))
                    for cells_domain in domain_list]
-
-    max_time *= 3600  # Hours to seconds
 
     if !isnothing(process_grid_ratios)
         # Make sure that all ratios are compatible with all processes counts
@@ -296,7 +297,7 @@ function parse_measure_params(file_line_parser, script_dir)
         axis_splitting, params_and_legends,
         name, script_dir, repeats, log_scale, error_bars, plot_title,
         verbose, use_max_threads, limit_to_max_mem,
-        track_energy, energy_references, process_scaling,
+        track_energy, energy_references, process_scaling, min_acquisition_time,
         perf_plot, gnuplot_script, plot_file,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
         time_MPI_plot, gnuplot_MPI_script, time_MPI_plot_file,

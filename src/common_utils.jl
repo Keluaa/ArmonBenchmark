@@ -33,3 +33,28 @@ function get_duration_string(duration_sec::Float64)
 
     return str
 end
+
+
+function duration_from_string(str)
+    str = lowercase(str)
+    if isnothing(match(r"^([0-9.]+[a-z]+)+$", str))
+        error("'$str' doesn't match /^([0-9.]+[a-z]+)+\$/. All durations must have an unit.")
+    end
+
+    total_duration = 0
+    for m in eachmatch(r"(?<duration>[0-9.]+)(?<unit>[a-z]+)", str)
+        duration = parse(Float64, m["duration"])
+        if m["unit"] == "d"
+            duration *= 24 * 3600
+        elseif m["unit"] == "h"
+            duration *= 3600
+        elseif m["unit"] in ("m", "min")
+            duration *= 60
+        elseif !(m["unit"] in ("s", "sec"))
+            error("Unknown duration unit: $(m["unit"])")
+        end
+        total_duration += duration
+    end
+
+    return total_duration
+end

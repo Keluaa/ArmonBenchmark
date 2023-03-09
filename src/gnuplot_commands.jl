@@ -57,7 +57,7 @@ base_gnuplot_energy_script_commands(graph_file_name, ref_commands, title, log_sc
 $GP_CD_TO_MEASUREMENT_DIR
 set terminal pdfcairo color size 10in, 6in
 set output '$graph_file_name'
-set ylabel 'Energy [µJ/cell-cycle]'
+set ylabel 'Energy efficiency [µJ/cell-cycle]'
 set xlabel 'Number of cells'
 set title "$title"
 set key $legend_pos top
@@ -92,9 +92,9 @@ function gp_MPI_percent_cmd(file, legend, color_idx, pt_idx)
 end
 
 
-function gp_energy_plot_cmd(file, legend, color_idx, pt_idx, ref_idx, cycles, repeats;
+function gp_energy_plot_cmd(file, legend, color_idx, pt_idx, ref_idx, cycles;
         error_bars=false, mode=error_bars ? "yerrorlines" : "lp")
-    "'$file' $NEW_LINE  u 1:((\$2-REF$(ref_idx)_mean)/(\$1*$cycles)*1e6/$repeats) w $mode lc $color_idx pt $pt_idx t '$legend'"
+    "'$file' $NEW_LINE  u 1:((\$2-REF$(ref_idx)_mean)/(\$1*$cycles)/\$3*1e6) w $mode lc $color_idx pt $pt_idx t '$legend'"
 end
 
 
