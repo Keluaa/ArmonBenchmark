@@ -610,8 +610,11 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
         end
 
         total_cycle_time = TimerOutputs.time(flat_time_contrib["solver_cycle"])
+
+        total_cycle_time /= repeats
+        MPI_time /= repeats
     end
-    total_MPI_time = MPI.Reduce(MPI_time / repeats, MPI.SUM, 0, MPI.COMM_WORLD)
+    total_MPI_time = MPI.Reduce(MPI_time, MPI.SUM, 0, MPI.COMM_WORLD)
 
     !is_root && return time_contrib  # Only the root process does the output
 
