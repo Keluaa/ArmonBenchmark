@@ -56,6 +56,7 @@ mutable struct MeasureParams
     block_sizes::Vector{Int}
 
     # Armon params
+    cycles::Int
     cells_list::Vector{Int}
     domain_list::Vector{Vector{Int}}
     process_grids::Vector{Vector{Int}}
@@ -73,7 +74,6 @@ mutable struct MeasureParams
     plot_title::String
     verbose::Bool
     use_max_threads::Bool
-    cst_cells_per_process::Bool
     limit_to_max_mem::Bool
     track_energy::Bool
     energy_references::Int
@@ -109,18 +109,38 @@ mutable struct ClusterParams
 end
 
 
-struct JobStep
-    armon_options::Vector{Any}
-    node_partition::String
-    cluster::ClusterParams
-    threads::Int
-    dimension::Int
-    base_file_name::String
-    legend::String
+abstract type BackendParams end
+
+
+mutable struct PlotInfo
+    data_file::String
+    do_plot::Bool
+    plot_script::String
 end
 
 
-abstract type BackendParams end
+mutable struct JobStep
+    cluster::ClusterParams
+    backend::BackendParams
+
+    node_partition::String
+    threads::Int
+    dimension::Int
+    cells_list::Vector{Vector{Int}}
+    proc_grids::Vector{Vector{Int}}
+    repeats::Int
+    cycles::Int
+
+    base_file_name::String
+    legend::String
+
+    perf_plot::PlotInfo
+    time_hist::PlotInfo
+    time_MPI::PlotInfo
+    energy_plot::PlotInfo
+
+    options::Dict{Symbol, Any}
+end
 
 
 const REQUIRED_MODULES = ["cuda", #= "rocm", =# "hwloc", "mpi"]
@@ -260,8 +280,7 @@ function split_N(N::Int, R)
         try
             n_i = convert(Int, round(n_i; sigdigits=10))
         catch e
-            e isa InexactError && error("The ratios $R cannot divide $N")
-            rethrow(e)
+            error("The ratios $R cannot divide $N")
         end
         n[i] = n_i
     end
@@ -367,7 +386,7 @@ module load $(join(REQUIRED_MODULES, ' '))
 function job_step_command_args(step::JobStep; in_sub_script=true)
     cluster = step.cluster
     args = [
-        "ccc_mprun",  # TODO: replace by srun, + options
+        "ccc_mprun",  # TODO: replace by srun, + options (try with '-v' to see the options)
         "-N", cluster.node_count,
         "-n", cluster.processes,
         "-E", "-m block:$(cluster.distribution)",
@@ -387,6 +406,9 @@ add_energy_data_command(step_idx, step_cells, file_var) =
     "sleep 1 && sacct \$SACCT_OPTS -j \${SLURM_JOB_ID}.$step_idx | \$ADD_ENERGY_SCRIPT \$$file_var $step_cells"
 
 
+build_backend_command(step::JobStep) = build_backend_command(step, Val(backend_type(step.backend)))
+
+
 cmd_to_string(cmd::Cmd) = string(cmd)[2:end-1]
 
 
@@ -402,8 +424,14 @@ function command_for_step(step::JobStep; in_sub_script=true)
     if in_sub_script
         cmd_str *= " \\\n    "
     end
-    cmd_str *= options_to_str(step.armon_options)
+    cmd_str *= options_to_str(build_backend_command(step))
     return cmd_str
+end
+
+
+function energy_ref_file(step::JobStep)
+    ref_file_name, ext = splitext(step.energy_plot.data_file)
+    return ref_file_name * "_ref" * ext
 end
 
 
@@ -413,35 +441,14 @@ function make_reference_job_from(step::JobStep)
     # steps.
     ref_step = deepcopy(step)
 
-    i_cells = findfirst(==("--cells-list"), ref_step.armon_options)
-
     # 60 cells per process in each direction
-    i_grid = findfirst(==("--proc-grid"), ref_step.armon_options)
-    i_ratio = findfirst(==("--proc-grid-ratio"), ref_step.armon_options)
-    proc_grid = nothing
-    if isnothing(i_grid)
-        if ref_step.dimension > 1
-            if ref_step.cluster.processes > 1 && isnothing(i_ratio)
-                println(ref_step.armon_options)
-                error("Missing '--proc-grid' or '--proc-grid-ratio' in arguments list. Cannot make a reference job.")
-            end
-            proc_grid = repeat([1], ref_step.dimension)
-        else
-            proc_grid = [ref_step.cluster.processes]
-        end
-    else
-        proc_grid = ref_step.armon_options[i_grid+1]
-        proc_grid = parse.(Int, split(split(proc_grid, ';')[1], ','))
-    end
+    cells = first(step.proc_grids) .* 60
+    ref_step.cells_list = [cells]
 
-    if isnothing(proc_grid)
-        grid_ratios = ref_step.armon_options[i_ratio+1]
-        grid_ratios = parse.(Int, split(split(grid_ratios, ';')[1], ','))
-        proc_grid = split_N(cluster.processes, grid_ratios)
-    end
-
-    cells = proc_grid .* 60
-    ref_step.armon_options[i_cells+1] = join(cells, ',')
+    ref_step.perf_plot.do_plot = false
+    ref_step.time_hist.do_plot = false
+    ref_step.time_MPI.do_plot = false
+    ref_step.energy_plot.do_plot = false
 
     return ref_step, prod(cells)
 end
@@ -470,24 +477,6 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep};
             measure.node, job_nodes, job_processes, 1,
             measure.max_time
         ))
-
-        if Julia in measure.backends
-            # Place the '--project' option value in a variable for readability
-            jl_project_dir = nothing
-            for step in steps
-                i = findfirst(o -> isa(o, String) && startswith(o, "--project="), step.armon_options)
-                isnothing(i) && continue
-                proj_dir = step.armon_options[i][length("--project=")+1:end]
-                if jl_project_dir === nothing
-                    jl_project_dir = proj_dir
-                end
-                # '€' instead of '\$' to escape the automatic escape mecanism of `Cmd`. It is
-                # replaced later in `options_to_str`
-                step.armon_options[i] = "--project=€JULIA_PROJECT"
-            end
-
-            !isnothing(jl_project_dir) && println(script, "JULIA_PROJECT='$jl_project_dir'")
-        end
 
         if measure.track_energy
             # Energy consumption tracking variables
@@ -528,41 +517,58 @@ function append_to_sub_script(script::IO, measure::MeasureParams, step::JobStep,
     if measure.one_job_per_cell
         if measure.track_energy
             # Add the data file variables
-            energy_ref_data = step.base_file_name * "energy_ref.csv"
+            step.energy_plot.data_file
+            energy_ref_data = energy_ref_file(step)
             println(script, "ENERGY_REF_DATA=\"", energy_ref_data, '"')
-            energy_data = step.base_file_name * "energy.csv"
+            energy_data = step.energy_plot.data_file
             println(script, "ENERGY_DATA=\"", energy_data, '"')
+
+            if step.energy_plot.do_plot
+                println(script, "ENERGY_PLOT_SCRIPT=\"", step.energy_plot.plot_script, '"')
+            end
 
             # Add as many energy references as needed
             ref_step, ref_cells = make_reference_job_from(step)
             println(script, "\n# Energy references")
-            println(script, "OPTIONS=\"", options_to_str(ref_step.armon_options), '"')
+            println(script, "OPTIONS=\"", options_to_str(build_backend_command(ref_step)), '"')
             ref_step_cmd = options_to_str(job_step_command_args(ref_step)) * " \$OPTIONS"
             for _ in 1:measure.energy_references
                 println(script, ref_step_cmd)
                 println(script, add_energy_data_command(step_idx, ref_cells, "ENERGY_REF_DATA"))
                 step_idx += 1
             end
+
+            println(script, "\n# Dummy for first measurement")
+            ref_step.cells_list = [first(step.cells_list)]
+            println(script, command_for_step(ref_step))
+            step_idx += 1
+
             println(script, "\n# Energy measurements")
         end
 
-        # Extract the cells-list option
-        i = findfirst(==("--cells-list"), step.armon_options)
-        popat!(step.armon_options, i)
-        cells_list = popat!(step.armon_options, i)
+        options = build_backend_command(step)
+
+        # Remove the list of cells
+        i_cells = findfirst(==("--cells-list"), options)
+        popat!(options, i_cells + 1)
+        popat!(options, i_cells)
 
         # Create a variable holding the common arguments
-        println(script, "OPTIONS=\"", options_to_str(step.armon_options), '"')
+        println(script, "OPTIONS=\"", options_to_str(options), '"')
 
         step_cmd = options_to_str(job_step_command_args(step)) * " \$OPTIONS"
 
-        # Split each domain in '--cells-list' into their own command
-        cells_list = split(cells_list, step.dimension == 1 ? "," : ";")
-        for cells in cells_list
-            println(script, step_cmd, " --cells-list ", cells)
+        # Split each domain in '--cells-list' into its own command
+        for cells in step.cells_list
+            println(script, step_cmd, " --cells-list ", join(cells, ','))
             if measure.track_energy
-                job_cells = prod(parse.(Int, split(cells, ',')))
-                println(script, add_energy_data_command(step_idx, job_cells, "ENERGY_DATA"))
+                job_cells = prod(cells)
+                print(script, add_energy_data_command(step_idx, job_cells, "ENERGY_DATA"))
+                if step.energy_plot.do_plot
+                    println(script, " && gnuplot \$ENERGY_PLOT_SCRIPT")
+                else
+                    println(script)
+                end
             end
             step_idx += 1
         end
@@ -579,7 +585,7 @@ function create_script_for_each_step(measure::MeasureParams, steps::Vector{JobSt
     step_count = length(steps)
     paths = []
     for (i_step, step) in enumerate(steps)
-        name_suffix = basename(step.base_file_name)
+        name_suffix = basename(step.base_file_name) |> splitext |> first
         name_suffix = "_" * replace(name_suffix, r"_+$" => "")
         script_path = create_sub_script(measure, [step];
             header, name_suffix, step_count, step_idx_offset=i_step-1)
@@ -629,58 +635,43 @@ function build_job_step(measure::MeasureParams, backend::BackendParams, cluster:
         return nothing
     end
 
-    if measure.process_scaling
-        tmp_cells_list = measure.cells_list
-        tmp_domain_list = measure.domain_list
-
-        processes_idx = findfirst(==(cluster.processes), measure.processes)
-
-        if backend.dimension == 1
-            measure.cells_list = measure.cells_list[processes_idx:processes_idx]
-        else
-            measure.domain_list = measure.domain_list[processes_idx:processes_idx]
-        end
-    end
-
     base_file_name, legend = build_data_file_base_name(measure,
         cluster.processes, cluster.distribution, cluster.node_count, backend)
     base_file_name = joinpath(".", DATA_DIR_NAME, measure.name, base_file_name)
-    armon_options = run_backend(measure, backend, cluster, base_file_name)
+
+    job_step = build_job_step(measure, backend, cluster, base_file_name, legend)
 
     if measure.process_scaling
-        measure.cells_list = tmp_cells_list
-        measure.domain_list = tmp_domain_list
+        processes_idx = findfirst(==(cluster.processes), measure.processes)
+        job_step.cells_list = job_step.cells_list[processes_idx:processes_idx]
     end
 
-    dimension = backend.dimension
-
-    return JobStep(armon_options, measure.node, cluster, num_threads, dimension, base_file_name, legend)
+    return job_step
 end
 
 
-function build_armon_data_file_name(measure::MeasureParams, dim::Int,
-        base_file_name::String, legend_base::String,
+function build_armon_data_file_name(measure::MeasureParams,
         test::String, axis_splitting::String, process_grid::Vector{Int})
-    file_name = base_file_name * test
-    if dim == 1
-        legend = "$test, $legend_base"
-    else
-        legend = test
+    file_name_extra = []
+    legend_extra = []
 
-        if length(measure.axis_splitting) > 1
-            file_name *= "_" * axis_splitting
-            legend *= ", " * axis_splitting
-        end
-
-        if length(measure.process_grids) > 1
-            grid_str = join(process_grid, '×')
-            file_name *= "_pg=grid_str"
-            legend *= ", process grid: $grid_str"
-        end
-
-        legend *= ", " * legend_base
+    if length(measure.tests_list) > 1
+        push!(file_name_extra, test)
+        push!(legend_extra, test)
     end
-    return file_name, legend
+
+    if length(measure.axis_splitting) > 1
+        push!(file_name_extra, string(axis_splitting))
+        push!(legend_extra, string(axis_splitting))
+    end
+
+    if length(measure.process_grids) > 1
+        grid_str = join(process_grid, '×')
+        push!(file_name_extra, "_pg=" * grid_str)
+        push!(legend_extra, "process grid: " * grid_str)
+    end
+
+    return join(file_name_extra, '_'), join(legend_extra, ", ")
 end
 
 
@@ -751,8 +742,8 @@ end
 function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
         no_overwrite=false, no_plot_update=false)
 
-    point_type = 5  # Marker style for the plot
-    color_index = 1
+    point_type = 5  # Marker style for the line in the plot
+    color_index = 1  # Index in the colormap
     error_bars = measure.error_bars
 
     perf_plot_cmds = []
@@ -764,20 +755,20 @@ function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
     ensure_dirs_exist(measure)
 
     for step in steps
-        if measure.energy_plot
-            ref_file_name = step.base_file_name * "energy_ref.csv"
+        if step.energy_plot.do_plot
+            ref_file_name = energy_ref_file(step)
             ref_file_path = joinpath(measure.script_dir, ref_file_name)
             !no_overwrite && open(identity, ref_file_path, "w")
 
             ref_idx = length(energy_plot_refs) + 1
             push!(energy_plot_refs, gp_energy_ref_cmd(ref_file_name, ref_idx))
 
-            file_name = step.base_file_name * "energy.csv"
+            file_name = step.energy_plot.data_file
             file_path = joinpath(measure.script_dir, file_name)
             !no_overwrite && open(identity, file_path, "w")
             legend = replace(step.legend, '_' => "\\_")
             push!(energy_plot_cmds, gp_energy_plot_cmd(file_name, legend,
-                color_index, point_type, ref_idx, measure.repeats))
+                color_index, point_type, ref_idx, step.cycles, step.repeats))
         end
 
         for armon_params in armon_combinaisons(measure, step.dimension)
@@ -786,28 +777,27 @@ function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
 
             incr_color = false
 
-            base_file_path, legend = build_armon_data_file_name(measure, step.dimension,
-                step.base_file_name, step.legend,
+            file_name_extra, legend = build_armon_data_file_name(measure,
                 armon_params.test, armon_params.axis_splitting, process_grid)
 
-            legend = replace(legend, '_' => "\\_")  # '_' makes subscripts in gnuplot
+            legend = replace(legend, '_' => "\\_")  # '_' alone makes a subscript in gnuplot
 
-            if measure.perf_plot
-                file_name = base_file_path * ".csv"
+            if step.perf_plot.do_plot
+                file_name = Printf.format(Printf.Format(step.perf_plot.data_file), file_name_extra)
                 file_path = joinpath(measure.script_dir, file_name)
                 !no_overwrite && open(identity, file_path, "w")
                 push!(perf_plot_cmds, gp_perf_plot_cmd(file_name, legend, point_type; error_bars))
             end
 
-            if measure.time_histogram
-                file_name = base_file_path * "_hist.csv"
+            if step.time_hist.do_plot
+                file_name = Printf.format(Printf.Format(step.time_hist.data_file), file_name_extra)
                 file_path = joinpath(measure.script_dir, file_name)
                 !no_overwrite && open(identity, file_path, "w")
                 push!(time_hist_cmds, gp_hist_plot_cmd(file_name, legend, point_type))
             end
 
-            if measure.time_MPI_plot
-                file_name = base_file_path * "_MPI_time.csv"
+            if step.time_MPI.do_plot
+                file_name = Printf.format(Printf.Format(step.time_MPI.data_file), file_name_extra)
                 file_path = joinpath(measure.script_dir, file_name)
                 !no_overwrite && open(identity, file_path, "w")
                 push!(MPI_time_cmds, gp_MPI_time_cmd(file_name, legend, color_index, point_type))

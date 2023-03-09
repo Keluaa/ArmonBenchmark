@@ -15,6 +15,7 @@ end
 
 
 backend_disp_name(::KokkosParams) = "C++ Kokkos"
+backend_type(::KokkosParams) = Kokkos
 backend_run_dir(::KokkosParams) = abspath(joinpath(@__DIR__, "../../kokkos"))
 
 
@@ -48,7 +49,10 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Kokkos})
 end
 
 
-function run_backend(measure::MeasureParams, params::KokkosParams, cluster::ClusterParams, base_file_name::String)
+function build_job_step(measure::MeasureParams,
+        params::KokkosParams, cluster::ClusterParams,
+        base_file_name::String, legend::String)
+
     if cluster.processes > 1
         error("The Kokkos backend doesn't support MPI yet")
     end
@@ -61,77 +65,91 @@ function run_backend(measure::MeasureParams, params::KokkosParams, cluster::Clus
         @warn "The Kokkos backend doesn't support the 'time_histogram'" maxlog=1
     end
 
+    if params.dimension == 1
+        cells_list = [[cells] for cells in measure.cells_list]
+    else
+        cells_list = measure.domain_list
+    end
+
+    if isnothing(measure.process_grid_ratios)
+        proc_grids = measure.process_grids
+    else
+        ratios = filter(ratio -> check_ratio_for_grid(cluster.processses, ratio),
+            measure.process_grid_ratios)
+        proc_grids = split_N.(cluster.processes, ratios)
+    end
+
+    options = Dict{Symbol, Any}()
+    options[:verbose] = measure.verbose ? 2 : 3
+    options[:in_sub_script] = measure.make_sub_script
+    options[:device] = measure.device
+    options[:tests] = measure.tests_list
+    options[:axis_splitting] = measure.axis_splitting
+
+    perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
+    time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
+    time_MPI  = PlotInfo(base_file_name * "%s_MPI_time.csv", measure.time_MPI_plot, measure.gnuplot_MPI_script)
+    energy_plot = PlotInfo(base_file_name * "energy.csv", measure.energy_plot, measure.energy_script)
+
+    return JobStep(
+        cluster, params,
+        measure.node, params.threads, params.dimension,
+        cells_list, proc_grids, measure.repeats, measure.cycles,
+        base_file_name, legend,
+        perf_plot, time_hist, time_MPI, energy_plot,
+        options
+    )
+end
+
+
+function build_backend_command(step::JobStep, ::Val{Kokkos})
     armon_options = Any["julia"]
 
-    if !measure.make_sub_script
+    if !(step.options[:in_sub_script])
         push!(armon_options, "--color=yes")
     end
 
     push!(armon_options, kokkos_script_path)
 
-    if measure.device == CUDA
+    if step.options[:device] == CUDA
         append!(armon_options, ["--gpu", "CUDA"])
-    elseif measure.device == ROCM
+    elseif step.options[:device] == ROCM
         append!(armon_options, ["--gpu", "ROCM"])
     else
         # no option needed for CPU
     end
 
-    if params.dimension == 1
-        cells_list = measure.cells_list
+    if step.dimension == 1
+        cells_list_str = join(step.cells_list, ',')
     else
-        cells_list = measure.domain_list
-    end
-
-    if measure.cst_cells_per_process
-        # Scale the cells by the number of processes
-        if params.dimension == 1
-            cells_list .*= cluster.processes
-        else
-            # We need to distribute the factor along each axis, while keeping the divisibility of 
-            # the cells count, since it will be divided by the number of processes along each axis.
-            # Therefore we make the new values multiples of 64, but this is still not perfect.
-            scale_factor = cluster.processes^(1/params.dimension)
-            cells_list = cells_list .* scale_factor
-            cells_list .-= [cells .% 64 for cells in cells_list]
-            cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
-
-            if any(any(cells .≤ 0) for cells in cells_list)
-                error("Cannot scale the cell list by the number of processes: $cells_list")
-            end
-        end
-    end
-
-    if params.dimension == 1
-        cells_list_str = join(cells_list, ',')
-    else
-        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
+        cells_list_str = join([join(string.(cells), ',') for cells in step.cells_list], ';')
     end
 
     append!(armon_options, ARMON_BASE_OPTIONS)
     append!(armon_options, [
-        "--dim", params.dimension,
-        "--use-simd", params.use_simd,
-        "--ieee", params.ieee_bits,
-        "--tests", join(measure.tests_list, ','),
+        "--dim", step.dimension,
+        "--cycle", step.cycles,
+        "--use-simd", step.backend.use_simd,
+        "--ieee", step.backend.ieee_bits,
+        "--tests", join(step.options[:tests], ','),
         "--cells-list", cells_list_str,
-        "--num-threads", params.threads,
-        "--threads-places", params.omp_places,
-        "--threads-proc-bind", params.omp_proc_bind,
-        "--data-file", base_file_name,
-        "--gnuplot-script", measure.gnuplot_script,
-        "--repeats", measure.repeats,
-        "--verbose", (measure.verbose ? 2 : 3),
-        "--compiler", params.compiler
+        "--num-threads", step.backend.threads,
+        "--threads-places", step.backend.omp_places,
+        "--threads-proc-bind", step.backend.omp_proc_bind,
+        "--repeats", step.repeats,
+        "--verbose", step.options[:verbose],
+        "--compiler", step.backend.compiler,
+        "--splitting", join(step.options[:axis_splitting], ','),
     ])
 
-    if params.dimension > 1
+    if step.perf_plot.do_plot
         append!(armon_options, [
-            "--splitting", join(measure.axis_splitting, ',')
+            "--data-file", step.base_file_name,
+            "--gnuplot-script", step.perf_plot.plot_script
         ])
     end
 
-    additional_options, _, _ = params.options
+    additional_options, _, _ = step.backend.options
     append!(armon_options, additional_options)
 
     return armon_options
@@ -166,5 +184,5 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         name *= "_" * params.options[3]
     end
 
-    return name * "_", legend
+    return name, legend
 end

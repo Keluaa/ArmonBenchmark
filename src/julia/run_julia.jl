@@ -63,6 +63,7 @@ base_file_name = ""
 gnuplot_script = ""
 gnuplot_hist_script = ""
 gnuplot_MPI_script = ""
+MPI_time_plot = false
 time_histogram = false
 repeats = 1
 no_precompilation = false
@@ -260,7 +261,7 @@ while i <= length(ARGS)
         global time_histogram = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--time-MPI-graph"
-        @error "MPI time graph is unsupported on the Julia right now"
+        global MPI_time_plot = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--gnuplot-MPI-script"
         global gnuplot_MPI_script = ARGS[i+1]
@@ -270,6 +271,10 @@ while i <= length(ARGS)
         exit(1)
     end
     global i += 1
+end
+
+if MPI_time_plot && !measure_time
+    @error "'--time-MPI-graph true' needs '--measure-time true'"
 end
 
 #
@@ -469,7 +474,7 @@ end
 
 
 function get_gpu_max_mem()
-    if gpu== :ROCM
+    if gpu == :ROCM
         is_root && @warn "AMDGPU.jl doesn't know how much memory there is. Using the a default value of 32GB" maxlog=1
         # TODO: max memory is available in the latest versions of AMDGPU.jl 
         return 32*10^9
@@ -550,7 +555,7 @@ function do_measure(data_file_name, test, cells, splitting)
 end
 
 
-function do_measure_MPI(data_file_name, test, cells, splitting, px, py)
+function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitting, px, py)
     params = build_params(test, cells;
         ieee_bits, riemann, scheme, cfl,
         Dt, cst_dt, dt_on_even_cycles, axis_splitting=splitting,
@@ -592,6 +597,22 @@ function do_measure_MPI(data_file_name, test, cells, splitting, px, py)
     merged_vals_cells_per_sec = MPI.Gather(vals_cells_per_sec, 0, MPI.COMM_WORLD)
     total_cells_per_sec = MPI.Reduce(sum(vals_cells_per_sec) / repeats, MPI.Op(+, Float64; iscommutative=true), 0, MPI.COMM_WORLD)
 
+    # Gather the total MPI communication time
+    MPI_time = 0
+    total_cycle_time = 0
+    if !isnothing(time_contrib)
+        flat_time_contrib = TimerOutputs.flatten(time_contrib)
+        if haskey(flat_time_contrib, "MPI")
+            MPI_time += TimerOutputs.time(flat_time_contrib["MPI"])
+        end
+        if haskey(flat_time_contrib, "time_step AllReduce")
+            MPI_time += TimerOutputs.time(flat_time_contrib["time_step AllReduce"])
+        end
+
+        total_cycle_time = TimerOutputs.time(flat_time_contrib["solver_cycle"])
+    end
+    total_MPI_time = MPI.Reduce(MPI_time / repeats, MPI.SUM, 0, MPI.COMM_WORLD)
+
     !is_root && return time_contrib  # Only the root process does the output
 
     if length(merged_vals_cells_per_sec) > 1
@@ -609,6 +630,18 @@ function do_measure_MPI(data_file_name, test, cells, splitting, px, py)
         end
     end
 
+    total_MPI_time /= params.proc_size
+
+    if !isempty(MPI_time_file_name)
+        open(MPI_time_file_name, "a") do data_file
+            println(data_file, "$(prod(cells)), $total_MPI_time, $total_cycle_time")
+        end
+    end
+
+    if MPI_time_plot
+        @printf(", %4.1f%% of MPI time, ", round(total_MPI_time / total_cycle_time * 100; digits=1))
+    end
+
     @printf(" %s\n", get_duration_string(duration))
 
     return time_contrib
@@ -622,6 +655,14 @@ function process_ratio_to_grid(n_proc, ratios)
     px = convert(Int, √(n_proc * r))
     py = convert(Int, √(n_proc / r))
     return px, py
+end
+
+
+function update_plot(gnuplot_script)
+    if !isempty(gnuplot_script)
+        # We redirect the output of gnuplot to null so that there is no warning messages displayed
+        run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
+    end
 end
 
 
@@ -669,8 +710,13 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
     if isempty(base_file_name)
         data_file_name = ""
         hist_file_name = ""
+        MPI_time_file_name = ""
     else
-        data_file_name = base_file_name * string(test)
+        data_file_name = base_file_name
+
+        if length(tests) > 1
+            data_file_name *= "_" * string(test)
+        end
 
         if length(axis_splitting) > 1
             data_file_name *= "_" * string(splitting)
@@ -681,7 +727,8 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
         end
 
         hist_file_name = data_file_name * "_hist.csv"
-        data_file_name *= ".csv"
+        MPI_time_file_name = data_file_name * "_MPI_time.csv"
+        data_file_name *= "_perf.csv"
 
         data_dir = dirname(data_file_name)
         if !isdir(data_dir)
@@ -693,7 +740,7 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
 
     for cells in cells_list
         if use_MPI
-            time_contrib = do_measure_MPI(data_file_name, test, cells, splitting, px, py)
+            time_contrib = do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitting, px, py)
         else
             time_contrib = do_measure(data_file_name, test, cells, splitting)
         end
@@ -701,10 +748,8 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
         if is_root
             total_time_contrib = merge_time_contribution(total_time_contrib, time_contrib)
 
-            if !isempty(gnuplot_script)
-                # We redirect the output of gnuplot to null so that there is no warning messages displayed
-                run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
-            end
+            update_plot(gnuplot_script)
+            update_plot(gnuplot_MPI_script)
         end
     end
 
@@ -713,9 +758,6 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
             timer_to_table(data_file, total_time_contrib)
         end
 
-        if !isempty(gnuplot_hist_script)
-            # Update the histogram
-            run(pipeline(`gnuplot $(gnuplot_hist_script)`, stdout=devnull, stderr=devnull))
-        end
+        update_plot(gnuplot_hist_script)
     end
 end

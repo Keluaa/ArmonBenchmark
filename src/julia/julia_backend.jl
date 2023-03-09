@@ -16,6 +16,7 @@ end
 
 
 backend_disp_name(::JuliaParams) = "Julia"
+backend_type(::JuliaParams) = Julia
 backend_run_dir(::JuliaParams) = abspath(joinpath(@__DIR__, "../../julia"))
 
 
@@ -50,107 +51,123 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Julia})
 end
 
 
-function run_backend(measure::MeasureParams, params::JuliaParams, cluster::ClusterParams, base_file_name::String)
+function build_job_step(measure::MeasureParams,
+        params::JuliaParams, cluster::ClusterParams,
+        base_file_name::String, legend::String)
+
+    if params.dimension == 1
+        cells_list = [[cells] for cells in mesure.cells_list]
+    else
+        cells_list = measure.domain_list
+    end
+
+    if isnothing(measure.process_grid_ratios)
+        proc_grids = measure.process_grids
+    else
+        ratios = filter(ratio -> check_ratio_for_grid(cluster.processes, ratio),
+            measure.process_grid_ratios)
+        proc_grids = split_N.(cluster.processes, ratios)
+    end
+
+    options = Dict{Symbol, Any}()
+    options[:verbose] = measure.verbose ? 2 : 5
+    options[:in_sub_script] = measure.make_sub_script
+    options[:device] = measure.device
+    options[:tests] = measure.tests_list
+    options[:axis_splitting] = measure.axis_splitting
+    options[:use_MPI] = measure.use_MPI
+    options[:limit_to_max_mem] = measure.limit_to_max_mem
+
+    perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
+    time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
+    time_MPI  = PlotInfo(base_file_name * "%s_MPI_time.csv", measure.time_MPI_plot, measure.gnuplot_MPI_script)
+    energy_plot = PlotInfo(base_file_name * "_energy.csv", measure.energy_plot, measure.energy_script)
+
+    return JobStep(
+        cluster, params,
+        measure.node, params.threads, params.dimension,
+        cells_list, proc_grids, measure.repeats, measure.cycles,
+        base_file_name, legend,
+        perf_plot, time_hist, time_MPI, energy_plot,
+        options
+    )
+end
+
+
+function build_backend_command(step::JobStep, ::Val{Julia})
     armon_options = [
-        "julia", "-t", params.threads,
+        "julia", "-t", step.threads,
         "-O3", "--check-bounds=no",
-        "--project=$(backend_run_dir(params))"
+        "--project=$(backend_run_dir(step.backend))"
     ]
 
-    if !measure.make_sub_script
+    if !step.options[:in_sub_script]
         push!(armon_options, "--color=yes")
     end
 
     push!(armon_options, julia_script_path)
 
-    if measure.device == CUDA
+    if step.options[:device] == CUDA
         append!(armon_options, ["--gpu", "CUDA"])
-    elseif measure.device == ROCM
+    elseif step.options[:device] == ROCM
         append!(armon_options, ["--gpu", "ROCM"])
     else
         # no option needed for CPU
     end
 
-    if params.dimension == 1
-        cells_list = measure.cells_list
+    if step.dimension == 1
+        cells_list_str = join(first.(step.cells_list), ',')
     else
-        cells_list = measure.domain_list
-    end
-
-    if measure.cst_cells_per_process
-        # Scale the cells by the number of processes
-        if params.dimension == 1
-            cells_list .*= cluster.processes
-        else
-            # We need to distribute the factor along each axis, while keeping the divisibility of 
-            # the cells count, since it will be divided by the number of processes along each axis.
-            # Therefore we make the new values multiples of 64, but this is still not perfect.
-            scale_factor = cluster.processes^(1/params.dimension)
-            cells_list = cells_list .* scale_factor
-            cells_list .-= [cells .% 64 for cells in cells_list]
-            cells_list = Vector{Int}[convert.(Int, cells) for cells in cells_list]
-
-            if any(any(cells .≤ 0) for cells in cells_list)
-                error("Cannot scale the cell list by the number of processes: $cells_list")
-            end
-        end
-    end
-
-    if params.dimension == 1
-        cells_list_str = join(cells_list, ',')
-    else
-        cells_list_str = join([join(string.(cells), ',') for cells in cells_list], ';')
+        cells_list_str = join([join(string.(cells), ',') for cells in step.cells_list], ';')
     end
 
     append!(armon_options, ARMON_BASE_OPTIONS)
     append!(armon_options, [
-        "--dim", params.dimension,
-        "--block-size", 256,
-        "--use-simd", params.use_simd,
-        "--ieee", 64,
-        "--tests", join(measure.tests_list, ','),
+        "--dim", step.dimension,
+        "--cycle", step.cycles,
+        "--block-size", step.backend.block_size,
+        "--use-simd", step.backend.use_simd,
+        "--ieee", step.backend.ieee_bits,
+        "--tests", join(step.options[:tests], ','),
         "--cells-list", cells_list_str,
-        "--threads-places", params.jl_places,
-        "--threads-proc-bind", params.jl_proc_bind,
-        "--data-file", base_file_name,
-        "--repeats", measure.repeats,
-        "--verbose", (measure.verbose ? 2 : 5),
-        "--use-mpi", measure.use_MPI,
-        "--limit-to-mem", measure.limit_to_max_mem
+        "--threads-places", step.backend.jl_places,
+        "--threads-proc-bind", step.backend.jl_proc_bind,
+        "--repeats", step.repeats,
+        "--verbose", step.options[:verbose],
+        "--use-mpi", step.options[:use_MPI],
+        "--limit-to-mem", step.options[:limit_to_max_mem],
+        "--async-comms", step.backend.async_comms,
+        "--splitting", join(step.options[:axis_splitting], ','),
+        "--proc-grid", join([join(grid, ',') for grid in step.proc_grids], ';')
     ])
 
-    if measure.perf_plot
-        append!(armon_options, ["--gnuplot-script", measure.gnuplot_script])
-    end
-
-    if measure.time_histogram
+    if step.perf_plot.do_plot || step.time_hist.do_plot || step.time_MPI.do_plot
         append!(armon_options, [
-            "--gnuplot-hist-script", measure.gnuplot_hist_script,
-            "--time-histogram", measure.time_histogram    
+            "--data-file", step.base_file_name
         ])
     end
 
-    if params.dimension > 1
+    if step.perf_plot.do_plot
         append!(armon_options, [
-            "--async-comms", params.async_comms,
-            "--splitting", join(measure.axis_splitting, ',')
+            "--gnuplot-script", step.perf_plot.plot_script
         ])
-
-        if isnothing(measure.process_grid_ratios)
-            push!(armon_options, "--proc-grid", join([
-                join(string.(process_grid), ',') 
-                for process_grid in measure.process_grids
-            ], ';'))
-        else
-            push!(armon_options, "--proc-grid-ratio", join([
-                join(string.(ratio), ',')
-                for ratio in measure.process_grid_ratios
-                if check_ratio_for_grid(cluster.processes, ratio)
-            ], ';'))
-        end
     end
 
-    additional_options, _, _ = params.options
+    if step.time_hist.do_plot
+        append!(armon_options, [
+            "--gnuplot-hist-script", step.time_hist.plot_script,
+            "--time-histogram", true
+        ])
+    end
+
+    if step.time_MPI.do_plot
+        append!(armon_options, [
+            "--gnuplot-MPI-script", step.time_MPI.plot_script,
+            "--time-MPI-graph", true
+        ])
+    end
+
+    additional_options, _, _ = step.backend.options
     append!(armon_options, additional_options)
 
     return armon_options
@@ -186,5 +203,5 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         name *= "_" * params.options[3]
     end
 
-    return name * "_", legend
+    return name, legend
 end

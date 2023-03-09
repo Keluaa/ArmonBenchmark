@@ -15,6 +15,7 @@ end
 
 
 backend_disp_name(::CppParams) = "C++ OpenMP"
+backend_type(::CppParams) = CPP
 backend_run_dir(::CppParams) = abspath(joinpath(@__DIR__, "../../cpp"))
 
 
@@ -48,7 +49,10 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{CPP})
 end
 
 
-function run_backend(measure::MeasureParams, params::CppParams, cluster::ClusterParams, base_file_name::String)
+function build_job_step(measure::MeasureParams,
+        params::CppParams, cluster::ClusterParams,
+        base_file_name::String, legend::String)
+
     if cluster.processes > 1
         error("The C++ backend doesn't support MPI")
     end
@@ -61,46 +65,81 @@ function run_backend(measure::MeasureParams, params::CppParams, cluster::Cluster
         @warn "The C++ backend doesn't support the 'time_histogram'" maxlog=1
     end
 
+    if measure.device != CPU
+        error("The C++ backend works only on the CPU")
+    end
+
+    if params.dimension != 1
+        error("The C++ backend works only in 1D")
+    end
+
+    if params.dimension == 1
+        cells_list = [[cells] for cells in mesure.cells_list]
+    else
+        cells_list = measure.domain_list
+    end
+
+    if isnothing(measure.process_grid_ratios)
+        proc_grids = measure.process_grids
+    else
+        ratios = filter(ratio -> check_ratio_for_grid(cluster.processses, ratio),
+            measure.process_grid_ratios)
+        proc_grids = split_N.(cluster.processes, ratios)
+    end
+
+    options = Dict{Symbol, Any}()
+    options[:verbose] = measure.verbose ? 2 : 3
+    options[:in_sub_script] = measure.make_sub_script
+    options[:tests] = measure.tests_list
+
+    perf_plot = PlotInfo(base_file_name * "%s.csv", measure.perf_plot, measure.gnuplot_script)
+    time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
+    time_MPI  = PlotInfo(base_file_name * "%s_MPI_time.csv", measure.time_MPI_plot, measure.gnuplot_MPI_script)
+    energy_plot = PlotInfo(base_file_name * "energy.csv", measure.energy_plot, measure.energy_script)
+
+    return JobStep(
+        cluster, params,
+        measure.node, params.threads, params.dimension,
+        cells_list, proc_grids, measure.repeats, measure.cycles,
+        base_file_name, legend,
+        perf_plot, time_hist, time_MPI, energy_plot,
+        options
+    )
+end
+
+
+function build_backend_command(step::JobStep, ::Val{CPP})
     armon_options = Any["julia"]
 
-    if !measure.make_sub_script
+    if !(step.options[:in_sub_script])
         push!(armon_options, "--color=yes")
     end
 
     push!(armon_options, cpp_script_path)
 
-    if measure.device != CPU
-        error("The C++ backend works only on the CPU")
-    end
-
-    if params.dimension == 1
-        cells_list = measure.cells_list
-    else
-        error("The C++ backend works only in 1D")
-    end
-
-    if measure.cst_cells_per_process
-        # Scale the cells by the number of processes
-        cells_list .*= cluster.processes
-    end
-
-    cells_list_str = join(cells_list, ',')
+    cells_list_str = join(step.cells_list, ',')
 
     append!(armon_options, ARMON_BASE_OPTIONS)
     append!(armon_options, [
-        "--use-simd", params.use_simd,
-        "--ieee", params.ieee_bits,
-        "--tests", join(measure.tests_list, ','),
+        "--cycle", step.cycles,
+        "--use-simd", step.backend.use_simd,
+        "--ieee", step.backend.ieee_bits,
+        "--tests", join(step.options[:tests_list], ','),
         "--cells-list", cells_list_str,
-        "--num-threads", params.threads,
-        "--threads-places", params.omp_places,
-        "--threads-proc-bind", params.omp_proc_bind,
-        "--data-file", base_file_name,
-        "--gnuplot-script", measure.gnuplot_script,
-        "--repeats", measure.repeats,
-        "--verbose", (measure.verbose ? 2 : 3),
-        "--compiler", params.compiler
+        "--num-threads", step.backend.threads,
+        "--threads-places", step.backend.omp_places,
+        "--threads-proc-bind", step.backend.omp_proc_bind,
+        "--repeats", step.repeats,
+        "--verbose", step.options[:verbose],
+        "--compiler", step.backend.compiler
     ])
+
+    if step.perf_plot.do_plot
+        append!(armon_options, [
+            "--data-file", step.base_file_name,
+            "--gnuplot-script", step.perf_plot.plot_script
+        ])
+    end
 
     additional_options, _, _ = params.options
     append!(armon_options, additional_options)
@@ -137,5 +176,5 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         name *= "_" * params.options[3]
     end
 
-    return name * "_", legend
+    return name, legend
 end

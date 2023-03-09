@@ -39,12 +39,12 @@ function parse_measure_params(file_line_parser, script_dir)
     use_MPI = true
     name = nothing
     repeats = 1
+    cycles = 20
     log_scale = true
     error_bars = false
     plot_title = ""
     verbose = false
     use_max_threads = false
-    cst_cells_per_process = false
     limit_to_max_mem = false
     process_scaling = false
 
@@ -173,6 +173,8 @@ function parse_measure_params(file_line_parser, script_dir)
             name = value
         elseif option == "repeats"
             repeats = parse(Int, value)
+        elseif option == "cycles"
+            cycles = parse(Int, value)
         elseif option == "gnuplot"
             gnuplot_script = value
         elseif option == "plot"
@@ -187,8 +189,6 @@ function parse_measure_params(file_line_parser, script_dir)
             verbose = parse(Bool, value)
         elseif option == "use_max_threads"
             use_max_threads = parse(Bool, value)
-        elseif option == "cst_cells_per_process"
-            cst_cells_per_process = parse(Bool, value)
         elseif option == "limit_to_max_mem"
             limit_to_max_mem = parse(Bool, value)
         elseif option == "track_energy"
@@ -292,10 +292,10 @@ function parse_measure_params(file_line_parser, script_dir)
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,
-        cells_list, domain_list, process_grids, process_grid_ratios, tests_list, 
+        cycles, cells_list, domain_list, process_grids, process_grid_ratios, tests_list,
         axis_splitting, params_and_legends,
         name, script_dir, repeats, log_scale, error_bars, plot_title,
-        verbose, use_max_threads, cst_cells_per_process, limit_to_max_mem,
+        verbose, use_max_threads, limit_to_max_mem,
         track_energy, energy_references, process_scaling,
         perf_plot, gnuplot_script, plot_file,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,
@@ -328,8 +328,8 @@ julia batch_measure.jl [--override-node=<node>,<new node>]
                        [--do-only=<measures count>]
                        [--skip-first=<combinaison count>]
                        [--count=<combinaison count>]
-                       [--no-overwrite=true|false]
-                       [--no-plot-update=true|false]
+                       [--no-overwrite]
+                       [--no-plot-update]
                        [--step-scripts=true|false]
                        [--sub-now]
                        [--help|-h]
@@ -366,12 +366,10 @@ function parse_arguments()
             elseif (startswith(arg, "--count="))
                 value = split(arg, '=')[2]
                 batch_options.comb_count = parse(Int, value)
-            elseif (startswith(arg, "--no-overwrite="))
-                value = split(arg, '=')[2]
-                batch_options.no_overwrite = parse(Bool, value)
-            elseif (startswith(arg, "--no-plot-update="))
-                value = split(arg, '=')[2]
-                batch_options.no_plot_update = parse(Bool, value)
+            elseif (startswith(arg, "--no-overwrite"))
+                batch_options.no_overwrite = true
+            elseif (startswith(arg, "--no-plot-update"))
+                batch_options.no_plot_update = true
             elseif (startswith(arg, "--step-scripts"))
                 value = split(arg, '=')[2]
                 batch_options.one_script_per_step = parse(Bool, value)

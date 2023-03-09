@@ -341,8 +341,13 @@ function run_armon(options::CppOptions, verbose::Bool)
         if isempty(options.base_file_name)
             data_file_name = ""
         else
-            data_file_name = options.base_file_name * test
-            data_file_name *= ".csv"
+            data_file_name = options.base_file_name
+
+            if length(options.tests) > 1
+                data_file_name *= "_" * test
+            end
+
+            data_file_name *= "_perf.csv"
 
             data_dir = dirname(data_file_name)
             if !isdir(data_dir)
