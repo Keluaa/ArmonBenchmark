@@ -83,7 +83,7 @@ end
 
 
 function gp_MPI_time_cmd(file, legend, color_idx, pt_idx)
-    "'$file' $NEW_LINE  u 1:2 axis x1y1 w lp lc $color_idx pt $pt_idx t '$legend'"
+    "'$file' $NEW_LINE  u 1:(\$2/1e9) axis x1y1 w lp lc $color_idx pt $pt_idx t '$legend'"
 end
 
 

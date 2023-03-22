@@ -450,7 +450,6 @@ function make_reference_job_from(step::JobStep)
     ref_step.perf_plot.do_plot = false
     ref_step.time_hist.do_plot = false
     ref_step.time_MPI.do_plot = false
-    ref_step.energy_plot.do_plot = false
 
     adjust_reference_job(ref_step, Val(backend_type(ref_step.backend)))
 
@@ -530,6 +529,9 @@ function append_to_sub_script(script::IO, measure::MeasureParams, step::JobStep,
             if step.energy_plot.do_plot
                 println(script, "ENERGY_PLOT_SCRIPT=\"", step.energy_plot.plot_script, '"')
             end
+
+            println(script, "\n# Remove any potential leftovers")
+            println(script, "rm -f \$TMP_STEP_DATA")
 
             # Add as many energy references as needed
             ref_step = make_reference_job_from(step)
@@ -655,8 +657,8 @@ end
 
 function build_armon_data_file_name(measure::MeasureParams,
         test::String, axis_splitting::String, process_grid::Vector{Int})
-    file_name_extra = []
-    legend_extra = []
+    file_name_extra = [""]
+    legend_extra = [""]
 
     if length(measure.tests_list) > 1
         push!(file_name_extra, test)
@@ -803,7 +805,8 @@ function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
                 file_name = Printf.format(Printf.Format(step.time_MPI.data_file), file_name_extra)
                 file_path = joinpath(measure.script_dir, file_name)
                 !no_overwrite && open(identity, file_path, "w")
-                push!(MPI_time_cmds, gp_MPI_time_cmd(file_name, legend, color_index, point_type))
+                raw_legend = measure.device == CPU ? ("(time) " * legend) : (legend * " (time)")
+                push!(MPI_time_cmds, gp_MPI_time_cmd(file_name, raw_legend, color_index, point_type))
                 percent_legend = measure.device == CPU ? ("(relative) " * legend) : (legend * " (relative)")
                 push!(MPI_time_cmds, gp_MPI_percent_cmd(file_name, percent_legend, color_index, point_type))
                 incr_color = true

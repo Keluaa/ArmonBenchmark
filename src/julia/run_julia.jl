@@ -449,6 +449,7 @@ end
 
 
 function flatten_timer(timer::TimerOutput, prefix = "")
+    # Transforms the name of the timer "B" in `to["A"]["B"]` to "A.B", and do same for all of its children
     if timer.name != "root" 
         timer.name = prefix * timer.name
         prefix = timer.name * "."
@@ -498,8 +499,9 @@ end
 get_cpu_max_mem() = Int(Sys.total_memory())
 
 
-function continue_acquisition(current_repeats, acquisition_start)
+function continue_acquisition(current_repeats, acquisition_start, for_precompilation)
     current_repeats < repeats && return true
+    for_precompilation && return false
 
     if is_root
         min_time_reached = (time_ns() - acquisition_start) >= min_acquisition_time
@@ -515,13 +517,13 @@ function continue_acquisition(current_repeats, acquisition_start)
 end
 
 
-function run_armon(params::ArmonParameters)
+function run_armon(params::ArmonParameters; for_precompilation=false)
     vals_cells_per_sec = Vector{Float64}()
     total_time_contrib = nothing
     current_repeats = 0
     acquisition_start = time_ns()
 
-    while continue_acquisition(current_repeats, acquisition_start)
+    while continue_acquisition(current_repeats, acquisition_start, for_precompilation)
         stats = armon(params)
 
         push!(vals_cells_per_sec, stats.giga_cells_per_sec)
@@ -557,7 +559,7 @@ function do_measure(data_file_name, test, cells, splitting)
 
         if data_size > max_mem
             @printf("skipped because of memory: %.1f > %.1f GB\n", data_size / 10^9, max_mem / 10^9)
-            return nothing
+            return nothing, nothing
         end
     end
 
@@ -617,7 +619,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
         if data_size > max_mem
             is_root && @printf("skipped because of memory: %.1f > %.1f GB\n", 
                 data_size / 10^9 * params.proc_size, max_mem / 10^9 * params.proc_size)
-            return nothing
+            return nothing, nothing
         end
     end
 
@@ -651,7 +653,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
     end
     total_MPI_time = MPI.Reduce(MPI_time, MPI.SUM, 0, MPI.COMM_WORLD)
 
-    !is_root && return time_contrib  # Only the root process does the output
+    !is_root && return time_contrib, nothing  # Only the root process does the output
 
     if length(merged_vals_cells_per_sec) > 1
         std_cells_per_sec = std(merged_vals_cells_per_sec; corrected=true) * sqrt(params.proc_size)
@@ -739,7 +741,7 @@ end
             use_threading, use_simd, 
             use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
             reorder_grid, async_comms
-        ))
+        ); for_precompilation=true)
     end
 end
 
