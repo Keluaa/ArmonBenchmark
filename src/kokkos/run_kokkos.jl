@@ -438,10 +438,14 @@ function run_armon(options::KokkosOptions, verbose::Bool)
             append!(args, base_args)
 
             if options.dimension == 1
-                @printf(" - %s, %11g cells: ", test, cells[1])
+                @printf(" - ")
+                length(options.tests) > 1 && @printf("%s, ", test)
+                @printf("%11g cells: ", cells[1])
             else
-                @printf(" - (%2dx%-2d) %-4s %-14s %11g cells (%5gx%-5g): ", 
-                    1, 1, test, axis_splitting, prod(cells), cells[1], cells[2])
+                @printf(" - (%2dx%-2d) ", 1, 1)
+                length(options.tests) > 1          && @printf("%-4s ", string(test))
+                length(options.axis_splitting) > 1 && @printf("%-14s ", string(axis_splitting))
+                @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
             end
 
             run_cmd = get_run_command(exe_path, args)

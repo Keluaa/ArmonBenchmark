@@ -547,8 +547,10 @@ function do_measure(data_file_name, test, cells, splitting)
         reorder_grid=false, async_comms=false
     )
 
-    @printf(" - %-4s %-14s %11g cells (%5gx%-5g): ", 
-        string(test), string(splitting), cells[1] * cells[2], cells[1], cells[2])
+    @printf(" - ")
+    length(tests) > 1     && @printf("%-4s ", string(test))
+    length(splitting) > 1 && @printf("%-14s ", string(splitting))
+    @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
 
     if limit_to_max_mem
         max_mem = params.use_gpu ? get_gpu_max_mem() : get_cpu_max_mem()
@@ -603,8 +605,10 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
     )
 
     if is_root
-        @printf(" - (%2dx%-2d) %-4s %-14s %11g cells (%5gx%-5g): ",
-            px, py, string(test), string(splitting), prod(cells), cells[1], cells[2])
+        @printf(" - (%2dx%-2d) ", px, py)
+        length(tests) > 1     && @printf("%-4s ", string(test))
+        length(splitting) > 1 && @printf("%-14s ", string(splitting))
+        @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
     end
 
     if limit_to_max_mem

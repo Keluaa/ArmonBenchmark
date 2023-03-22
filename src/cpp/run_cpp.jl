@@ -376,7 +376,9 @@ function run_armon(options::CppOptions, verbose::Bool)
             ]
             append!(args, base_args)
 
-            @printf(" - %s, %11g cells: ", test, prod(cells))
+            @printf(" - ")
+            length(options.tests) > 1 && @printf("%s, ", test)
+            @printf("%11g cells: ", prod(cells))
     
             run_cmd = get_run_command(args)
 
