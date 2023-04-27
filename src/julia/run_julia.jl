@@ -197,7 +197,7 @@ while i <= length(ARGS)
         global cmake_options = split(ARGS[i+1], ';')
         global i += 1
     elseif arg == "--kokkos-backends"
-        global kokkos_backends = split(ARGS[i+1], ';') .|> strip .|> Symbol
+        global kokkos_backends = split(ARGS[i+1], ',') .|> strip .|> Symbol
         global i += 1
     elseif arg == "--kokkos-build-dir"
         global kokkos_build_dir = ARGS[i+1]
@@ -383,7 +383,7 @@ local_size = MPI.Comm_size(node_local_comm)
 # Pin the threads on the node with no overlap with the other processes running on the same node.
 # Pinning the Julia threads this way will prevent OpenMP threads from being correctly setup.
 thread_offset = local_rank * Threads.nthreads()
-if !(use_kokkos && :OpenMP in backends)
+if !(use_kokkos && :OpenMP in kokkos_backends)
     omp_bind_threads(thread_offset, threads_places, threads_proc_bind; skip_cpus=skip_cpuids)
 else
     OMP_NUM_THREADS, OMP_PLACES, OMP_PROC_BIND = build_omp_vars(
@@ -603,8 +603,8 @@ function do_measure(data_file_name, test, cells, splitting)
     )
 
     @printf(" - ")
-    length(tests) > 1     && @printf("%-4s ", string(test))
-    length(splitting) > 1 && @printf("%-14s ", string(splitting))
+    length(string(tests)) > 1     && @printf("%-4s ", string(test))
+    length(string(splitting)) > 1 && @printf("%-14s ", string(splitting))
     @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
 
     if limit_to_max_mem
@@ -661,8 +661,8 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
 
     if is_root
         @printf(" - (%2dx%-2d) ", px, py)
-        length(tests) > 1     && @printf("%-4s ", string(test))
-        length(splitting) > 1 && @printf("%-14s ", string(splitting))
+        length(string(tests)) > 1     && @printf("%-4s ", string(test))
+        length(string(splitting)) > 1 && @printf("%-14s ", string(splitting))
         @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
     end
 
