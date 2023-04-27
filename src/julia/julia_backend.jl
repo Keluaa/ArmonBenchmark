@@ -12,6 +12,8 @@ struct JuliaParams <: BackendParams
     use_simd::Int
     dimension::Int
     async_comms::Bool
+    use_kokkos::Bool
+    kokkos_backends::String
 end
 
 
@@ -21,31 +23,56 @@ backend_run_dir(::JuliaParams) = abspath(joinpath(@__DIR__, "../../julia"))
 
 
 function run_backend_msg(measure::MeasureParams, julia::JuliaParams, cluster::ClusterParams)
-    """Running Julia with:
-    - $(julia.threads) threads
-    - threads binding: $(julia.jl_proc_bind), places: $(julia.jl_places)
-    - $(julia.use_simd == 1 ? "with" : "without") SIMD
-    - $(julia.dimension)D
-    - $(julia.async_comms ? "a" : "")synchronous communications
-    - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
-    - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
-   """
+    if julia.use_kokkos
+        return """Running Julia with:
+        - $(julia.threads) threads
+        - threads binding: $(julia.jl_proc_bind), places: $(julia.jl_places)
+        - kokkos using $(julia.kokkos_backends)
+        - $(julia.dimension)D
+        - $(julia.async_comms ? "a" : "")synchronous communications
+        - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
+        - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
+       """
+    else
+        return """Running Julia with:
+        - $(julia.threads) threads
+        - threads binding: $(julia.jl_proc_bind), places: $(julia.jl_places)
+        - $(julia.use_simd == 1 ? "with" : "without") SIMD
+        - $(julia.dimension)D
+        - $(julia.async_comms ? "a" : "")synchronous communications
+        - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
+        - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
+       """
+    end
 end
 
 
 function iter_combinaisons(measure::MeasureParams, threads, ::Val{Julia})
+    kokkos_backends = copy(measure.kokkos_backends)
+    if false in measure.use_kokkos
+        # The empty backend plus the filter prevents to go through all combinations of kokkos
+        # backends when `use_kokkos=false`.
+        push!(kokkos_backends, "")
+        unique!(kokkos_backends)
+    end
+
     Iterators.map(
         params->JuliaParams(params...),
-        Iterators.product(
-            measure.armon_params,
-            measure.jl_places,
-            measure.jl_proc_bind,
-            threads,
-            measure.ieee_bits,
-            measure.block_sizes,
-            measure.use_simd,
-            measure.dimension,
-            measure.async_comms,
+        Iterators.filter(
+            params -> params[10] != isempty(params[11]),  # If we use kokkos, we require a non empty backend, else we do
+            Iterators.product(
+                measure.armon_params,
+                measure.jl_places,
+                measure.jl_proc_bind,
+                threads,
+                measure.ieee_bits,
+                measure.block_sizes,
+                measure.use_simd,
+                measure.dimension,
+                measure.async_comms,
+                measure.use_kokkos,
+                kokkos_backends
+            )
         )
     )
 end
@@ -78,6 +105,7 @@ function build_job_step(measure::MeasureParams,
     options[:use_MPI] = measure.use_MPI
     options[:limit_to_max_mem] = measure.limit_to_max_mem
     options[:min_acquisition] = measure.min_acquisition_time
+    options[:cmake_options] = measure.cmake_options
 
     perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
     time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
@@ -145,8 +173,23 @@ function build_backend_command(step::JobStep, ::Val{Julia})
         "--min-acquisition-time", step.options[:min_acquisition],
         "--async-comms", step.backend.async_comms,
         "--splitting", join(step.options[:axis_splitting], ','),
-        "--proc-grid", join([join(grid, ',') for grid in step.proc_grids], ';')
+        "--proc-grid", join([join(grid, ',') for grid in step.proc_grids], ';'),
+        "--use-kokkos", step.backend.use_kokkos
     ])
+
+    if step.backend.use_kokkos
+        push!(armon_options, "--kokkos-backends", step.backend.kokkos_backends)
+
+        if step.options[:in_sub_script]
+            push!(armon_options, "--kokkos-build-dir", "€KOKKOS_BUILD_DIR")
+        end
+
+        if !isempty(step.options[:cmake_options])
+            append!(armon_options, [
+                "--cmake-options", step.options[:cmake_options]
+            ])
+        end
+    end
 
     if step.perf_plot.do_plot || step.time_hist.do_plot || step.time_MPI.do_plot
         append!(armon_options, [
@@ -206,6 +249,16 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         async_str = params.async_comms ? "async" : "sync"
         name *= "_$async_str"
         legend *= ", $async_str"
+    end
+
+    if length(measure.use_kokkos) > 1
+        name *= "_" * (params.use_kokkos ? "" : "no_") * "kokkos"
+        legend *= ", " * (params.use_kokkos ? "with" : "without") * " kokkos"
+    end
+
+    if length(measure.kokkos_backends) > 1 && params.use_kokkos
+        name *= "_$(params.kokkos_backends)"
+        legend *= " " * params.kokkos_backends
     end
 
     if !isempty(params.options[2])

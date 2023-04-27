@@ -4,7 +4,7 @@ using Statistics
 using TimerOutputs
 
 
-include(joinpath(@__DIR__, "omp_simili.jl"))
+include(joinpath(@__DIR__, "openmp_utils.jl"))
 include(joinpath(@__DIR__, "../common_utils.jl"))
 
 armon_path = joinpath(@__DIR__, "../../julia/")
@@ -33,10 +33,15 @@ write_slices = false
 use_threading = true
 use_simd = true
 use_gpu = false
+use_kokkos = false
+cmake_options = []
+kokkos_backends = [:Serial, :OpenMP]
+kokkos_build_dir = missing
 block_size = 1024
 gpu = :CUDA
 threads_places = :cores
 threads_proc_bind = :close
+skip_cpuids = []
 dimension = 2
 output_precision = nothing
 compare = false
@@ -171,6 +176,9 @@ while i <= length(ARGS)
     elseif arg == "--threads-proc-bind"
         global threads_proc_bind = Symbol(ARGS[i+1])
         global i += 1
+    elseif arg == "--skip-cpuids"
+        global skip_cpuids = parse.(Int, split(ARGS[i+1], ',') .|> strip)
+        global i += 1
 
     # GPU params
     elseif arg == "--gpu"
@@ -179,6 +187,20 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--block-size"
         global block_size = parse(Int, ARGS[i+1])
+        global i += 1
+
+    # Kokkos params
+    elseif arg == "--use-kokkos"
+        global use_kokkos = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--cmake-options"
+        global cmake_options = split(ARGS[i+1], ';')
+        global i += 1
+    elseif arg == "--kokkos-backends"
+        global kokkos_backends = split(ARGS[i+1], ';') .|> strip .|> Symbol
+        global i += 1
+    elseif arg == "--kokkos-build-dir"
+        global kokkos_build_dir = ARGS[i+1]
         global i += 1
 
     # 2D only params
@@ -358,9 +380,18 @@ node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.COMM_TYPE_SHARED, rank
 local_rank = MPI.Comm_rank(node_local_comm)
 local_size = MPI.Comm_size(node_local_comm)
 
-# Pin the threads on the node with no overlap with the other processes running on the same node
+# Pin the threads on the node with no overlap with the other processes running on the same node.
+# Pinning the Julia threads this way will prevent OpenMP threads from being correctly setup.
 thread_offset = local_rank * Threads.nthreads()
-omp_bind_threads(thread_offset, threads_places, threads_proc_bind)
+if !(use_kokkos && :OpenMP in backends)
+    omp_bind_threads(thread_offset, threads_places, threads_proc_bind; skip_cpus=skip_cpuids)
+else
+    OMP_NUM_THREADS, OMP_PLACES, OMP_PROC_BIND = build_omp_vars(
+        thread_offset, threads_places, threads_proc_bind; skip_cpus=skip_cpuids)
+    ENV["OMP_PLACES"] = OMP_PLACES
+    ENV["OMP_PROC_BIND"] = OMP_PROC_BIND
+    ENV["OMP_NUM_THREADS"] = OMP_NUM_THREADS
+end
 
 if verbose_MPI || !isempty(file_MPI_dump)
     # Call 'MPI_Get_processor_name', in order to get the name of the node on which the current 
@@ -419,6 +450,30 @@ if verbose_MPI || !isempty(file_MPI_dump)
 end
 
 use_gpu && is_root && @info "Using $(gpu == :ROCM ? "ROCm" : "CUDA") GPU"
+
+#
+# Kokkos initialization
+#
+
+if use_kokkos
+    using Kokkos
+
+    # TODO: check if having multiple processes changing the configuration can mess up everything
+    #  + update the docs in Kokkos.jl
+    backends = [getproperty(Kokkos, backend) for backend in kokkos_backends]
+    Kokkos.set_backends(backends)
+    Kokkos.set_view_types([ieee_bits == 64 ? Float64 : Float32])
+    Kokkos.set_build_dir(kokkos_build_dir)
+
+    if is_root
+        Kokkos.load_wrapper_lib()  # All compilation (if any) of the C++ wrapper happens here
+    end
+
+    MPI.Barrier(MPI.COMM_WORLD)
+
+    rank != 0 && Kokkos.load_wrapper_lib(; no_compilation=true, no_git=true)
+    Kokkos.initialize()
+end
 
 #
 # Armon loading

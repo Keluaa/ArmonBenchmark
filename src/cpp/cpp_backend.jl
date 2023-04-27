@@ -82,7 +82,7 @@ function build_job_step(measure::MeasureParams,
     if isnothing(measure.process_grid_ratios)
         proc_grids = measure.process_grids
     else
-        ratios = filter(ratio -> check_ratio_for_grid(cluster.processses, ratio),
+        ratios = filter(ratio -> check_ratio_for_grid(cluster.processes, ratio),
             measure.process_grid_ratios)
         proc_grids = split_N.(cluster.processes, ratios)
     end

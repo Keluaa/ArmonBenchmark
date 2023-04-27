@@ -54,6 +54,9 @@ mutable struct MeasureParams
     async_comms::Vector{Bool}
     ieee_bits::Vector{Int}
     block_sizes::Vector{Int}
+    use_kokkos::Vector{Bool}
+    kokkos_backends::Vector{String}
+    cmake_options::String
 
     # Armon params
     cycles::Int
@@ -144,7 +147,7 @@ mutable struct JobStep
 end
 
 
-const REQUIRED_MODULES = ["cuda", #= "rocm", =# "hwloc", "mpi"]
+const REQUIRED_MODULES = ["cuda", #= "rocm", =# "hwloc", "mpi", "cmake/3.22.2"]
 
 
 const PROJECT_DIR = joinpath(@__DIR__, "..")
@@ -360,6 +363,8 @@ end
 
 submit_script(script_path) = run(`ccc_msub $script_path`)  # TODO: replace by `srun`
 
+scratch_dir() = get(ENV, "CCCSCRATCHDIR", tempdir())  # TODO: replace by a local preference
+
 #
 # Job steps and submission script
 #
@@ -487,6 +492,11 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep};
             println(script, "ADD_ENERGY_SCRIPT=\"", ADD_ENERGY_SCRIPT_PATH, '"')
         end
 
+        if true in measure.use_kokkos
+            # Create a tmp directory for all sources for this job
+            println(script, "KOKKOS_BUILD_DIR=\"", joinpath(scratch_dir(), "kokkos_build_\${SLURM_JOB_ID}"), '"')
+        end
+
         # Put the header in a `echo` call
         !isempty(header) && println(script, "\necho -e \"", replace(header, '\n' => "\n#"), "\"")
 
@@ -508,6 +518,11 @@ function create_sub_script(measure::MeasureParams, steps::Vector{JobStep};
         end
 
         println(script, "\necho \"== All done ==\"")
+
+        if true in measure.use_kokkos
+            # Clear the tmp directory
+            println(script, "\nrm -rf \$KOKKOS_BUILD_DIR")
+        end
     end
 
     println("Created submission script '$script_name'")
