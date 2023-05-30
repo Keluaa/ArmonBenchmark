@@ -458,20 +458,17 @@ use_gpu && is_root && @info "Using $(gpu == :ROCM ? "ROCm" : "CUDA") GPU"
 if use_kokkos
     using Kokkos
 
-    # TODO: check if having multiple processes changing the configuration can mess up everything
-    #  + update the docs in Kokkos.jl
-    backends = [getproperty(Kokkos, backend) for backend in kokkos_backends]
-    Kokkos.set_backends(backends)
-    Kokkos.set_view_types([ieee_bits == 64 ? Float64 : Float32])
-    Kokkos.set_build_dir(kokkos_build_dir)
-
     if is_root
+        backends = [getproperty(Kokkos, backend) for backend in kokkos_backends]
+        Kokkos.set_backends(backends)
+        Kokkos.set_view_types([ieee_bits == 64 ? Float64 : Float32])
+        Kokkos.set_build_dir(kokkos_build_dir)
         Kokkos.load_wrapper_lib()  # All compilation (if any) of the C++ wrapper happens here
     end
 
     MPI.Barrier(MPI.COMM_WORLD)
 
-    rank != 0 && Kokkos.load_wrapper_lib(; no_compilation=true, no_git=true)
+    !is_root && Kokkos.load_wrapper_lib(; no_compilation=true, no_git=true)
     Kokkos.initialize()
 end
 
@@ -497,7 +494,9 @@ function build_params(test, domain;
         axis_splitting, 
         maxtime, maxcycle, silent, output_file, write_output, write_ghosts, write_slices, output_precision, 
         measure_time,
-        use_threading, use_simd, use_gpu, device=gpu, block_size, use_MPI, px, py, 
+        use_threading, use_simd, use_gpu, device=gpu, block_size,
+        use_kokkos, cmake_options,
+        use_MPI, px, py,
         reorder_grid, async_comms,
         compare, is_ref=compare_ref, comparison_tolerance=comparison_tol)
 end
@@ -585,6 +584,12 @@ function run_armon(params::ArmonParameters; for_precompilation=false)
 
         total_time_contrib = merge_time_contribution(total_time_contrib, stats.timer)
 
+        if params.use_kokkos
+            # The size of a Kokkos.View is unknown to the GC, which in turn will never free the view
+            # to free memory. We must force a full GC pass to clear memory.
+            GC.gc(true)
+        end
+
         current_repeats += 1
     end
 
@@ -603,8 +608,8 @@ function do_measure(data_file_name, test, cells, splitting)
     )
 
     @printf(" - ")
-    length(string(tests)) > 1     && @printf("%-4s ", string(test))
-    length(string(splitting)) > 1 && @printf("%-14s ", string(splitting))
+    length(tests) > 1          && @printf("%-4s ", string(test))
+    length(axis_splitting) > 1 && @printf("%-14s ", string(splitting))
     @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
 
     if limit_to_max_mem
@@ -661,8 +666,8 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
 
     if is_root
         @printf(" - (%2dx%-2d) ", px, py)
-        length(string(tests)) > 1     && @printf("%-4s ", string(test))
-        length(string(splitting)) > 1 && @printf("%-14s ", string(splitting))
+        length(tests) > 1          && @printf("%-4s ", string(test))
+        length(axis_splitting) > 1 && @printf("%-14s ", string(splitting))
         @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
     end
 

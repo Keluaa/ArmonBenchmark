@@ -800,6 +800,7 @@ function create_all_data_files(measure::MeasureParams, steps::Vector{JobStep};
             file_name_extra, legend = build_armon_data_file_name(measure,
                 armon_params.test, armon_params.axis_splitting, process_grid)
 
+            legend = step.legend * legend
             legend = replace(legend, '_' => "\\_")  # '_' alone makes a subscript in gnuplot
 
             if step.perf_plot.do_plot
