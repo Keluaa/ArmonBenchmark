@@ -37,6 +37,7 @@ use_kokkos = false
 cmake_options = []
 kokkos_backends = [:Serial, :OpenMP]
 kokkos_build_dir = missing
+print_kokkos_threads_affinity = false
 block_size = 1024
 gpu = :CUDA
 threads_places = :cores
@@ -201,6 +202,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--kokkos-build-dir"
         global kokkos_build_dir = ARGS[i+1]
+        global i += 1
+    elseif arg == "--print-kokkos-thread-affinity"
+        global print_kokkos_threads_affinity = parse(Bool, ARGS[i+1])
         global i += 1
 
     # 2D only params
@@ -391,6 +395,15 @@ else
     ENV["OMP_PLACES"] = OMP_PLACES
     ENV["OMP_PROC_BIND"] = OMP_PROC_BIND
     ENV["OMP_NUM_THREADS"] = OMP_NUM_THREADS
+
+    if print_kokkos_threads_affinity
+        println("Kokkos threads bind with:")
+        println("OMP_PLACES = ", ENV["OMP_PLACES"])
+        println("OMP_PROC_BIND = ", ENV["OMP_PROC_BIND"])
+        println("OMP_NUM_THREADS = ", ENV["OMP_NUM_THREADS"])
+        ENV["OMP_DISPLAY_ENV"] = true
+        ENV["OMP_DISPLAY_AFFINITY"] = true
+    end
 end
 
 if verbose_MPI || !isempty(file_MPI_dump)
@@ -470,6 +483,13 @@ if use_kokkos
 
     !is_root && Kokkos.load_wrapper_lib(; no_compilation=true, no_git=true)
     Kokkos.initialize()
+
+    if print_kokkos_threads_affinity
+        println("Kokkos max threads: ", Kokkos.Spaces.BackendFunctions.omp_get_max_threads())
+        println("Kokkos OpenMP threads affinity:")
+        println(Kokkos.Spaces.BackendFunctions.omp_capture_affinity())
+        threadinfo(; color=false)
+    end
 end
 
 #
