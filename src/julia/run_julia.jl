@@ -351,12 +351,17 @@ if use_gpu
         gpu_index = 0
     end
 
-    # We must select a GPU before initializing MPI
-    if use_MPI && gpu == :ROCM
-        @warn "ROCM is, for now, not MPI aware"
-        # TODO: select ROC device in the same way as for CUDA
-    else
+    if gpu === :ROCM
+        using AMDGPU
+    elseif gpu === :CUDA
         using CUDA
+    end
+
+    # We must select a GPU before initializing MPI
+    if use_MPI && gpu === :ROCM
+        gpu_index %= length(AMDGPU.devices())
+        AMDGPU.default_device_id!(gpu_index + 1)
+    elseif gpu === :CUDA
         gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
         CUDA.device!(gpu_index)
     end
@@ -474,9 +479,10 @@ if use_kokkos
     if is_root
         backends = [getproperty(Kokkos, backend) for backend in kokkos_backends]
         Kokkos.set_backends(backends)
-        Kokkos.set_view_types([ieee_bits == 64 ? Float64 : Float32])
         Kokkos.set_build_dir(kokkos_build_dir)
         Kokkos.load_wrapper_lib()  # All compilation (if any) of the C++ wrapper happens here
+    else
+        Kokkos.set_build_dir(kokkos_build_dir; local_only=true)
     end
 
     MPI.Barrier(MPI.COMM_WORLD)
@@ -485,9 +491,9 @@ if use_kokkos
     Kokkos.initialize()
 
     if print_kokkos_threads_affinity
-        println("Kokkos max threads: ", Kokkos.Spaces.BackendFunctions.omp_get_max_threads())
+        println("Kokkos max threads: ", Kokkos.BackendFunctions.omp_get_max_threads())
         println("Kokkos OpenMP threads affinity:")
-        println(Kokkos.Spaces.BackendFunctions.omp_capture_affinity())
+        println(Kokkos.BackendFunctions.omp_capture_affinity())
         threadinfo(; color=false)
     end
 end
@@ -559,10 +565,8 @@ end
 
 
 function get_gpu_max_mem()
-    if gpu == :ROCM
-        is_root && @warn "AMDGPU.jl doesn't know how much memory there is. Using the a default value of 32GB" maxlog=1
-        # TODO: max memory is available in the latest versions of AMDGPU.jl 
-        return 32*10^9
+    if gpu === :ROCM
+        return AMDGPU.Runtime.Mem.info()[2]
     else
         total_mem = CUDA.Mem.info()[2]
         return total_mem
