@@ -86,6 +86,7 @@ function build_job_step(measure::MeasureParams,
     options[:tests] = measure.tests_list
     options[:axis_splitting] = measure.axis_splitting
     options[:min_acquisition] = measure.min_acquisition_time
+    options[:cmake_options] = measure.cmake_options
 
     perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
     time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
@@ -159,6 +160,12 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
     if step.energy_plot.do_plot
         append!(armon_options, [
             "--repeats-count-file", step.energy_plot.data_file * ".TMP"
+        ])
+    end
+
+    if !isempty(step.options[:cmake_options])
+        append!(armon_options, [
+            "--extra-cmake-options", step.options[:cmake_options]
         ])
     end
 

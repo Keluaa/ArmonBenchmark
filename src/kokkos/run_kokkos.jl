@@ -37,6 +37,7 @@ mutable struct KokkosOptions
     min_acquisition_time::Int
     repeats_count_file::String
     compiler::String
+    extra_cmake_options::Vector{String}
 end
 
 
@@ -59,7 +60,7 @@ function KokkosOptions(;
         dimension = 2, axis_splitting = [], tests = [], cells_list = [],
         base_file_name = "", gnuplot_script = "", repeats = 1, min_acquisition_time = 0,
         repeats_count_file = "",
-        compiler = "clang")
+        compiler = "clang", extra_cmake_options = [])
     return KokkosOptions(
         scheme, riemann, riemann_limiter,
         nghost, cfl, Dt, maxtime, maxcycle,
@@ -70,7 +71,7 @@ function KokkosOptions(;
         dimension, axis_splitting, tests, cells_list,
         base_file_name, gnuplot_script, repeats, min_acquisition_time,
         repeats_count_file,
-        compiler
+        compiler, extra_cmake_options
     )
 end
 
@@ -90,7 +91,7 @@ function parse_arguments(args::Vector{String})
     i = 1
     while i <= length(args)
         arg = args[i]
-    
+
         # Solver params
         if arg == "-s"
             options.scheme = replace(args[i+1], '-' => '_')
@@ -125,7 +126,7 @@ function parse_arguments(args::Vector{String})
         elseif arg == "--nghost"
             options.nghost = parse(Int, args[i+1])
             i += 1
-    
+
         # Solver output params
         elseif arg == "--verbose"
             options.silent = parse(Int, args[i+1])
@@ -139,7 +140,7 @@ function parse_arguments(args::Vector{String})
         elseif arg == "--write-ghosts"
             options.write_ghosts = parse(Bool, args[i+1])
             i += 1
-    
+
         # Multithreading params
         elseif arg == "--use-simd"
             options.use_simd = parse(Bool, args[i+1])
@@ -208,6 +209,10 @@ function parse_arguments(args::Vector{String})
         # Kokkos backend options
         elseif arg == "--compiler"
             options.compiler = args[i+1]
+            i += 1
+
+        elseif arg == "--extra-cmake-options"
+            options.extra_cmake_options = split(args[i+1], ';') .|> strip
             i += 1
 
         else
@@ -294,6 +299,8 @@ function init_cmake(options::KokkosOptions)
         ])
     end
 
+    append!(cmake_options, options.extra_cmake_options)
+
     if dim == 2
         target_exe *= "_2D"
     end
@@ -305,14 +312,14 @@ function init_cmake(options::KokkosOptions)
 
     run_cmd_print_on_error(Cmd(`cmake $cmake_options ..`; env=cmake_env, dir=build_dir))
     run_cmd_print_on_error(Cmd(`make $make_options clean`; env=cmake_env, dir=build_dir))
-    
+
     return build_dir, target_exe
 end
 
 
 function compile_backend(build_dir, target_exe)
     # TODO: put compilation files in a tmp dir in the script dir named with the job ID
-    println("Compiling Kokkkos...")
+    println("Compiling Kokkos...")
     run_cmd_print_on_error(Cmd(`make $make_options $target_exe`; env=cmake_env, dir=build_dir))
     exe_path = build_dir * "/src/$target_exe"
     if !isfile(exe_path)
