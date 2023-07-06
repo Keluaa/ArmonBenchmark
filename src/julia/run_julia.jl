@@ -602,10 +602,16 @@ end
 
 
 function free_memory_if_needed(params::ArmonParameters)
-    mem_info = Armon.device_memory_info(params)
+    mem_info = Armon.memory_info(params)
     mem_required = Armon.memory_required(params)
     if mem_info.free < mem_info.total * 0.05 || mem_info.free < mem_required * 1.05
         GC.gc(true)
+    end
+    if is_root && mem_required * 1.05 > mem_info.total
+        req_gb   = @sprintf("%.2f GB", mem_required   / 1e9)
+        total_gb = @sprintf("%.2f GB", mem_info.total / 1e9)
+        @warn "The device has $total_gb of memory in total, but $req_gb are needed. \
+               Accounting for overhead, the solver might not be able to allocate all data." maxlog=1
     end
 end
 
