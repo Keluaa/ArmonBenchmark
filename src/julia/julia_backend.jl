@@ -132,7 +132,7 @@ function build_backend_command(step::JobStep, ::Val{Julia})
     armon_options = [
         "julia", "-t", step.threads,
         "-O3", "--check-bounds=no",
-        "--project=$(backend_run_dir(step.backend))"
+        "--project=$(@__DIR__())"
     ]
 
     if !step.options[:in_sub_script]
