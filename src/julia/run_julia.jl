@@ -595,6 +595,15 @@ function continue_acquisition(current_repeats, acquisition_start, for_precompila
 end
 
 
+function free_memory_if_needed(params::ArmonParameters)
+    mem_info = Armon.device_memory_info(params)
+    mem_required = Armon.memory_required(params)
+    if mem_info.free < mem_info.total * 0.05 || mem_info.free < mem_required * 1.05
+        GC.gc(true)
+    end
+end
+
+
 function run_armon(params::ArmonParameters; for_precompilation=false)
     vals_cells_per_sec = Vector{Float64}()
     total_time_contrib = nothing
@@ -602,17 +611,13 @@ function run_armon(params::ArmonParameters; for_precompilation=false)
     acquisition_start = time_ns()
 
     while continue_acquisition(current_repeats, acquisition_start, for_precompilation)
+        free_memory_if_needed(params)
+
         stats = armon(params)
 
         push!(vals_cells_per_sec, stats.giga_cells_per_sec)
 
         total_time_contrib = merge_time_contribution(total_time_contrib, stats.timer)
-
-        if params.use_kokkos
-            # The size of a Kokkos.View is unknown to the GC, which in turn will never free the view
-            # to free memory. We must force a full GC pass to clear memory.
-            GC.gc(true)
-        end
 
         current_repeats += 1
     end
