@@ -195,7 +195,7 @@ while i <= length(ARGS)
         global use_kokkos = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--cmake-options"
-        global cmake_options = split(ARGS[i+1], ';')
+        global cmake_options = split(ARGS[i+1], ';') .|> strip
         global i += 1
     elseif arg == "--kokkos-backends"
         global kokkos_backends = split(ARGS[i+1], ',') .|> strip .|> Symbol
@@ -820,16 +820,23 @@ end
     # We redirect stdout so that in case 'silent < 5', output functions are pre-compiled and so they 
     # don't influence the timing results.
     # 'devnull' is not used here since 'println' and others will not go through their normal code paths.
-    dummy_pipe = Pipe()
-    redirect_stdout(dummy_pipe) do
-        run_armon(build_params(test, (240*proc_domains[1][1], 240*proc_domains[1][2]);
-            ieee_bits, riemann, scheme, cfl, 
-            Dt, cst_dt, dt_on_even_cycles, axis_splitting=axis_splitting[1], 
-            maxtime, maxcycle=10, silent, output_file, write_output=false,
-            use_threading, use_simd, 
-            use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
-            reorder_grid, async_comms
-        ); for_precompilation=true)
+    out_pipe = Pipe()
+    try
+        redirect_stdout(out_pipe) do
+            run_armon(build_params(test, (240*proc_domains[1][1], 240*proc_domains[1][2]);
+                ieee_bits, riemann, scheme, cfl, 
+                Dt, cst_dt, dt_on_even_cycles, axis_splitting=axis_splitting[1], 
+                maxtime, maxcycle=10, silent, output_file, write_output=false,
+                use_threading, use_simd, 
+                use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
+                reorder_grid, async_comms
+            ); for_precompilation=true)
+        end
+    catch e
+        println("Precompilation error!")
+        close(out_pipe.in)
+        println(String(read(out_pipe)))
+        rethrow(e)
     end
 end
 
@@ -901,4 +908,10 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
 
         update_plot(gnuplot_hist_script)
     end
+end
+
+
+if use_kokkos
+    GC.gc(true)  # Ensure that all views have been finalized
+    Kokkos.finalize()
 end

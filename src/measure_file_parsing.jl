@@ -76,7 +76,7 @@ function parse_measure_params(file_line_parser, script_dir)
             error("Missing '=' at line $(i)")
         end
 
-        option, value = split(line, '=') .|> strip
+        option, value = split(line, '='; limit=2) .|> strip
         if option == "backends"
             raw_backends = split(value, ',') .|> strip .|> lowercase
             backends = []
