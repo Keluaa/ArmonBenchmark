@@ -57,6 +57,7 @@ mutable struct MeasureParams
     use_kokkos::Vector{Bool}
     kokkos_backends::Vector{String}
     cmake_options::String
+    kokkos_version::String
 
     # Armon params
     cycles::Int

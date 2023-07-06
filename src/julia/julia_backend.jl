@@ -106,6 +106,7 @@ function build_job_step(measure::MeasureParams,
     options[:limit_to_max_mem] = measure.limit_to_max_mem
     options[:min_acquisition] = measure.min_acquisition_time
     options[:cmake_options] = measure.cmake_options
+    options[:kokkos_version] = measure.kokkos_version
 
     perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
     time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
@@ -179,6 +180,7 @@ function build_backend_command(step::JobStep, ::Val{Julia})
 
     if step.backend.use_kokkos
         push!(armon_options, "--kokkos-backends", step.backend.kokkos_backends)
+        push!(armon_options, "--kokkos-version", options[:kokkos_version])
 
         if step.options[:in_sub_script]
             push!(armon_options, "--kokkos-build-dir", "€KOKKOS_BUILD_DIR")

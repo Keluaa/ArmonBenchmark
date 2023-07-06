@@ -51,6 +51,7 @@ function parse_measure_params(file_line_parser, script_dir)
     use_kokkos = [false]
     cmake_options = ""
     kokkos_backends = ["Serial,OpenMP"]
+    kokkos_version = "4.0.00"
 
     perf_plot = true
     gnuplot_script = nothing
@@ -219,6 +220,8 @@ function parse_measure_params(file_line_parser, script_dir)
             cmake_options = value
         elseif option == "kokkos_backends"
             kokkos_backends = split(value, ';') .|> strip
+        elseif option == "kokkos_version"
+            kokkos_version = value
         else
             error("Unknown option: $option, at line $i")
         end
@@ -302,7 +305,7 @@ function parse_measure_params(file_line_parser, script_dir)
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,
-        use_kokkos, kokkos_backends, cmake_options,
+        use_kokkos, kokkos_backends, cmake_options, kokkos_version,
         cycles, cells_list, domain_list, process_grids, process_grid_ratios, tests_list,
         axis_splitting, params_and_legends,
         name, script_dir, repeats, log_scale, error_bars, plot_title,

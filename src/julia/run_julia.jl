@@ -37,6 +37,7 @@ use_kokkos = false
 cmake_options = []
 kokkos_backends = [:Serial, :OpenMP]
 kokkos_build_dir = missing
+kokkos_version = nothing
 print_kokkos_threads_affinity = false
 block_size = 1024
 gpu = :CUDA
@@ -205,6 +206,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--print-kokkos-thread-affinity"
         global print_kokkos_threads_affinity = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--kokkos-version"
+        global kokkos_version = ARGS[i+1]
         global i += 1
 
     # 2D only params
@@ -480,6 +484,8 @@ if use_kokkos
         backends = [getproperty(Kokkos, backend) for backend in kokkos_backends]
         Kokkos.set_backends(backends)
         Kokkos.set_build_dir(kokkos_build_dir)
+        Kokkos.set_cmake_options(cmake_options)
+        !isnothing(kokkos_version) && Kokkos.set_kokkos_version(kokkos_version)
         Kokkos.load_wrapper_lib()  # All compilation (if any) of the C++ wrapper happens here
     else
         Kokkos.set_build_dir(kokkos_build_dir; local_only=true)
