@@ -103,7 +103,6 @@ function build_job_step(measure::MeasureParams,
     options[:tests] = measure.tests_list
     options[:axis_splitting] = measure.axis_splitting
     options[:use_MPI] = measure.use_MPI
-    options[:limit_to_max_mem] = measure.limit_to_max_mem
     options[:min_acquisition] = measure.min_acquisition_time
     options[:cmake_options] = measure.cmake_options
     options[:kokkos_version] = measure.kokkos_version
@@ -170,7 +169,6 @@ function build_backend_command(step::JobStep, ::Val{Julia})
         "--repeats", step.repeats,
         "--verbose", step.options[:verbose],
         "--use-mpi", step.options[:use_MPI],
-        "--limit-to-mem", step.options[:limit_to_max_mem],
         "--min-acquisition-time", step.options[:min_acquisition],
         "--async-comms", step.backend.async_comms,
         "--splitting", join(step.options[:axis_splitting], ','),
@@ -180,7 +178,7 @@ function build_backend_command(step::JobStep, ::Val{Julia})
 
     if step.backend.use_kokkos
         push!(armon_options, "--kokkos-backends", step.backend.kokkos_backends)
-        push!(armon_options, "--kokkos-version", options[:kokkos_version])
+        push!(armon_options, "--kokkos-version", step.options[:kokkos_version])
 
         if step.options[:in_sub_script]
             push!(armon_options, "--kokkos-build-dir", "€KOKKOS_BUILD_DIR")

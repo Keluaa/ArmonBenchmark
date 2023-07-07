@@ -78,7 +78,6 @@ mutable struct MeasureParams
     plot_title::String
     verbose::Bool
     use_max_threads::Bool
-    limit_to_max_mem::Bool
     track_energy::Bool
     energy_references::Int
     process_scaling::Bool

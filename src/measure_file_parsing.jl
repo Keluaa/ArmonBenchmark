@@ -45,7 +45,6 @@ function parse_measure_params(file_line_parser, script_dir)
     plot_title = ""
     verbose = false
     use_max_threads = false
-    limit_to_max_mem = false
     process_scaling = false
     min_acquisition_time = 0
     use_kokkos = [false]
@@ -194,8 +193,6 @@ function parse_measure_params(file_line_parser, script_dir)
             verbose = parse(Bool, value)
         elseif option == "use_max_threads"
             use_max_threads = parse(Bool, value)
-        elseif option == "limit_to_max_mem"
-            limit_to_max_mem = parse(Bool, value)
         elseif option == "track_energy"
             track_energy = parse(Bool, value)
         elseif option == "energy_references"
@@ -309,7 +306,7 @@ function parse_measure_params(file_line_parser, script_dir)
         cycles, cells_list, domain_list, process_grids, process_grid_ratios, tests_list,
         axis_splitting, params_and_legends,
         name, script_dir, repeats, log_scale, error_bars, plot_title,
-        verbose, use_max_threads, limit_to_max_mem,
+        verbose, use_max_threads,
         track_energy, energy_references, process_scaling, min_acquisition_time,
         perf_plot, gnuplot_script, plot_file,
         time_histogram, flatten_time_dims, gnuplot_hist_script, hist_plot_file,

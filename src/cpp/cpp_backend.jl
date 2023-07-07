@@ -57,10 +57,6 @@ function build_job_step(measure::MeasureParams,
         error("The C++ backend doesn't support MPI")
     end
 
-    if measure.limit_to_max_mem
-        @warn "The C++ backend doesn't support the 'limit_to_max_mem'" maxlog=1
-    end
-
     if measure.time_histogram
         @warn "The C++ backend doesn't support the 'time_histogram'" maxlog=1
     end

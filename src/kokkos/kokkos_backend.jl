@@ -57,10 +57,6 @@ function build_job_step(measure::MeasureParams,
         error("The Kokkos backend doesn't support MPI yet")
     end
 
-    if measure.limit_to_max_mem
-        @warn "The Kokkos backend doesn't support the 'limit_to_max_mem'" maxlog=1
-    end
-
     if measure.time_histogram
         @warn "The Kokkos backend doesn't support the 'time_histogram'" maxlog=1
     end

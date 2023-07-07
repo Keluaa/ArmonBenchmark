@@ -54,8 +54,6 @@ axis_splitting = []
 tests = []
 cells_list = []
 
-limit_to_max_mem = false
-
 use_MPI = true
 verbose_MPI = false
 file_MPI_dump = ""
@@ -271,9 +269,6 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--repeats"
         global repeats = parse(Int, ARGS[i+1])
-        global i += 1
-    elseif arg == "--limit-to-mem"
-        global limit_to_max_mem = parse(Bool, ARGS[i+1])
         global i += 1
     elseif arg == "--no-precomp"
         global no_precompilation = parse(Bool, ARGS[i+1])
@@ -607,12 +602,17 @@ function free_memory_if_needed(params::ArmonParameters)
     if mem_info.free < mem_info.total * 0.05 || mem_info.free < mem_required * 1.05
         GC.gc(true)
     end
-    if is_root && mem_required * 1.05 > mem_info.total
-        req_gb   = @sprintf("%.2f GB", mem_required   / 1e9)
-        total_gb = @sprintf("%.2f GB", mem_info.total / 1e9)
-        @warn "The device has $total_gb of memory in total, but $req_gb are needed. \
-               Accounting for overhead, the solver might not be able to allocate all data." maxlog=1
+    if mem_required * 1.05 > mem_info.total
+        if is_root
+            println("skipped because of memory requirements")
+            req_gb   = @sprintf("%.2f GB", mem_required   / 1e9)
+            total_gb = @sprintf("%.2f GB", mem_info.total / 1e9)
+            @warn "The device has $total_gb of memory in total, but $req_gb are needed. \
+                Accounting for overhead, the solver might not be able to allocate all data." maxlog=1
+        end
+        return true
     end
+    return false
 end
 
 
@@ -623,7 +623,7 @@ function run_armon(params::ArmonParameters; for_precompilation=false)
     acquisition_start = time_ns()
 
     while continue_acquisition(current_repeats, acquisition_start, for_precompilation)
-        free_memory_if_needed(params)
+        free_memory_if_needed(params) && break
 
         stats = armon(params)
 
@@ -653,22 +653,14 @@ function do_measure(data_file_name, test, cells, splitting)
     length(axis_splitting) > 1 && @printf("%-14s ", string(splitting))
     @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
 
-    if limit_to_max_mem
-        max_mem = params.use_gpu ? get_gpu_max_mem() : get_cpu_max_mem()
-        max_mem *= 0.95  # Leave 5% of memory available to account for the Julia runtime, OS, etc...
-
-        variables_count = fieldcount(Armon.ArmonData)
-        data_size = variables_count * params.nbcell * sizeof(typeof(params.Dt))
-
-        if data_size > max_mem
-            @printf("skipped because of memory: %.1f > %.1f GB\n", data_size / 10^9, max_mem / 10^9)
-            return nothing, nothing
-        end
-    end
-
     time_start = time_ns()
     actual_repeats, vals_cells_per_sec, time_contrib = run_armon(params)
     time_end = time_ns()
+
+    if actual_repeats == 0
+        # Measure skipped because not enough memory is available
+        return nothing, nothing
+    end
 
     duration = (time_end - time_start) / 1.0e9
 
@@ -712,26 +704,15 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
         @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
     end
 
-    if limit_to_max_mem
-        max_mem = params.use_gpu ? get_gpu_max_mem() : get_cpu_max_mem()
-        max_mem *= 0.95  # Leave 5% of memory available to account for the Julia runtime, MPI, OS, etc...
-
-        variables_count = fieldcount(Armon.ArmonData)
-        data_size = variables_count * params.nbcell * sizeof(typeof(params.Dt))
-
-        # TODO : Account for resource usage overlap, for GPUs and multi-socket nodes
-
-        if data_size > max_mem
-            is_root && @printf("skipped because of memory: %.1f > %.1f GB\n", 
-                data_size / 10^9 * params.proc_size, max_mem / 10^9 * params.proc_size)
-            return nothing, nothing
-        end
-    end
-
     time_start = time_ns()
     actual_repeats, vals_cells_per_sec, time_contrib = run_armon(params)
     MPI.Barrier(MPI.COMM_WORLD)
     time_end = time_ns()
+
+    if actual_repeats == 0
+        # Measure skipped because not enough memory is available
+        return nothing, nothing
+    end
 
     duration = (time_end - time_start) / 1.0e9
 
