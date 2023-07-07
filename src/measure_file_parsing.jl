@@ -248,8 +248,8 @@ function parse_measure_params(file_line_parser, script_dir)
         gnuplot_script = name * ".plot"
     end
     if isnothing(plot_file)
-        # By default, same name as the plot script but as a'.pdf' file
-        plot_file = gnuplot_script[1:findlast('.', gnuplot_script)-1] * ".pdf"
+        # By default, same name as the plot script but without the extension
+        plot_file = splitext(gnuplot_script)[1]
     end
 
     if !isnothing(process_grid_ratios) && any(dimension .== 1)
@@ -289,13 +289,13 @@ function parse_measure_params(file_line_parser, script_dir)
     plot_file = joinpath(rel_plots_dir, plot_file)
 
     gnuplot_hist_script = joinpath(rel_plot_scripts_dir, name * "_hist.plot")
-    hist_plot_file = joinpath(rel_plots_dir, name * "_hist.pdf")
+    hist_plot_file = joinpath(rel_plots_dir, name * "_hist")
 
     gnuplot_MPI_script = joinpath(rel_plot_scripts_dir, name * "_MPI_time.plot")
-    time_MPI_plot_file = joinpath(rel_plots_dir, name * "_MPI_time.pdf")
+    time_MPI_plot_file = joinpath(rel_plots_dir, name * "_MPI_time")
 
     energy_script = joinpath(rel_plot_scripts_dir, name * "_energy.plot")
-    energy_plot_file = joinpath(rel_plots_dir, name * "_energy.pdf")
+    energy_plot_file = joinpath(rel_plots_dir, name * "_energy")
 
     return MeasureParams(
         device, node, distributions, processes, node_count, processes_per_node, max_time, use_MPI,
