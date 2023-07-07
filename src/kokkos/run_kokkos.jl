@@ -38,6 +38,7 @@ mutable struct KokkosOptions
     repeats_count_file::String
     compiler::String
     extra_cmake_options::Vector{String}
+    kokkos_version::String
 end
 
 
@@ -60,7 +61,7 @@ function KokkosOptions(;
         dimension = 2, axis_splitting = [], tests = [], cells_list = [],
         base_file_name = "", gnuplot_script = "", repeats = 1, min_acquisition_time = 0,
         repeats_count_file = "",
-        compiler = "clang", extra_cmake_options = [])
+        compiler = "clang", extra_cmake_options = [], kokkos_version = "4.0.00")
     return KokkosOptions(
         scheme, riemann, riemann_limiter,
         nghost, cfl, Dt, maxtime, maxcycle,
@@ -71,7 +72,7 @@ function KokkosOptions(;
         dimension, axis_splitting, tests, cells_list,
         base_file_name, gnuplot_script, repeats, min_acquisition_time,
         repeats_count_file,
-        compiler, extra_cmake_options
+        compiler, extra_cmake_options, kokkos_version
     )
 end
 
@@ -214,6 +215,9 @@ function parse_arguments(args::Vector{String})
         elseif arg == "--extra-cmake-options"
             options.extra_cmake_options = split(args[i+1], ';') .|> strip
             i += 1
+        elseif arg == "--kokkos-version"
+            options.kokkos_version = args[i+1]
+            i += 1
 
         else
             error("Wrong option: ", arg)
@@ -242,6 +246,25 @@ function run_cmd_print_on_error(cmd::Cmd)
             seekstart(file)
             println("ERROR:\n", read(file, String))
             rethrow()
+        end
+    end
+end
+
+
+function init_kokkos_version(version)
+    kokkos_dir = joinpath(@__DIR__, "..", "..", "kokkos", "modules", "kokkos")
+
+    fetch = Cmd(`git fetch`; dir=kokkos_dir)
+    get_version = Cmd(`git describe --tags --abbrev=0`; dir=kokkos_dir)
+    checkout_tag = Cmd(`git checkout tags/$version`; dir=kokkos_dir)
+
+    current_version = readchomp(get_version)
+    if current_version != version
+        run_cmd_print_on_error(fetch)
+        run_cmd_print_on_error(checkout_tag)
+        current_version = readchomp(get_version)
+        if current_version != version
+            error("Could not checkout Kokkos $version, stuck on $current_version")
         end
     end
 end
@@ -310,6 +333,7 @@ function init_cmake(options::KokkosOptions)
     mkpath(build_dir)
     rm(build_dir * "/CMakeCache.txt"; force=true)
 
+    init_kokkos_version(options.kokkos_version)
     run_cmd_print_on_error(Cmd(`cmake $cmake_options ..`; env=cmake_env, dir=build_dir))
     run_cmd_print_on_error(Cmd(`make $make_options clean`; env=cmake_env, dir=build_dir))
 

@@ -25,7 +25,7 @@ function run_backend_msg(measure::MeasureParams, params::KokkosParams, cluster::
      - threads binding: $(params.omp_proc_bind), places: $(params.omp_places)
      - $(params.use_simd == 1 ? "with" : "without") SIMD
      - $(params.dimension)D
-     - compiled with $(params.compiler)
+     - compiled with $(params.compiler) with Kokkos v$(measure.kokkos_version)
      - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
      - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
     """
@@ -83,6 +83,7 @@ function build_job_step(measure::MeasureParams,
     options[:axis_splitting] = measure.axis_splitting
     options[:min_acquisition] = measure.min_acquisition_time
     options[:cmake_options] = measure.cmake_options
+    options[:kokkos_version] = measure.kokkos_version
 
     perf_plot = PlotInfo(base_file_name * "%s_perf.csv", measure.perf_plot, measure.gnuplot_script)
     time_hist = PlotInfo(base_file_name * "%s_hist.csv", measure.time_histogram, measure.gnuplot_hist_script)
@@ -164,6 +165,10 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
             "--extra-cmake-options", step.options[:cmake_options]
         ])
     end
+
+    append!(armon_options, [
+        "--kokkos-version", step.options[:kokkos_version]
+    ])
 
     additional_options, _, _ = step.backend.options
     append!(armon_options, additional_options)
