@@ -14,9 +14,11 @@ if (strlen(script_dir) > 0) { cd script_dir; cd ".." }
 # the readability of the output. If `LATEX_TEST=1` then the output is in pdf but with the same
 # settings.
 const IF_LATEX_OUTPUT = """
-IF_LATEX = system("echo \$LATEX_PLOTS") == 1
-LATEX_TEST = system("echo \$LATEX_TEST") == 1
-wrap_str(s) = (IF_LATEX ? sprintf("$%s$", s) : s)
+IF_LATEX = system("echo \$LATEX_PLOTS")
+IF_LATEX = IF_LATEX eq "1"
+LATEX_TEST = system("echo \$LATEX_TEST")
+LATEX_TEST = LATEX_TEST eq "1"
+wrap_str(s) = (IF_LATEX ? sprintf("\$%s\$", s) : s)
 ###"""
 
 const LOG_SCALE_CMD = """
@@ -34,7 +36,7 @@ if (IF_LATEX) {
     } else {
         set output '$graph_file_name.tex'
     }
-    set ylabel 'Performance [cell-cycles/s $\\times 10^9$]' offset 1,0,0
+    set ylabel 'Performance [cell-cycles/s \$\\times 10^9\$]' offset 1,0,0
 } else {
     set terminal pdfcairo color size 10in, 6in
     set output '$graph_file_name.pdf'

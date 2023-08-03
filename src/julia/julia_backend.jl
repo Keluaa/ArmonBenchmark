@@ -251,6 +251,11 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         legend *= ", $async_str"
     end
 
+    if length(measure.block_sizes) > 1 && !params.use_kokkos
+        name *= "_$(params.block_size)bs"
+        legend *= ", $(params.block_size) block size"
+    end
+
     if length(measure.use_kokkos) > 1
         name *= "_" * (params.use_kokkos ? "" : "no_") * "kokkos"
         legend *= ", " * (params.use_kokkos ? "with" : "without") * " kokkos"

@@ -49,6 +49,7 @@ output_precision = nothing
 compare = false
 compare_ref = false
 comparison_tol = 1e-10
+check_result = false
 
 axis_splitting = []
 tests = []
@@ -153,6 +154,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--comparison-tolerance"
         global comparison_tol = parse(Float64, ARGS[i+1])
+        global i += 1
+    elseif arg == "--check-result"
+        global check_result = parse(Bool, ARGS[i+1])
         global i += 1
 
     # Multithreading params
@@ -340,7 +344,7 @@ prev_global_logger = Base.global_logger(muted_cuda_logger)
 # GPU selection
 #
 
-if use_gpu
+if use_gpu && !use_kokkos
     # If SLURM is used to dispatch jobs, we can use the local ID of the process to uniquely 
     # assign the GPUs to each process.
     gpu_index = parse(Int, get(ENV, "SLURM_LOCALID", "-1"))
@@ -525,7 +529,8 @@ function build_params(test, domain;
         use_kokkos, cmake_options,
         use_MPI, px, py,
         reorder_grid, async_comms,
-        compare, is_ref=compare_ref, comparison_tolerance=comparison_tol)
+        compare, is_ref=compare_ref, comparison_tolerance=comparison_tol,
+        check_result)
 end
 
 
@@ -833,7 +838,8 @@ end
     catch e
         println("Precompilation error!")
         close(out_pipe.in)
-        println(String(read(out_pipe)))
+        out = String(read(out_pipe))
+        !isempty(out) && println(out)
         rethrow(e)
     end
 end

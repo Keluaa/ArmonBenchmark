@@ -871,7 +871,7 @@ function build_all_steps_of_measure(measure::MeasureParams, first_measure::Bool,
             comb_i += 1
             if first_measure && comb_i <= skip_first
                 continue
-            elseif comb_c > comb_count
+            elseif comb_c > comb_count - 1
                 return steps, true
             end
 
