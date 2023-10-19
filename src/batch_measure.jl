@@ -364,7 +364,7 @@ end
 
 
 function submit_script(script_path)
-    output = readchomp(`ccc_msub $script_path`)  # TODO: replace by `srun`
+    output = readchomp(`ccc_msub $script_path`)  # TODO: replace by `sbatch`
     println(script_path, " => ", output)
     job_id = match(r"\d+$", output)
     return isnothing(job_id) ? job_id : job_id.match
@@ -476,8 +476,6 @@ function create_sub_script(
 )
     script_name = measure.name * name_suffix * ".sh"
     script_path = joinpath(measure.script_dir, JOB_SCRIPS_DIR_NAME, script_name)
-    job_stdout_file = ""
-    job_stderr_file = ""
 
     open(script_path, "w") do script
         job_work_dir = abspath(measure.script_dir)
@@ -540,7 +538,7 @@ function create_sub_script(
 
     println("Created submission script '$script_name'")
 
-    return script_path, job_stdout_file, job_stderr_file
+    return script_path
 end
 
 
@@ -617,16 +615,14 @@ end
 function create_script_for_each_step(measure::MeasureParams, steps::Vector{JobStep}; header="")
     step_count = length(steps)
     paths = []
-    outputs = []
     for (i_step, step) in enumerate(steps)
         name_suffix = basename(step.base_file_name) |> splitext |> first
         name_suffix = "_" * replace(name_suffix, r"_+$" => "")
-        script_path, job_stdout, job_stderr = create_sub_script(measure, [step];
+        script_path = create_sub_script(measure, [step];
             header, name_suffix, step_count, step_idx_offset=i_step-1)
         push!(paths, script_path)
-        push!(outputs, (job_stdout, job_stderr))
     end
-    return paths, outputs
+    return paths
 end
 
 
@@ -900,7 +896,6 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
     end
 
     sub_scripts = []
-    sub_scripts_outputs = []
 
     no_overwrite = batch_options.no_overwrite
     no_plot_update = batch_options.no_plot_update
@@ -925,13 +920,11 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
         if measure.make_sub_script
             header = "==== Measurement $(i)/$(length(measures)): $(measure.name) ===="
             if one_script_per_step
-                script_paths, script_outputs = create_script_for_each_step(measure, job_steps; header)
+                script_paths = create_script_for_each_step(measure, job_steps; header)
                 append!(sub_scripts, script_paths)
-                append!(sub_scripts_outputs, script_outputs)
             else
-                script_path, job_stdout, job_stderr = create_sub_script(measure, job_steps; header)
+                script_path = create_sub_script(measure, job_steps; header)
                 push!(sub_scripts, script_path)
-                push!(sub_scripts_outputs, (job_stdout, job_stderr))
             end
         else
             run_job_steps(measure, job_steps)
@@ -944,13 +937,9 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
         # We submit the scripts once all of them have been created, in case there is any errors for
         # one of them
         open(RECENT_JOBS_FILE, "w") do recent_jobs
-            for (sub_script, script_outputs) in zip(sub_scripts, sub_scripts_outputs)
+            for sub_script in sub_scripts
                 job_id = submit_script(sub_script)
-                println(recent_jobs,
-                    job_id, "\t",
-                    replace(script_outputs[1], "%I" => job_id), "\t",
-                    replace(script_outputs[2], "%I" => job_id)
-                )
+                println(recent_jobs, job_id)
             end
         end
     end
