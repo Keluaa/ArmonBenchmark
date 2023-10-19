@@ -30,26 +30,30 @@ base_gnuplot_script_commands(graph_file_name, title, log_scale, legend_pos) = ""
 $GP_CD_TO_MEASUREMENT_DIR
 $IF_LATEX_OUTPUT
 if (IF_LATEX) {
-    set terminal epslatex color size 10cm, 8cm
     if (LATEX_TEST) {
-        set output '$graph_file_name.pdf'
+        set terminal pdfcairo color size 10cm, 8cm
+        set output '$graph_file_name.tex.pdf'
     } else {
+        set terminal epslatex color size 10cm, 8cm
         set output '$graph_file_name.tex'
     }
     set ylabel 'Performance [cell-cycles/s \$\\times 10^9\$]' offset 1,0,0
+    unset title
+    set key width -6  # Remove the blank region under the legend overlapping the grid
+    set key samplen 2
 } else {
     set terminal pdfcairo color size 10in, 6in
     set output '$graph_file_name.pdf'
     set ylabel 'Performance [cell-cycles/s ×10^9]'
+    set title "$title"
 }
 set xlabel 'Cells count'
-set title "$title"
 set key $legend_pos top
 set grid
 set yrange [0:]
-# TODO: more latex settings
 ln_w = (IF_LATEX ? 3 : 1)
 $(log_scale ? LOG_SCALE_CMD : "")
+set format y wrap_str("%.2f")
 plot """
 
 base_gnuplot_histogram_script_commands(graph_file_name, title) = """
@@ -67,14 +71,18 @@ base_gnuplot_MPI_time_script_commands(graph_file_name, title, log_scale, legend_
 $GP_CD_TO_MEASUREMENT_DIR
 $IF_LATEX_OUTPUT
 if (IF_LATEX) {
-    set terminal epslatex color size 10cm, 8cm
     if (LATEX_TEST) {
-        set output '$graph_file_name.pdf'
+        set terminal pdfcairo color size 10cm, 8cm
+        set output '$graph_file_name.tex.pdf'
     } else {
+        set terminal epslatex color size 10cm, 8cm
         set output '$graph_file_name.tex'
     }
     set ylabel 'Communications Time [sec]' offset 1,0,0
-    set y2label 'Communication Time / Total Time [\\%]'
+    set y2label 'Communication Time / Total Time [\\%]' offset -1,0,0
+    unset title
+    set key width -6  # Remove the blank region under the legend overlapping the grid
+    set key samplen 2
 } else {
     set terminal pdfcairo color size 10in, 6in
     set output '$graph_file_name.pdf'
@@ -93,16 +101,19 @@ set my2tics
 set y2range [0:]
 ln_w = (IF_LATEX ? 3 : 1)
 $(log_scale ? LOG_SCALE_CMD : "")
+set format y wrap_str("%.2f")
+set format y2 wrap_str("%.0f")
 plot """
 
 base_gnuplot_energy_script_commands(graph_file_name, ref_commands, title, log_scale, legend_pos) = """
 $GP_CD_TO_MEASUREMENT_DIR
 $IF_LATEX_OUTPUT
 if (IF_LATEX) {
-    set terminal epslatex color size 10cm, 8cm
     if (LATEX_TEST) {
-        set output '$graph_file_name.pdf'
+        set terminal pdfcairo color size 10cm, 8cm
+        set output '$graph_file_name.tex.pdf'
     } else {
+        set terminal epslatex color size 10cm, 8cm
         set output '$graph_file_name.tex'
     }
     set ylabel 'Energy efficiency [µJ/cell-cycle]' offset 1,0,0
