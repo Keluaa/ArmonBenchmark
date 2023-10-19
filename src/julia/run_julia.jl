@@ -1,6 +1,7 @@
 
 using Printf
 using Statistics
+using Preferences
 using TimerOutputs
 
 
@@ -8,6 +9,8 @@ include(joinpath(@__DIR__, "openmp_utils.jl"))
 include(joinpath(@__DIR__, "../common_utils.jl"))
 
 armon_path = joinpath(@__DIR__, "../../julia/")
+
+armon_uuid = Base.UUID("b773a7a3-b593-48d6-82f6-54bf745a629b")
 
 #
 # Arguments parsing
@@ -74,6 +77,7 @@ time_histogram = false
 repeats = 1
 no_precompilation = false
 min_acquisition_time = 0.0
+manual_mem_management = false
 repeats_count_file = ""
 
 
@@ -83,6 +87,13 @@ if !isnothing(dim_index)
     dimension != 2 && error("Only 2D is supported for now")
     deleteat!(ARGS, [dim_index, dim_index+1])
 end
+
+
+preferences = Dict(
+    "use_std_lib_threads" => false,
+    "use_fast_math" => true,
+    "use_inbounds" => true,
+)
 
 
 i = 1
@@ -168,11 +179,7 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--use-std-threads"
         use_std_threads = parse(Bool, ARGS[i+1])
-        if use_std_threads
-            ENV["USE_STD_LIB_THREADS"] = "true"
-        else
-            ENV["USE_STD_LIB_THREADS"] = "false"
-        end
+        preferences["use_std_lib_threads"] = use_std_threads
         global i += 1
     elseif arg == "--threads-places"
         global threads_places = Symbol(ARGS[i+1])
@@ -280,6 +287,9 @@ while i <= length(ARGS)
     elseif arg == "--min-acquisition-time"
         global min_acquisition_time = parse(Float64, ARGS[i+1])
         global i += 1
+    elseif arg == "--manual-mem-management"
+        global manual_mem_management = parse(Bool, ARGS[i+1])
+        global i += 1
 
     # Measurement output params
     elseif arg == "--data-file"
@@ -315,6 +325,13 @@ if MPI_time_plot && !measure_time
 end
 
 min_acquisition_time *= 1e9  # sec to ns
+
+
+# Important: setting preferences systematically will ensure no preference from previous runs will
+# affect the current one.
+# TODO: check if preferences are susceptible to read/writes from other jobs. If so, move the project to the scratch dir of the job
+Preferences.set_preferences!(armon_uuid, preferences...; force=true)
+
 
 #
 # Muting mechanism for the 'no CUDA capable device detected' error of CUDA.jl 
@@ -518,7 +535,7 @@ function build_params(test, domain;
         silent, output_file, write_output,
         use_threading, use_simd, use_gpu, 
         use_MPI, px, py, reorder_grid, async_comms)
-    ArmonParameters(;
+    options = (;
         ieee_bits, riemann, scheme, projection, riemann_limiter,
         nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
         test=test, nx=domain[1], ny=domain[2],
@@ -526,11 +543,18 @@ function build_params(test, domain;
         maxtime, maxcycle, silent, output_file, write_output, write_ghosts, write_slices, output_precision, 
         measure_time,
         use_threading, use_simd, use_gpu, device=gpu, block_size,
-        use_kokkos, cmake_options,
+        use_kokkos,
         use_MPI, px, py,
         reorder_grid, async_comms,
         compare, is_ref=compare_ref, comparison_tolerance=comparison_tol,
-        check_result)
+        check_result
+    )
+
+    if use_kokkos
+        options = (; options..., cmake_options)
+    end
+
+    ArmonParameters(; options...)
 end
 
 
@@ -601,13 +625,28 @@ function continue_acquisition(current_repeats, acquisition_start, for_precompila
 end
 
 
-function free_memory_if_needed(params::ArmonParameters)
+function free_memory_if_needed(params::ArmonParameters, manual_mem_management, current_repeats)
+    # This is mainly here for GPU memory management, which is handled manually by the underlying
+    # packages. Julia sees GPU arrays as a single pointer on CPU RAM, which makes it difficult to be
+    # freed automatically.
+
     mem_info = Armon.memory_info(params)
     mem_required = Armon.memory_required(params)
-    if mem_info.free < mem_info.total * 0.05 || mem_info.free < mem_required * 1.05
+
+    if manual_mem_management
+        # Minimize the number of GC passes by estimating how many repeats we can fit on the device.
+        # The GC always runs before the first mesurement.
+        gc_freq = max(1, floor(Int, mem_info.total / (mem_required * 1.50)) - 1)
+        if current_repeats % gc_freq == 0
+            @warn "Manual GC pass (every $gc_freq repeats for this measurement)"
+            GC.gc(true)
+        end
+    elseif mem_info.free < mem_info.total * 0.05 || mem_info.free < mem_required * 1.05
         GC.gc(true)
     end
-    if mem_required * 1.05 > mem_info.total
+
+    overhead_max = 1e9  # 1GB of overhead max. MPI buffers shouldn't reach this much memory usage
+    if mem_required + min(overhead_max, mem_required * 0.05) > mem_info.total
         if is_root
             println("skipped because of memory requirements")
             req_gb   = @sprintf("%.2f GB", mem_required   / 1e9)
@@ -617,6 +656,7 @@ function free_memory_if_needed(params::ArmonParameters)
         end
         return true
     end
+
     return false
 end
 
@@ -628,7 +668,7 @@ function run_armon(params::ArmonParameters; for_precompilation=false)
     acquisition_start = time_ns()
 
     while continue_acquisition(current_repeats, acquisition_start, for_precompilation)
-        free_memory_if_needed(params) && break
+        free_memory_if_needed(params, manual_mem_management, current_repeats) && break
 
         stats = armon(params)
 
@@ -643,6 +683,16 @@ function run_armon(params::ArmonParameters; for_precompilation=false)
 end
 
 
+is_first_measure = true
+function print_first_params(params)
+    if is_first_measure
+        println(stderr, "First params:")
+        println(stderr, params)
+        global is_first_measure = false
+    end
+end
+
+
 function do_measure(data_file_name, test, cells, splitting)
     params = build_params(test, cells; 
         ieee_bits, riemann, scheme, cfl, 
@@ -652,6 +702,8 @@ function do_measure(data_file_name, test, cells, splitting)
         use_MPI=false, px=1, py=1,
         reorder_grid=false, async_comms=false
     )
+
+    print_first_params(params)
 
     @printf(" - ")
     length(tests) > 1          && @printf("%-4s ", string(test))
@@ -703,6 +755,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
     )
 
     if is_root
+        print_first_params(params)
         @printf(" - (%2dx%-2d) ", px, py)
         length(tests) > 1          && @printf("%-4s ", string(test))
         length(axis_splitting) > 1 && @printf("%-14s ", string(splitting))
@@ -775,11 +828,7 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
 
     @printf(" %s", get_duration_string(duration))
 
-    if actual_repeats != repeats
-        println(" ($actual_repeats repeats)")
-    else
-        println()
-    end
+    println(" ($actual_repeats repeats)")
 
     return time_contrib, actual_repeats
 end
