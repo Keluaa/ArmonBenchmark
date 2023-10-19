@@ -23,6 +23,9 @@ mutable struct KokkosOptions
     write_output::Bool
     write_ghosts::Bool
     use_simd::Bool
+    use_2d_iter::Bool
+    use_md_iter::Bool
+    balance_md_iter::Bool
     gpu::String
     num_threads::Int
     threads_places::String
@@ -48,7 +51,7 @@ make_options = ["--no-print-directory"]
 
 # Julia adds its libs to the ENV, which can interfere with cmake
 cmake_env = copy(ENV)
-delete!(cmake_env, "LD_LIBRARY_PATH")
+#delete!(cmake_env, "LD_LIBRARY_PATH")
 
 
 function KokkosOptions(;
@@ -56,7 +59,7 @@ function KokkosOptions(;
         nghost = 2, cfl = 0.6, Dt = 0., maxtime = 0.0,
         maxcycle = 500, projection = "euler", cst_dt = false, ieee_bits = 64,
         silent = 2, output_file = "output", write_output = false, write_ghosts = false,
-        use_simd = true, gpu = "",
+        use_simd = true, use_2d_iter = false, use_md_iter = false, balance_md_iter = false, gpu = "",
         num_threads = 1, threads_places = "cores", threads_proc_bind = "close",
         dimension = 2, axis_splitting = [], tests = [], cells_list = [],
         base_file_name = "", gnuplot_script = "", repeats = 1, min_acquisition_time = 0,
@@ -67,7 +70,7 @@ function KokkosOptions(;
         nghost, cfl, Dt, maxtime, maxcycle,
         projection, cst_dt, ieee_bits,
         silent, output_file, write_output, write_ghosts,
-        use_simd, gpu,
+        use_simd, use_2d_iter, use_md_iter, balance_md_iter, gpu,
         num_threads, threads_places, threads_proc_bind,
         dimension, axis_splitting, tests, cells_list,
         base_file_name, gnuplot_script, repeats, min_acquisition_time,
@@ -145,6 +148,15 @@ function parse_arguments(args::Vector{String})
         # Multithreading params
         elseif arg == "--use-simd"
             options.use_simd = parse(Bool, args[i+1])
+            i += 1
+        elseif arg == "--use-2d-iter"
+            options.use_2d_iter = parse(Bool, args[i+1])
+            i += 1
+        elseif arg == "--use-md-iter"
+            options.use_md_iter = parse(Bool, args[i+1])
+            i += 1
+        elseif arg == "--balance-md-iter"
+            options.balance_md_iter = parse(Bool, args[i+1])
             i += 1
         elseif arg == "--num-threads"
             options.num_threads = parse(Int, args[i+1])
@@ -270,6 +282,9 @@ function init_kokkos_version(version)
 end
 
 
+cmake_opt(b::Bool) = b ? "ON" : "OFF"
+
+
 function init_cmake(options::KokkosOptions)
     use_SIMD = options.use_simd
     use_single_precision = options.ieee_bits == 32
@@ -279,8 +294,12 @@ function init_cmake(options::KokkosOptions)
     cmake_options = [
         "-DCMAKE_BUILD_TYPE=Release",
         "-DKokkos_ENABLE_OPENMP=ON",
-        "-DKokkos_ENABLE_SIMD=$(use_SIMD ? "ON" : "OFF")",
-        "-DUSE_SINGLE_PRECISION=$(use_single_precision ? "ON" : "OFF")",
+        "-DKokkos_ENABLE_SIMD=$(cmake_opt(use_SIMD))",
+        "-DUSE_SIMD_KERNELS=$(cmake_opt(use_SIMD))",
+        "-DUSE_SINGLE_PRECISION=$(cmake_opt(use_single_precision))",
+        "-DUSE_2D_ITER=$(cmake_opt(options.use_2d_iter))",
+        "-DUSE_MD_ITER=$(cmake_opt(options.use_md_iter))",
+        "-DBALANCE_MD_ITER=$(cmake_opt(options.balance_md_iter))",
     ]
 
     if options.gpu == "CUDA"
@@ -309,9 +328,17 @@ function init_cmake(options::KokkosOptions)
             c_compiler = "gcc"
             cpp_compiler = "g++"
         elseif compiler == "clang"
-            options.gpu == "CUDA" && @warn "CUDA compilation with Clang might be broken" maxlog=1
             c_compiler = "clang"
             cpp_compiler = "clang++"
+            options.gpu == "CUDA" && push!(cmake_options, "-DCMAKE_CUDA_COMPILER=$cpp_compiler")
+        elseif compiler == "aocc"
+            c_compiler = "clang"
+            cpp_compiler = "clang++"
+            is_aocc = Cmd(`bash -c "clang -v 2>&1 | grep AOCC >/dev/null"`; ignorestatus=true) |> run |> success
+            !is_aocc && error("Compiler is AOCC but `clang -v` is not")
+        elseif compiler == "icx"
+            c_compiler = "icx"
+            cpp_compiler = "icpx"
         else
             error("Unknown compiler: $compiler")
         end
@@ -331,11 +358,11 @@ function init_cmake(options::KokkosOptions)
     target_exe *= ".exe"
 
     mkpath(build_dir)
-    rm(build_dir * "/CMakeCache.txt"; force=true)
+    rm(joinpath(build_dir, "CMakeCache.txt"); force=true)
 
     init_kokkos_version(options.kokkos_version)
     run_cmd_print_on_error(Cmd(`cmake $cmake_options ..`; env=cmake_env, dir=build_dir))
-    run_cmd_print_on_error(Cmd(`make $make_options clean`; env=cmake_env, dir=build_dir))
+    run_cmd_print_on_error(Cmd(`cmake --build . --target clean`; env=cmake_env, dir=build_dir))
 
     return build_dir, target_exe
 end
@@ -344,12 +371,12 @@ end
 function compile_backend(build_dir, target_exe)
     # TODO: put compilation files in a tmp dir in the script dir named with the job ID
     println("Compiling Kokkos...")
-    run_cmd_print_on_error(Cmd(`make $make_options $target_exe`; env=cmake_env, dir=build_dir))
-    exe_path = build_dir * "/src/$target_exe"
+    run_cmd_print_on_error(Cmd(`cmake --build . --target $target_exe -j`; env=cmake_env, dir=build_dir))
+    exe_path = joinpath(build_dir, "src", target_exe)
     if !isfile(exe_path)
         error("Could not compile the executable at $exe_path, ARGS: $ARGS")
     end
-    return build_dir * "/src/$target_exe"
+    return exe_path
 end
 
 
@@ -390,14 +417,18 @@ function build_args_list(options::KokkosOptions)
         "--verbose", options.silent,
         "--output", options.output_file,
         "--write-output", Int(options.write_output),
-        "--write-ghosts", Int(options.write_ghosts),
-        "--single-comm", "0"
+        "--write-ghosts", Int(options.write_ghosts)
     ]
 end
 
 
 function get_run_command(exe_path, args)
     return Cmd(`$exe_path $args`; dir=run_dir)
+end
+
+
+function get_print_params_command(exe_path, args)
+    return Cmd(`$exe_path $args -t Sod --splitting Sequential --cells 100,100 --cycle 0 --verbose 2`; dir=run_dir)
 end
 
 
@@ -432,6 +463,8 @@ function run_and_parse_output(cmd::Cmd, verbose::Bool, repeats::Int, min_acquisi
 end
 
 
+is_first_measure = true
+
 function run_armon(options::KokkosOptions, verbose::Bool)
     build_dir, target_exe = init_cmake(options)
     exe_path = compile_backend(build_dir, target_exe)
@@ -458,6 +491,11 @@ function run_armon(options::KokkosOptions, verbose::Bool)
             if !isdir(data_dir)
                 mkpath(data_dir)
             end
+        end
+
+        if is_first_measure
+            run(get_print_params_command(exe_path, base_args))
+            global is_first_measure = false
         end
 
         for cells in options.cells_list
@@ -502,7 +540,7 @@ function run_armon(options::KokkosOptions, verbose::Bool)
             if !isempty(data_file_name)
                 # Append the result to the output file
                 open(data_file_name, "a") do file
-                    println(file, prod(cells), ", ", total_cells_per_sec, std_cells_per_sec, actual_repeats)
+                    println(file, prod(cells), ", ", total_cells_per_sec, ", ", std_cells_per_sec, ", ", actual_repeats)
                 end
             end
 

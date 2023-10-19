@@ -9,6 +9,7 @@ struct KokkosParams <: BackendParams
     threads::Int
     ieee_bits::Int
     use_simd::Int
+    use_md_iter::Int
     dimension::Int
     compiler::Compiler
 end
@@ -24,6 +25,7 @@ function run_backend_msg(measure::MeasureParams, params::KokkosParams, cluster::
      - $(params.threads) threads
      - threads binding: $(params.omp_proc_bind), places: $(params.omp_places)
      - $(params.use_simd == 1 ? "with" : "without") SIMD
+     - $(params.use_md_iter == 0 ? "without" : params.use_md_iter == 1 ? "with 2D" : "with MD") iterations, with$(params.use_md_iter == 3 ? "" : "out") load balancing
      - $(params.dimension)D
      - compiled with $(params.compiler) with Kokkos v$(measure.kokkos_version)
      - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
@@ -42,6 +44,7 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Kokkos})
             threads,
             measure.ieee_bits,
             measure.use_simd,
+            measure.use_md_iter,
             measure.dimension,
             measure.compilers,
         )
@@ -134,6 +137,9 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
         "--dim", step.dimension,
         "--cycle", step.cycles,
         "--use-simd", step.backend.use_simd,
+        "--use-2d-iter", step.backend.use_md_iter == 1,
+        "--use-md-iter", step.backend.use_md_iter >= 2,
+        "--balance-md-iter", step.backend.use_md_iter == 3,
         "--ieee", step.backend.ieee_bits,
         "--tests", join(step.options[:tests], ','),
         "--cells-list", cells_list_str,
@@ -160,11 +166,12 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
         ])
     end
 
-    if !isempty(step.options[:cmake_options])
-        append!(armon_options, [
-            "--extra-cmake-options", step.options[:cmake_options]
-        ])
-    end
+    cmake_options = step.options[:cmake_options]
+    !isempty(cmake_options) && (cmake_options *= " ; ")
+    cmake_options *= "-DUSE_SIMD_KERNELS=$(step.backend.use_simd == 1 ? "ON" : "OFF")"
+    append!(armon_options, [
+        "--extra-cmake-options", cmake_options
+    ])
 
     append!(armon_options, [
         "--kokkos-version", step.options[:kokkos_version]
@@ -190,6 +197,19 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
     if length(measure.omp_places) > 1
         name *= "_$(params.omp_places)"
         legend *= ", places: $(params.omp_places)"
+    end
+
+    if length(measure.use_md_iter) > 1
+        if params.use_md_iter == 1
+            name *= "_2d_iter"
+            legend *= ", 2D iterations"
+        elseif params.use_md_iter == 2
+            name *= "_md_iter"
+            legend *= ", MD iterations"
+        elseif params.use_md_iter == 3
+            name *= "_md_iter_balanced"
+            legend *= ", balanced MD iterations"
+        end
     end
 
     if length(measure.compilers) > 1

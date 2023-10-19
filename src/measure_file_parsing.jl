@@ -48,6 +48,7 @@ function parse_measure_params(file_line_parser, script_dir)
     process_scaling = false
     min_acquisition_time = 0
     use_kokkos = [false]
+    use_md_iter = [0]
     cmake_options = ""
     kokkos_backends = ["Serial,OpenMP"]
     kokkos_version = "4.0.00"
@@ -111,6 +112,10 @@ function parse_measure_params(file_line_parser, script_dir)
                     push!(compilers, Clang)
                 elseif raw_compiler == "icc"
                     push!(compilers, ICC)
+                elseif raw_compiler == "aocc"
+                    push!(compilers, AOCC)
+                elseif raw_compiler == "icx"
+                    push!(compilers, ICX)
                 else
                     error("Unknown compiler: $raw_compiler, at line $i")
                 end
@@ -213,6 +218,9 @@ function parse_measure_params(file_line_parser, script_dir)
             time_MPI_plot = parse(Bool, value)
         elseif option == "use_kokkos"
             use_kokkos = parse.(Bool, split(value, ',') .|> strip)
+        elseif option == "use_md_iter"
+            # 0: no, 1: 2D, 2: MD, 3: MD+balancing
+            use_md_iter = parse.(Int, split(value, ',') .|> strip)
         elseif option == "cmake_options"
             cmake_options = value
         elseif option == "kokkos_backends"
@@ -302,7 +310,7 @@ function parse_measure_params(file_line_parser, script_dir)
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,
-        use_kokkos, kokkos_backends, cmake_options, kokkos_version,
+        use_kokkos, kokkos_backends, use_md_iter, cmake_options, kokkos_version,
         cycles, cells_list, domain_list, process_grids, process_grid_ratios, tests_list,
         axis_splitting, params_and_legends,
         name, script_dir, repeats, log_scale, error_bars, plot_title,
@@ -381,7 +389,7 @@ function parse_arguments()
                 batch_options.no_overwrite = true
             elseif (startswith(arg, "--no-plot-update"))
                 batch_options.no_plot_update = true
-            elseif (startswith(arg, "--step-scripts"))
+            elseif (startswith(arg, "--step-scripts="))
                 value = split(arg, '=')[2]
                 batch_options.one_script_per_step = parse(Bool, value)
             elseif (startswith(arg, "--sub-now"))

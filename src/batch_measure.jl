@@ -5,7 +5,7 @@ using Dates
 
 @enum Device CPU CUDA ROCM
 @enum Backend Julia Kokkos CPP
-@enum Compiler GCC Clang ICC
+@enum Compiler GCC Clang ICC AOCC ICX
 
 
 mutable struct BatchOptions
@@ -56,6 +56,7 @@ mutable struct MeasureParams
     block_sizes::Vector{Int}
     use_kokkos::Vector{Bool}
     kokkos_backends::Vector{String}
+    use_md_iter::Vector{Int}
     cmake_options::String
     kokkos_version::String
 

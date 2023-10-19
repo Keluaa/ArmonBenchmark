@@ -28,6 +28,7 @@ function run_backend_msg(measure::MeasureParams, julia::JuliaParams, cluster::Cl
         - $(julia.threads) threads
         - threads binding: $(julia.jl_proc_bind), places: $(julia.jl_places)
         - kokkos using $(julia.kokkos_backends)
+        - $(julia.use_simd == 1 ? "with" : "without") hierarchical parallelism
         - $(julia.dimension)D
         - $(julia.async_comms ? "a" : "")synchronous communications
         - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
@@ -184,11 +185,12 @@ function build_backend_command(step::JobStep, ::Val{Julia})
             push!(armon_options, "--kokkos-build-dir", "€KOKKOS_BUILD_DIR")
         end
 
-        if !isempty(step.options[:cmake_options])
-            append!(armon_options, [
-                "--cmake-options", step.options[:cmake_options]
-            ])
-        end
+        cmake_options = step.options[:cmake_options]
+        !isempty(cmake_options) && (cmake_options *= " ; ")
+        cmake_options *= "-DUSE_SIMD_KERNELS=$(step.backend.use_simd == 1 ? "ON" : "OFF")"
+        append!(armon_options, [
+            "--cmake-options", cmake_options
+        ])
     end
 
     if step.perf_plot.do_plot || step.time_hist.do_plot || step.time_MPI.do_plot
