@@ -14,26 +14,49 @@ filter_max_mem!(cells, s::Specs) = filter!((c) -> (c^s.dim * s.val_bytes * s.var
 to_domain_string(cells, s::Specs) = join((join(repeat(["$i"], s.dim), ',') for i in cells), s.dim > 1 ? "; " : ", ")
 
 
-function spread_cells(max_cells; 
+"""
+    spread_cells(max_cells; 
         min_cells=10^4.5, step_log=log10(2), 
         dim=2, vars=16, type=Float64,
-        device=:CPU, max_mem=nothing,
+        device=:CPU, max_mem_per_device=nothing,
+        max_mem=nothing,
         proc_per_device=1,
-        devices=1)
+        devices=1
+    )
 
+`device` sets `max_mem`, and can be `:CPU` (250 GiB), `:A100` (40 GiB), `:MI100` (32 GiB),
+`:MI250` (64 GiB), or `nothing` (custom max mem).
+
+Each of the `devices` is considered to have `max_mem` memory. It is evenly distributed among the
+`proc_per_device` processes on each device.
+
+There will be `devices × proc_per_device` processes in total.
+"""
+function spread_cells(max_cells; 
+    min_cells=10^4.5, step_log=log10(2), 
+    dim=2, vars=16, type=Float64,
+    device=:CPU, max_mem=nothing, max_mem_per_device=nothing,
+    proc_per_device=1,
+    devices=1
+)
     if isnothing(max_mem)
-        if device == :CPU
-            max_mem = 250e9
-        elseif device == :CUDA
-            max_mem = 40e9
-        elseif device == :ROCM
-            max_mem = 32e9
+        if !isnothing(max_mem_per_device)
+            max_mem = max_mem_per_device
+        elseif device == :CPU
+            max_mem = 250 * 1024^3
+        elseif device == :A100
+            max_mem = 40 * 1024^3
+        elseif device == :MI100
+            max_mem = 32 * 1024^3
+        elseif device == :MI250
+            max_mem = 64 * 1024^3
         else
             error("Unknown device: " * device)
         end
         max_mem = max_mem / proc_per_device * devices * 0.95
+        max_mem = floor(Int, max_mem)
     else
-        device = "?"
+        device = "devices"
     end
 
     processes = proc_per_device * devices
@@ -45,7 +68,17 @@ function spread_cells(max_cells;
     cells = closest_multiple.(cells, processes)
     filter_max_mem!(cells, specs)
 
-    println("From $(first(min_cells)) to $(max_cells) in $(dim)D on $(max_mem / 1e9) GB spread over $(processes) processes on $(devices) $(device):")
+    max_used_mem = last(cells)^specs.dim * specs.vars * specs.val_bytes
+    max_used_mem_proc = max_used_mem / processes
+
+    max_used_mem = round(max_used_mem / 1e9; digits=1)
+    max_used_mem_proc = round(max_used_mem_proc / 1e9; digits=1)
+    max_mem = round(max_mem / 1e9; digits=1)
+
+    println("Range from $(round(min_cells)) to $(round(max_cells)) in $(dim)D ($vars $type variables)")
+    println("On $processes processes on $devices $device")
+    println("Going up to $(join(repeat(["$(last(cells))"], dim), '×')) ($(round(last(cells)^dim/1e9; digits=1))×10⁹ cells)")
+    println("Using up to $max_used_mem GB of the maximum $max_mem GB, or $max_used_mem_proc GB per process")
     println(to_domain_string(cells, specs))
     return cells, specs
 end
