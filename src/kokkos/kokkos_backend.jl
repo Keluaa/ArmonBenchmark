@@ -136,7 +136,7 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
     append!(armon_options, [
         "--dim", step.dimension,
         "--cycle", step.cycles,
-        "--use-simd", step.backend.use_simd,
+        "--use-simd", step.backend.use_md_iter == 0 ? step.backend.use_simd : 0,
         "--use-2d-iter", step.backend.use_md_iter == 1,
         "--use-md-iter", step.backend.use_md_iter >= 2,
         "--balance-md-iter", step.backend.use_md_iter == 3,
@@ -167,8 +167,6 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
     end
 
     cmake_options = step.options[:cmake_options]
-    !isempty(cmake_options) && (cmake_options *= " ; ")
-    cmake_options *= "-DUSE_SIMD_KERNELS=$(step.backend.use_simd == 1 ? "ON" : "OFF")"
     append!(armon_options, [
         "--extra-cmake-options", cmake_options
     ])

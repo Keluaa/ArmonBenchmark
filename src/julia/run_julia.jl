@@ -41,6 +41,7 @@ cmake_options = []
 kokkos_backends = [:Serial, :OpenMP]
 kokkos_build_dir = missing
 kokkos_version = nothing
+use_md_iter = 0
 print_kokkos_threads_affinity = false
 block_size = 1024
 gpu = :CUDA
@@ -218,6 +219,9 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--kokkos-version"
         global kokkos_version = ARGS[i+1]
+        global i += 1
+    elseif arg == "--use-md-iter"
+        global use_md_iter = parse(Int, ARGS[i+1])
         global i += 1
 
     # 2D only params
@@ -551,7 +555,7 @@ function build_params(test, domain;
     )
 
     if use_kokkos
-        options = (; options..., cmake_options)
+        options = (; options..., use_md_iter, cmake_options)
     end
 
     ArmonParameters(; options...)

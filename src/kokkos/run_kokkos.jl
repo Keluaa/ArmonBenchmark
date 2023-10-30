@@ -51,7 +51,6 @@ make_options = ["--no-print-directory"]
 
 # Julia adds its libs to the ENV, which can interfere with cmake
 cmake_env = copy(ENV)
-#delete!(cmake_env, "LD_LIBRARY_PATH")
 
 
 function KokkosOptions(;

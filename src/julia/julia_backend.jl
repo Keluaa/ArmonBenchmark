@@ -14,6 +14,7 @@ struct JuliaParams <: BackendParams
     async_comms::Bool
     use_kokkos::Bool
     kokkos_backends::String
+    use_md_iter::Int
 end
 
 
@@ -28,7 +29,8 @@ function run_backend_msg(measure::MeasureParams, julia::JuliaParams, cluster::Cl
         - $(julia.threads) threads
         - threads binding: $(julia.jl_proc_bind), places: $(julia.jl_places)
         - kokkos using $(julia.kokkos_backends)
-        - $(julia.use_simd == 1 ? "with" : "without") hierarchical parallelism
+        - $(params.use_simd == 1 ? "with" : "without") SIMD
+        - $(params.use_md_iter == 0 ? "without" : params.use_md_iter == 1 ? "with 2D" : "with MD") iterations, with$(params.use_md_iter == 3 ? "" : "out") load balancing
         - $(julia.dimension)D
         - $(julia.async_comms ? "a" : "")synchronous communications
         - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
@@ -72,7 +74,8 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Julia})
                 measure.dimension,
                 measure.async_comms,
                 measure.use_kokkos,
-                kokkos_backends
+                kokkos_backends,
+                measure.use_md_iter
             )
         )
     )
@@ -180,14 +183,13 @@ function build_backend_command(step::JobStep, ::Val{Julia})
     if step.backend.use_kokkos
         push!(armon_options, "--kokkos-backends", step.backend.kokkos_backends)
         push!(armon_options, "--kokkos-version", step.options[:kokkos_version])
+        push!(armon_options, "--use-md-iter", step.backend.use_md_iter)
 
         if step.options[:in_sub_script]
             push!(armon_options, "--kokkos-build-dir", "€KOKKOS_BUILD_DIR")
         end
 
         cmake_options = step.options[:cmake_options]
-        !isempty(cmake_options) && (cmake_options *= " ; ")
-        cmake_options *= "-DUSE_SIMD_KERNELS=$(step.backend.use_simd == 1 ? "ON" : "OFF")"
         append!(armon_options, [
             "--cmake-options", cmake_options
         ])
@@ -266,6 +268,19 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
     if length(measure.kokkos_backends) > 1 && params.use_kokkos
         name *= "_$(params.kokkos_backends)"
         legend *= " " * params.kokkos_backends
+    end
+
+    if length(measure.use_md_iter) > 1 && params.use_kokkos
+        if params.use_md_iter == 1
+            name *= "_2d_iter"
+            legend *= ", 2D iterations"
+        elseif params.use_md_iter == 2
+            name *= "_md_iter"
+            legend *= ", MD iterations"
+        elseif params.use_md_iter == 3
+            name *= "_md_iter_balanced"
+            legend *= ", balanced MD iterations"
+        end
     end
 
     if !isempty(params.options[2])
