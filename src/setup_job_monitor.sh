@@ -21,8 +21,16 @@ fi
 
 session="job-monitor"
 
-tmux new-session -d -s $session
-window=0
+# New session, or add a new window if the session already exists
+window_count=$(tmux list-windows -t $session 2&> /dev/null | wc -l)
+if [[ "$window_count" -ge 1 ]]; then
+    window=$window_count
+    tmux new-window -t $session
+else
+    tmux new-session -A -d -s $session
+    window=0
+fi
+init_window=$window
 
 for job_id in $job_list; do
     # Use `scontrol` to get the output files of the job (and replace %J by the job id)
@@ -45,5 +53,5 @@ for job_id in $job_list; do
     tmux new-window -t $session
 done
 
-tmux select-window -t $session:0
+tmux select-window -t $session:$init_window
 tmux attach-session -t $session
