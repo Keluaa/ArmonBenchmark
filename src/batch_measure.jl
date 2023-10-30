@@ -152,6 +152,7 @@ const REQUIRED_MODULES = ["cuda", #= "rocm", =# "hwloc", "mpi", "cmake/3.22.2"]
 
 
 const PROJECT_DIR = joinpath(@__DIR__, "..")
+const MEASURE_LOG_FILE = joinpath(PROJECT_DIR, "measurements", "log.txt")
 
 const DATA_DIR_NAME         = "data"
 const PLOT_SCRIPTS_DIR_NAME = "plot_scripts"
@@ -497,6 +498,10 @@ function create_sub_script(
             measure.max_time
         ))
 
+        log_dir = realpath(first(splitdir(abspath(MEASURE_LOG_FILE))))
+        rel_script_path = relpath(realpath(abspath(script_path)), log_dir)
+        println(script, "echo \"[\$(date +%d/%m/%Y-%H:%M:%S)] Started \${SLURM_JOB_ID} for '$rel_script_path'\" >> $(abspath(MEASURE_LOG_FILE))")
+
         if measure.track_energy
             # Energy consumption tracking variables
             println(script, "SACCT_OPTS=\"", options_to_str(ENERGY_ACCOUNTING_OPTIONS), '"')
@@ -534,6 +539,8 @@ function create_sub_script(
             # Clear the tmp directory
             println(script, "\nrm -rf \$KOKKOS_BUILD_DIR")
         end
+
+        println(script, "\necho \"[\$(date +%d/%m/%Y-%H:%M:%S)] Stopped \${SLURM_JOB_ID} for '$rel_script_path'\" >> $(abspath(MEASURE_LOG_FILE))")
     end
 
     println("Created submission script '$script_name'")
