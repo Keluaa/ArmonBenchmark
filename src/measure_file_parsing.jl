@@ -9,6 +9,7 @@ function parse_measure_params(file_line_parser, script_dir)
     node_count = [1]
     processes_per_node = 0
     max_time = 3600
+    extra_modules = []
 
     make_sub_script = false
     one_job_per_cell = false
@@ -132,6 +133,8 @@ function parse_measure_params(file_line_parser, script_dir)
             processes_per_node = parse(Int, value)
         elseif option == "max_time"
             max_time = Int(round(duration_from_string(value)))
+        elseif option == "modules"
+            extra_modules = split(value, ',')
         elseif option == "make_sub_script"
             make_sub_script = parse(Bool, value)
         elseif option == "one_job_per_cell"
@@ -307,6 +310,7 @@ function parse_measure_params(file_line_parser, script_dir)
 
     return MeasureParams(
         device, node, distributions, processes, node_count, processes_per_node, max_time, use_MPI,
+        extra_modules,
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,

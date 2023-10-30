@@ -35,6 +35,7 @@ mutable struct MeasureParams
     processes_per_node::Int
     max_time::Int
     use_MPI::Bool
+    extra_modules::Vector{String}
 
     # Job params
     make_sub_script::Bool
@@ -381,7 +382,8 @@ scratch_dir() = get(ENV, "CCCSCRATCHDIR", tempdir())  # TODO: replace by a local
 # TODO: replace by a Slurm submission script (#SBATCH instead of #MSUB)
 job_script_header(
     job_name, job_work_dir, job_stdout_file, job_stderr_file,
-    job_partition, job_nodes, job_processes, job_cores, job_time_limit
+    job_partition, job_nodes, job_processes, job_cores, job_time_limit,
+    job_modules
 ) = """
 #!/bin/bash
 #MSUB -r $(job_name)
@@ -395,7 +397,8 @@ job_script_header(
 #MSUB -x
 
 cd $(job_work_dir)
-module load $(join(REQUIRED_MODULES, ' '))
+$(job_modules)
+module list
 """
 
 
@@ -471,12 +474,60 @@ function make_reference_job_from(step::JobStep)
 end
 
 
+function split_module_string(mod_str)
+    # Supposed module format: 'name[/sub/module/name][/version]', with 'version' a valid `VersionNumber`
+
+    mod_parts = rsplit(mod_str, '/'; limit=2)
+    mod_name = first(mod_parts)
+    mod_version = nothing
+
+    if length(mod_parts) > 1
+        raw_mod_version = last(mod_parts)
+        mod_version = tryparse(VersionNumber, raw_mod_version)
+        if isnothing(mod_version)
+            # Last '/' was not a version specifier
+            mod_name *= '/' * raw_mod_version
+        end
+    end
+
+    return mod_name, mod_version
+end
+
+
+function merge_modules(modules, other_modules)
+    isempty(other_modules) && return modules
+    isempty(modules) && return other_modules
+
+    modules_info = Dict{String, Union{VersionNumber, Nothing}}()
+    for mod in modules
+        mod_name, mod_version = split_module_string(mod)
+        modules_info[mod_name] = mod_version
+    end
+
+    for mod in other_modules
+        mod_name, mod_version = split_module_string(mod)
+        if !(haskey(modules_info, mod_name) && isnothing(mod_version))
+            # Always keep the most specific (non-nothing) version, with priority over `other_modules`
+            modules_info[mod_name] = mod_version
+        end
+    end
+
+    return map(pairs(modules_info)) do (mod_name, mod_version)
+        isnothing(mod_version) && return mod_name
+        return mod_name * '/' * mod_version
+    end
+end
+
+
 function create_sub_script(
     measure::MeasureParams, steps::Vector{JobStep};
     header="", name_suffix="", step_count=length(steps), step_idx_offset=0
 )
     script_name = measure.name * name_suffix * ".sh"
     script_path = joinpath(measure.script_dir, JOB_SCRIPS_DIR_NAME, script_name)
+
+    measurement_modules = merge_modules(REQUIRED_MODULES, measure.extra_modules)
+    measurement_modules_cmds = join("module swap " .* measurement_modules, '\n')
 
     open(script_path, "w") do script
         job_work_dir = abspath(measure.script_dir)
@@ -495,7 +546,8 @@ function create_sub_script(
             measure.name,
             job_work_dir, job_stdout_file, job_stderr_file,
             measure.node, job_nodes, job_processes, 1,
-            measure.max_time
+            measure.max_time,
+            measurement_modules_cmds
         ))
 
         log_dir = realpath(first(splitdir(abspath(MEASURE_LOG_FILE))))
