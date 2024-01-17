@@ -387,7 +387,7 @@ if use_gpu && !use_kokkos
     # We must select a GPU before initializing MPI
     if use_MPI && gpu === :ROCM
         gpu_index %= length(AMDGPU.devices())
-        AMDGPU.default_device_id!(gpu_index + 1)
+        AMDGPU.device_id!(gpu_index + 1)
     elseif gpu === :CUDA
         gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
         CUDA.device!(gpu_index)

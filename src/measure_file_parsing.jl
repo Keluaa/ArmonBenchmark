@@ -17,7 +17,7 @@ function parse_measure_params(file_line_parser, script_dir)
 
     threads = [4]
     ieee_bits = [64]
-    block_sizes = [1024]
+    block_sizes = [128]
     use_simd = [true]
     jl_places = ["cores"]
     jl_proc_bind = ["close"]
