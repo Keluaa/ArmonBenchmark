@@ -30,6 +30,7 @@ mutable struct KokkosOptions
     num_threads::Int
     threads_places::String
     threads_proc_bind::String
+    omp_display::Bool
     dimension::Int
     axis_splitting::Vector{String}
     tests::Vector{String}
@@ -46,7 +47,7 @@ end
 
 
 project_dir = joinpath(@__DIR__, "../../kokkos")
-run_dir = joinpath(project_dir, "../data")
+run_dir = @__DIR__
 make_options = ["--no-print-directory"]
 
 # Julia adds its libs to the ENV, which can interfere with cmake
@@ -59,7 +60,7 @@ function KokkosOptions(;
         maxcycle = 500, projection = "euler", cst_dt = false, ieee_bits = 64,
         silent = 2, output_file = "output", write_output = false, write_ghosts = false,
         use_simd = true, use_2d_iter = false, use_md_iter = false, balance_md_iter = false, gpu = "",
-        num_threads = 1, threads_places = "cores", threads_proc_bind = "close",
+        num_threads = 1, threads_places = "cores", threads_proc_bind = "close", omp_display = false,
         dimension = 2, axis_splitting = [], tests = [], cells_list = [],
         base_file_name = "", gnuplot_script = "", repeats = 1, min_acquisition_time = 0,
         repeats_count_file = "",
@@ -70,7 +71,7 @@ function KokkosOptions(;
         projection, cst_dt, ieee_bits,
         silent, output_file, write_output, write_ghosts,
         use_simd, use_2d_iter, use_md_iter, balance_md_iter, gpu,
-        num_threads, threads_places, threads_proc_bind,
+        num_threads, threads_places, threads_proc_bind, omp_display,
         dimension, axis_splitting, tests, cells_list,
         base_file_name, gnuplot_script, repeats, min_acquisition_time,
         repeats_count_file,
@@ -165,6 +166,9 @@ function parse_arguments(args::Vector{String})
             i += 1
         elseif arg == "--threads-proc-bind"
             options.threads_proc_bind = args[i+1]
+            i += 1
+        elseif arg == "--print-kokkos-thread-affinity"
+            options.omp_display = parse(Bool, args[i+1])
             i += 1
 
         # GPU params
@@ -380,9 +384,28 @@ end
 
 
 function setup_env(options::KokkosOptions)
-    ENV["OMP_PLACES"] = options.threads_places
     ENV["OMP_PROC_BIND"] = options.threads_proc_bind
     ENV["OMP_NUM_THREADS"] = options.num_threads
+
+    if options.threads_places == "manual"
+        # Equiv. to 'cores' but shouted really loudly at OpenMP. Useful when dealing with node
+        # allocation problems.
+        p_list = map(i -> "{$i}", 0:(options.num_threads-1))
+        p_list = join(p_list, ',')
+        ENV["OMP_PLACES"] = p_list
+    else
+        ENV["OMP_PLACES"] = options.threads_places
+    end
+
+    if options.omp_display
+        println("Kokkos threads bind with:")
+        @show ENV["OMP_PLACES"] ENV["OMP_PROC_BIND"] ENV["OMP_NUM_THREADS"]
+        ENV["OMP_DISPLAY_ENV"] = true
+        ENV["OMP_DISPLAY_AFFINITY"] = true
+        haskey(ENV, "SLURM_CPU_BIND_TYPE") && @show ENV["SLURM_CPU_BIND_TYPE"]
+        haskey(ENV, "SLURM_CPU_BIND_LIST") && @show ENV["SLURM_CPU_BIND_LIST"]
+    end
+
     if haskey(ENV, "KMP_AFFINITY")
         # Prevent Intel's variables from interfering with ours
         delete!(ENV, "KMP_AFFINITY")
