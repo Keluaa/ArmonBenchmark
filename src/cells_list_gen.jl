@@ -12,6 +12,8 @@ to_domain_dims(cells, s::Specs) = cells .^ (1 / s.dim) .|> round .|> Int
 closest_multiple(x, m) = Int(round(x / m) * m)
 filter_max_mem!(cells, s::Specs) = filter!((c) -> (c^s.dim * s.val_bytes * s.vars < s.mem), cells)
 to_domain_string(cells, s::Specs) = join((join(repeat(["$i"], s.dim), ',') for i in cells), s.dim > 1 ? "; " : ", ")
+mem_usage(cell_count, s::Specs) = cell_count^s.dim * s.vars * s.val_bytes
+mem_usage_frac(cell_count, s::Specs) = mem_usage(cell_count, s) / (s.mem * 1e9)
 
 
 """
@@ -68,7 +70,7 @@ function spread_cells(max_cells;
     cells = closest_multiple.(cells, processes)
     filter_max_mem!(cells, specs)
 
-    max_used_mem = last(cells)^specs.dim * specs.vars * specs.val_bytes
+    max_used_mem = mem_usage(last(cells), specs)
     max_used_mem_proc = max_used_mem / processes
 
     max_used_mem = round(max_used_mem / 1e9; digits=1)
