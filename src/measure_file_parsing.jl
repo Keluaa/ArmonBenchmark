@@ -134,7 +134,7 @@ function parse_measure_params(file_line_parser, script_dir)
         elseif option == "max_time"
             max_time = Int(round(duration_from_string(value)))
         elseif option == "modules"
-            extra_modules = split(value, ',')
+            extra_modules = split(value, ',') .|> strip
         elseif option == "make_sub_script"
             make_sub_script = parse(Bool, value)
         elseif option == "one_job_per_cell"

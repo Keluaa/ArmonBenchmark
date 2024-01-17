@@ -503,6 +503,9 @@ function split_module_string(mod_str)
         if isnothing(mod_version)
             # Last '/' was not a version specifier
             mod_name *= '/' * raw_mod_version
+        else
+            # Keep the exact version string
+            mod_version = raw_mod_version
         end
     end
 
@@ -514,7 +517,7 @@ function merge_modules(modules, other_modules)
     isempty(other_modules) && return modules
     isempty(modules) && return other_modules
 
-    modules_info = Dict{String, Union{VersionNumber, Nothing}}()
+    modules_info = Dict{String, Union{String, Nothing}}()
     for mod in modules
         mod_name, mod_version = split_module_string(mod)
         modules_info[mod_name] = mod_version
@@ -528,7 +531,7 @@ function merge_modules(modules, other_modules)
         end
     end
 
-    return map(pairs(modules_info)) do (mod_name, mod_version)
+    return map(collect(pairs(modules_info))) do (mod_name, mod_version)
         isnothing(mod_version) && return mod_name
         return mod_name * '/' * mod_version
     end
