@@ -402,6 +402,22 @@ module list
 """
 
 
+job_error_handler(script_path, log_file) = """
+function log_err {
+    echo "[\$(date +%d/%m/%Y-%H:%M:%S)] ERROR   \${SLURM_JOB_ID} for '$script_path'" >> $log_file
+}
+trap log_err ERR TERM
+"""
+
+job_log_start(script_path, log_file) = """
+echo "[\$(date +%d/%m/%Y-%H:%M:%S)] Started \${SLURM_JOB_ID} for '$script_path'" >> $log_file
+"""
+
+job_log_end(script_path, log_file) = """
+echo "[\$(date +%d/%m/%Y-%H:%M:%S)] Stopped \${SLURM_JOB_ID} for '$script_path'" >> $log_file
+"""
+
+
 function job_step_command_args(step::JobStep; in_sub_script=true)
     cluster = step.cluster
     args = [
@@ -545,14 +561,17 @@ function create_sub_script(
         println(script, job_script_header(
             measure.name,
             job_work_dir, job_stdout_file, job_stderr_file,
-            measure.node, job_nodes, job_processes, 1,
+            measure.node, job_nodes, job_processes, 1,  # 1 core as we are on an exclusive allocation
             measure.max_time,
             measurement_modules_cmds
         ))
 
         log_dir = realpath(first(splitdir(abspath(MEASURE_LOG_FILE))))
+        log_file = abspath(MEASURE_LOG_FILE)
         rel_script_path = relpath(realpath(abspath(script_path)), log_dir)
-        println(script, "echo \"[\$(date +%d/%m/%Y-%H:%M:%S)] Started \${SLURM_JOB_ID} for '$rel_script_path'\" >> $(abspath(MEASURE_LOG_FILE))")
+
+        println(script, job_error_handler(rel_script_path, log_file))
+        println(script, job_log_start(rel_script_path, log_file))
 
         if measure.track_energy
             # Energy consumption tracking variables
@@ -592,7 +611,7 @@ function create_sub_script(
             println(script, "\nrm -rf \$KOKKOS_BUILD_DIR")
         end
 
-        println(script, "\necho \"[\$(date +%d/%m/%Y-%H:%M:%S)] Stopped \${SLURM_JOB_ID} for '$rel_script_path'\" >> $(abspath(MEASURE_LOG_FILE))")
+        println(script, "\n", job_log_end(rel_script_path, log_file))
     end
 
     println("Created submission script '$script_name'")
