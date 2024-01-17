@@ -90,11 +90,13 @@ if !isnothing(dim_index)
 end
 
 
-preferences = Dict(
-    "use_std_lib_threads" => false,
-    "use_fast_math" => true,
-    "use_inbounds" => true,
+default_preferences = Dict(
+    "use_std_lib_threads" => Preferences.load_preference(armon_uuid, "use_std_lib_threads", false),
+    "use_fast_math" => Preferences.load_preference(armon_uuid, "use_fast_math", true),
+    "use_inbounds" => Preferences.load_preference(armon_uuid, "use_inbounds", true),
 )
+
+preferences = deepcopy(default_preferences)
 
 
 i = 1
@@ -331,11 +333,12 @@ end
 min_acquisition_time *= 1e9  # sec to ns
 
 
-# Important: setting preferences systematically will ensure no preference from previous runs will
-# affect the current one.
-# TODO: check if preferences are susceptible to read/writes from other jobs. If so, move the project to the scratch dir of the job
-Preferences.set_preferences!(armon_uuid, preferences...; force=true)
-
+if preferences != default_preferences
+    # TODO: add a dummy project to the scratch dir of the job, add its path to `LOAD_PATH` and modify
+    # the preferences from there
+    # Preferences.set_preferences!(armon_uuid, preferences...; force=true)
+    error("This job requires changing the preferences, which isn't SLURM or MPI-safe for now.")
+end
 
 #
 # Muting mechanism for the 'no CUDA capable device detected' error of CUDA.jl 
@@ -405,6 +408,10 @@ if is_root
     println("Using MPI with $global_size processes")
     loading_start_time = time_ns()
 end
+
+# If the MPI.jl config is wrong, Julia might only detect 1 MPI process
+max_processes = maximum(prod, proc_domains)
+max_processes > global_size && error("Not enough processes ($global_size), need at most $max_processes")
 
 # Create a communicator for each node of the MPI world
 node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.COMM_TYPE_SHARED, rank)
@@ -514,7 +521,7 @@ if use_kokkos
     MPI.Barrier(MPI.COMM_WORLD)
 
     !is_root && Kokkos.load_wrapper_lib(; no_compilation=true, no_git=true)
-    Kokkos.initialize()
+    Kokkos.initialize(map_device_id_by=:mpi_rank)
 
     if print_kokkos_threads_affinity
         println("Kokkos max threads: ", Kokkos.BackendFunctions.omp_get_max_threads())
@@ -531,6 +538,21 @@ end
 using Armon
 
 Base.global_logger(prev_global_logger)
+
+
+function check_preferences(expected_prefs)
+    uuid = Base.PkgId(Armon).uuid
+    loaded_prefs = Base.get_preferences(uuid)
+    ok = true
+    for (k, v) in expected_prefs
+        if !haskey(loaded_prefs, k) || loaded_prefs[k] != v
+            @warn "Wrong preference for $k: expected $v, got $(loaded_prefs[k])"
+            ok = false
+        end
+    end
+    return ok
+end
+!check_preferences(preferences) && exit(1)
 
 
 function build_params(test, domain; 
@@ -637,6 +659,13 @@ function free_memory_if_needed(params::ArmonParameters, manual_mem_management, c
     mem_info = Armon.memory_info(params)
     mem_required = Armon.memory_required(params)
 
+    if params.use_MPI && !params.use_gpu
+        # Account for sharing the RAM of the CPU
+        mem_required *= local_size
+    end
+
+    overhead_max = 1e9  # 1GB of overhead max. MPI buffers shouldn't reach this much memory usage
+
     if manual_mem_management
         # Minimize the number of GC passes by estimating how many repeats we can fit on the device.
         # The GC always runs before the first mesurement.
@@ -645,11 +674,10 @@ function free_memory_if_needed(params::ArmonParameters, manual_mem_management, c
             @warn "Manual GC pass (every $gc_freq repeats for this measurement)"
             GC.gc(true)
         end
-    elseif mem_info.free < mem_info.total * 0.05 || mem_info.free < mem_required * 1.05
+    elseif mem_info.free < mem_info.total * 0.05 || mem_info.free < (mem_required * 1.05 + overhead_max)
         GC.gc(true)
     end
 
-    overhead_max = 1e9  # 1GB of overhead max. MPI buffers shouldn't reach this much memory usage
     if mem_required + min(overhead_max, mem_required * 0.05) > mem_info.total
         if is_root
             println("skipped because of memory requirements")
