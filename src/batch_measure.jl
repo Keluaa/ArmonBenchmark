@@ -747,9 +747,11 @@ function build_job_step(measure::MeasureParams, backend::BackendParams, cluster:
         return nothing
     end
 
+    date_prefix = Dates.format(Dates.now(), "YYYY-mm-dd")
+
     base_file_name, legend = build_data_file_base_name(measure,
         cluster.processes, cluster.distribution, cluster.node_count, backend)
-    base_file_name = joinpath(".", DATA_DIR_NAME, measure.name, base_file_name)
+    base_file_name = joinpath(".", DATA_DIR_NAME, measure.name, date_prefix, base_file_name)
 
     job_step = build_job_step(measure, backend, cluster, base_file_name, legend)
 
@@ -838,8 +840,11 @@ end
 
 
 function ensure_dirs_exist(measure::MeasureParams)
+    date_prefix = Dates.format(Dates.now(), "YYYY-mm-dd")
+    rel_data_dir = joinpath(DATA_DIR_NAME, measure.name, date_prefix)
+
     for dir_name in [
-                joinpath(DATA_DIR_NAME, measure.name),
+                rel_data_dir,
                 PLOT_SCRIPTS_DIR_NAME,
                 PLOTS_DIR_NAME,
                 JOB_SCRIPS_DIR_NAME,
@@ -848,6 +853,13 @@ function ensure_dirs_exist(measure::MeasureParams)
         dir_path = joinpath(measure.script_dir, dir_name)
         mkpath(dir_path)
     end
+
+    # Create a symlink to the current's date data directory
+    latest_data_dir = joinpath(measure.script_dir, DATA_DIR_NAME, measure.name, "latest")
+    if isdir(latest_data_dir)
+        rm(latest_data_dir)
+    end
+    symlink(date_prefix, latest_data_dir; dir_target=true)
 end
 
 
