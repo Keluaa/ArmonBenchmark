@@ -2,7 +2,9 @@
 	path = kokkos
 	url = https://github.com/Keluaa/Armon-Kokkos.git
 	update = merge
-	branch = main
+	branch = benchmark
 [submodule "julia"]
 	path = julia
 	url = https://github.com/Keluaa/Armon.jl
+    update = merge
+	branch = benchmark
