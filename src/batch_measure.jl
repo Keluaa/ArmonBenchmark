@@ -420,12 +420,31 @@ echo "[\$(date +%d/%m/%Y-%H:%M:%S)] Stopped \${SLURM_JOB_ID} for '$script_path'"
 
 function job_step_command_args(step::JobStep; in_sub_script=true)
     cluster = step.cluster
+
+    if !haskey(CACHED_PARTITIONS_INFO, step.node_partition)
+        error("Missing partition info about $(step.node_partition)")
+    end
+    partition_cpus = CACHED_PARTITIONS_INFO[step.node_partition][:cpus]
+    if cluster.processes * step.threads < partition_cpus
+        # Workaround Slurm's quirky cpu masks when using an exclusive allocation without using all
+        # cores: `salloc --exclusive -c 64 -n 1 srun -n 1 --cpu-bind=verbose -c 64 echo` on a 128 core
+        # node gives this mask: 0xffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000.
+        # By using all cpus of the node, the mask is correctly contiguous.
+        step_cores = max(partition_cpus ÷ cluster.processes, step.threads)
+        if step_cores < partition_cpus
+            @warn "Cannot ensure all cores ($partition_cpus) are used for the job ($(step.threads) \
+                   cores × $(cluster.processes))" maxlog=1
+        end
+    else
+        step_cores = step.threads
+    end
+
     args = [
         "ccc_mprun",  # TODO: replace by srun, + options (try with '-v' to see the options)
         "-N", cluster.node_count,
         "-n", cluster.processes,
         "-E", "-m block:$(cluster.distribution)",
-        "-c", step.threads
+        "-c", step_cores
     ]
     if !in_sub_script
         append!(args, [
