@@ -569,7 +569,11 @@ function run_armon(options::KokkosOptions, verbose::Bool)
             if !isempty(options.gnuplot_script)
                 # Update the plot
                 # We redirect the output of gnuplot to null so that there is no warning messages displayed
-                run(pipeline(`gnuplot $(options.gnuplot_script)`, stdout=devnull, stderr=devnull))
+                try
+                    run(pipeline(`gnuplot $(options.gnuplot_script)`, stdout=devnull, stderr=devnull))
+                catch e
+                    println(stderr, "Gnuplot error: ", e)
+                end
             end
 
             if !isempty(options.repeats_count_file)

@@ -19,6 +19,7 @@ IF_LATEX = IF_LATEX eq "1"
 LATEX_TEST = system("echo \$LATEX_TEST")
 LATEX_TEST = LATEX_TEST eq "1"
 wrap_str(s) = (IF_LATEX ? sprintf("\$%s\$", s) : s)
+texttt(s) = (IF_LATEX ? sprintf("\\\\texttt{%s}", s) : s)
 ###"""
 
 const LOG_SCALE_CMD = """
@@ -88,9 +89,9 @@ if (IF_LATEX) {
     set output '$graph_file_name.pdf'
     set ylabel 'Communications Time [sec]'
     set y2label 'Communication Time / Total Time [%]'
+    set title "$title"
 }
 set xlabel 'Cells count'
-set title "$title"
 set key $legend_pos top
 set grid
 set ytics nomirror
@@ -116,14 +117,17 @@ if (IF_LATEX) {
         set terminal epslatex color size 10cm, 8cm
         set output '$graph_file_name.tex'
     }
-    set ylabel 'Energy efficiency [µJ/cell-cycle]' offset 1,0,0
+    set ylabel 'Energy consumption [µJ/cell-cycle]' offset 1,0,0
+    unset title
+    set key width -6  # Remove the blank region under the legend overlapping the grid
+    set key samplen 2
 } else {
     set terminal pdfcairo color size 10in, 6in
     set output '$graph_file_name.pdf'
     set ylabel 'Energy efficiency [µJ/cell-cycle]'
+    set title "$title"
 }
 set xlabel 'Number of cells'
-set title "$title"
 set key $legend_pos top
 set grid
 set yrange [0:]

@@ -878,8 +878,12 @@ end
 
 function update_plot(gnuplot_script)
     if !isempty(gnuplot_script)
-        # We redirect the output of gnuplot to null so that there is no warning messages displayed
-        run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
+        try
+            # We redirect the output of gnuplot to null so that there is no warning messages displayed
+            run(pipeline(`gnuplot $(gnuplot_script)`, stdout=devnull, stderr=devnull))
+        catch e
+            println(stderr, "Gnuplot error: ", e)
+        end
     end
 end
 
