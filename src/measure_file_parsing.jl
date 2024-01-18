@@ -11,7 +11,7 @@ function parse_measure_params(file_line_parser, script_dir)
     max_time = 3600
     extra_modules = []
 
-    make_sub_script = false
+    make_sub_script = true
     one_job_per_cell = false
     one_script_per_step = false
 
