@@ -366,35 +366,34 @@ end
 
 
 function submit_script(script_path)
-    output = readchomp(`ccc_msub $script_path`)  # TODO: replace by `sbatch`
+    output = readchomp(`sbatch $script_path`)
     println(script_path, " => ", output)
     job_id = match(r"\d+$", output)
     return isnothing(job_id) ? job_id : job_id.match
 end
 
 
-scratch_dir() = get(ENV, "CCCSCRATCHDIR", tempdir())  # TODO: replace by a local preference
+scratch_dir() = get(ENV, "BENCH_SCRATCH", tempdir())
 
 #
 # Job steps and submission script
 #
 
-# TODO: replace by a Slurm submission script (#SBATCH instead of #MSUB)
 job_script_header(
     job_name, job_work_dir, job_stdout_file, job_stderr_file,
     job_partition, job_nodes, job_processes, job_cores, job_time_limit,
     job_modules
 ) = """
 #!/bin/bash
-#MSUB -r $(job_name)
-#MSUB -o $(job_stdout_file)
-#MSUB -e $(job_stderr_file)
-#MSUB -q $(job_partition)
-#MSUB -N $(job_nodes)
-#MSUB -n $(job_processes)
-#MSUB -c $(job_cores)
-#MSUB -T $(job_time_limit)
-#MSUB -x
+#SBATCH -J $(job_name)
+#SBATCH -o $(job_stdout_file)
+#SBATCH -e $(job_stderr_file)
+#SBATCH -p $(job_partition)
+#SBATCH -N $(job_nodes)
+#SBATCH -n $(job_processes)
+#SBATCH -c $(job_cores)
+#SBATCH -t $(job_time_limit ÷ 60 #= default format is in minutes =#)
+#SBATCH --exclusive
 
 cd $(job_work_dir)
 $(job_modules)
@@ -425,31 +424,33 @@ function job_step_command_args(step::JobStep; in_sub_script=true)
         error("Missing partition info about $(step.node_partition)")
     end
     partition_cpus = CACHED_PARTITIONS_INFO[step.node_partition][:cpus]
-    if cluster.processes * step.threads < partition_cpus
+    if cluster.processes == 1 && * step.threads < partition_cpus
         # Workaround Slurm's quirky cpu masks when using an exclusive allocation without using all
         # cores: `salloc --exclusive -c 64 -n 1 srun -n 1 --cpu-bind=verbose -c 64 echo` on a 128 core
         # node gives this mask: 0xffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000.
         # By using all cpus of the node, the mask is correctly contiguous.
+        # This does not seem to occur with similar situations with multiple processes, is this a bug?
         step_cores = max(partition_cpus ÷ cluster.processes, step.threads)
         if step_cores < partition_cpus
             @warn "Cannot ensure all cores ($partition_cpus) are used for the job ($(step.threads) \
                    cores × $(cluster.processes))" maxlog=1
+            step_cores = step.threads  # Fallback to default
         end
     else
         step_cores = step.threads
     end
 
     args = [
-        "ccc_mprun",  # TODO: replace by srun, + options (try with '-v' to see the options)
+        "srun",
         "-N", cluster.node_count,
         "-n", cluster.processes,
-        "-E", "-m block:$(cluster.distribution)",
+        "-m", "block:$(cluster.distribution)",
         "-c", step_cores
     ]
     if !in_sub_script
         append!(args, [
             "-p", step.node_partition,
-            "-x"
+            "--exclusive"
         ])
     end
     return args
@@ -569,7 +570,7 @@ function create_sub_script(
 
     open(script_path, "w") do script
         job_work_dir = abspath(measure.script_dir)
-        job_output_file_name = "$(measure.name)$(name_suffix)_%I"  # '%I' is replaced by the job ID
+        job_output_file_name = "$(measure.name)$(name_suffix)_%j"  # '%j' is replaced by the job ID
         job_stdout_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stdout.txt") |> abspath
         job_stderr_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stderr.txt") |> abspath
 

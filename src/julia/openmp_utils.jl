@@ -71,7 +71,7 @@ function omp_bind_threads(offset::Int, places::Symbol, bind::Symbol;
 
     pinned_count = 0
     for (tid, cpuid) in enumerate(cpuid_it)
-        pinthread(tid, cpuid)
+        pinthread(tid, cpuid; warn=false)
         pinned_count += 1
     end
 
