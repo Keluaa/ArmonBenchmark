@@ -139,6 +139,12 @@ function build_backend_command(step::JobStep, ::Val{Julia})
         "--project=$(@__DIR__())"
     ]
 
+    if step.options[:device] == ROCM
+        # TODO: This is to circumvent a bug with `AMDGPU.reduce`.
+        # See https://github.com/JuliaGPU/AMDGPU.jl/issues/581
+        deleteat!(armon_options, findfirst(==("--check-bounds=no"), armon_options))
+    end
+
     if !step.options[:in_sub_script]
         push!(armon_options, "--color=yes")
     end
