@@ -12,6 +12,24 @@ by changing the right values accross each job step.
 
 Results are then saved in `.csv` files and plotted with Gnuplot with automatically generated scripts.
 
+## Installation
+
+Clone the repo and its sub-modules:
+```shell
+git clone --recurse-submodules https://github.com/Keluaa/ArmonBenchmark.git
+cd ./ArmonBenchmark
+```
+Then initialize each Julia project:
+```shell
+julia --project=./julia -e 'using Pkg; Pkg.instantiate()'
+julia --project=. -e 'using Pkg; Pkg.develop(path="./julia"); Pkg.instantiate()'
+julia --project=./src/julia -e 'using Pkg; Pkg.develop(path="./julia"); Pkg.instantiate()'
+```
+If [Kokkos.jl](https://github.com/Keluaa/Kokkos.jl) is not available from the general registry, the last command should be:
+```shell
+julia --project=./src/julia -e 'using Pkg; Pkg.develop([Pkg.PackageSpec(path="./julia"), Pkg.PackageSpec(path="path/to/Kokkos.jl")]); Pkg.instantiate()'
+```
+With `"path/to/Kokkos.jl"` the directory where Kokkos.jl was cloned into.
 
 ## Usage
 
