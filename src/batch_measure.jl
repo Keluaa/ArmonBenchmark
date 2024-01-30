@@ -156,7 +156,7 @@ mutable struct JobStep
 end
 
 
-const REQUIRED_MODULES = ["cuda", #= "rocm", =# "hwloc", "mpi", "cmake/3.22.2"]
+const REQUIRED_MODULES = []
 
 
 const PROJECT_DIR = joinpath(@__DIR__, "..")
@@ -409,6 +409,8 @@ $(job_modules)
 module list
 """
 
+job_script_footer() = ""
+
 mpirun_job_script_header(
     job_name, job_work_dir, job_stdout_file, job_stderr_file,
     job_partition, job_nodes, job_processes, job_cores, job_time_limit,
@@ -419,8 +421,18 @@ mpirun_job_script_header(
 cd $(job_work_dir)
 $(job_modules)
 module list
+
+JOB_STDOUT_FILE=$(job_stdout_file)
+JOB_STDERR_FILE=$(job_stderr_file)
+
+{
 """
 
+mpirun_job_script_footer() = """
+} >\$JOB_STDOUT_FILE 2>\$JOB_STDERR_FILE
+"""
+
+# TODO: replace SLURM_JOB_ID with config
 job_error_handler(script_path, log_file) = """
 function log_err {
     echo "[\$(date +%d/%m/%Y-%H:%M:%S)] ERROR   \${SLURM_JOB_ID} for '$script_path'" >> $log_file
@@ -597,7 +609,10 @@ function create_sub_script(
 
     open(script_path, "w") do script
         job_work_dir = abspath(measure.script_dir)
-        job_output_file_name = "$(measure.name)$(name_suffix)_%j"  # '%j' is replaced by the job ID
+        job_output_file_name = measure.name * name_suffix
+        if !measure.use_mpirun
+            job_output_file_name *= "_%j"  # '%j' is replaced by the job ID
+        end
         job_stdout_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stdout.txt") |> abspath
         job_stderr_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stderr.txt") |> abspath
 
@@ -665,6 +680,9 @@ function create_sub_script(
         end
 
         !measure.use_mpirun && println(script, "\n", job_log_end(rel_script_path, log_file))
+
+        footer_f = measure.use_mpirun ? mpirun_job_script_footer : job_script_footer
+        println(script, footer_f())
     end
 
     println("Created submission script '$script_name'")

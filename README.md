@@ -21,6 +21,8 @@ which will then build the files and scripts.
 Each "list of" is a set of possible values. Unless specified, values are separated with commas.
 All combinaisons of the sets' values will be turned into individual job steps.
 
+Lines starting with `#` will be ignored.
+
 
 #### General options
 
@@ -30,7 +32,7 @@ All combinaisons of the sets' values will be turned into individual job steps.
  - `make_sub_script`: create a Slurm batch script. Defaults to true.
  - `one_job_per_cell`: make one job step per cell count. Useful for energy measurements. Defaults to false.
  - `one_script_per_step`: split all job steps into separate batch scripts. Defaults to false.
- - `modules`: extra modules to load at the start of the job
+ - `modules`: modules to load at the start of the job. Defaults to (`cuda, hwloc, mpi, cmake/3.22.2`).
 
 
 #### Slurm options
@@ -62,6 +64,7 @@ All combinaisons of the sets' values will be turned into individual job steps.
 #### GPU, multithreading and vectorization options
 
  - `block_sizes`: list of block sizes for GPU devices. Defaults to 128.
+ - `threads`: list of threads/cores to use. Defaults to 4.
  - `use_simd`: list of bools, whether or not to enable vectorisation. Defaults to `true`.
  - `jl_places`: list of places for thread binding, like OpenMP's `OMP_PLACES`, only for Julia. Defaults to `cores`.
  - `jl_proc_bind`: list of process binding modes, like OpenMP's `OMP_PROC_BIND`, only for Julia. Defaults to `close`.
