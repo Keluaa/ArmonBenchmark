@@ -15,6 +15,10 @@ function parse_measure_params(file_line_parser, script_dir)
     one_job_per_cell = false
     one_script_per_step = false
 
+    use_mpirun = false
+    hostlist = []
+    hosts_max_cores = 0
+
     threads = [4]
     ieee_bits = [64]
     block_sizes = [128]
@@ -230,6 +234,12 @@ function parse_measure_params(file_line_parser, script_dir)
             kokkos_backends = split(value, ';') .|> strip
         elseif option == "kokkos_version"
             kokkos_version = value
+        elseif option == "use_mpirun"
+            use_mpirun = parse(Bool, value)
+        elseif option == "hostlist"
+            hostlist = split(value, ',') .|> strip
+        elseif option == "hosts_max_cores"
+            hosts_max_cores = parse(Int, value)
         else
             error("Unknown option: $option, at line $i")
         end
@@ -291,6 +301,14 @@ function parse_measure_params(file_line_parser, script_dir)
         error("Cannot track energy outside of a submission script. `make_sub_script` should be `true`")
     end
 
+    if use_mpirun && hosts_max_cores <= 0
+        error("`use_mpirun == true`, expected `hosts_max_cores`")
+    end
+
+    if use_mpirun
+        node_count = [isempty(hostlist) ? 1 : length(hostlist)]
+    end
+
     params_and_legends = collect(zip(armon_params, armon_params_legends, armon_params_names))
 
     rel_plot_scripts_dir = joinpath(".", PLOT_SCRIPTS_DIR_NAME)
@@ -311,6 +329,7 @@ function parse_measure_params(file_line_parser, script_dir)
     return MeasureParams(
         device, node, distributions, processes, node_count, processes_per_node, max_time, use_MPI,
         extra_modules,
+        use_mpirun, hostlist, hosts_max_cores,
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,

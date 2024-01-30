@@ -36,11 +36,18 @@ All combinaisons of the sets' values will be turned into individual job steps.
 #### Slurm options
  
  - `node`: Slurm partition (mandatory)
- - `processes`: list of process count
+ - `processes`: list of total process count (across all nodes)
  - `node_count`: list of node count
  - `processes_per_node`: number of processes per node. If present, `node_count` is ignored and instead is deduced from `processes`
  - `distributions`: list of Slurm distributions, passed to the `--distribution` option (default: `block`)
  - `max_time`: maximum wall time of the job, in any format such as '30s', '1min12sec', '4h30m' or '8h'. Defaults to 1 hour.
+
+
+#### `mpirun` options
+
+ - `use_mpirun`: use the `mpirun` command to launch jobs, instead of Slurm. Appart of `processes`, all other Slurm options will be ignored if true.
+ - `hostlist`: comma-separated values passed to the `--host` option of `mpirun`. If empty, the `--host` option is omitted and jobs will run locally.
+ - `hosts_max_cores`: maximum number of cores in each node (mandatory)
 
 
 #### MPI options
