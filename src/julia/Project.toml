@@ -1,7 +1,6 @@
 [deps]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 Armon = "b773a7a3-b593-48d6-82f6-54bf745a629b"
-CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Kokkos = "3296cea9-b0de-4b57-aba0-ce554b517c3b"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"

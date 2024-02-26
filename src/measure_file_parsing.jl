@@ -9,11 +9,16 @@ function parse_measure_params(file_line_parser, script_dir)
     node_count = [1]
     processes_per_node = 0
     max_time = 3600
-    extra_modules = []
+    modules = ["cuda", "hwloc", "mpi", "cmake/3.22.2"]
 
     make_sub_script = true
     one_job_per_cell = false
     one_script_per_step = false
+
+    use_mpirun = false
+    hostlist = []
+    hosts_max_cores = 0
+    mpirun_options = (; cmd="mpirun", ranks_per_node="-N", hosts="--host", extra=[])
 
     threads = [4]
     ieee_bits = [64]
@@ -134,7 +139,7 @@ function parse_measure_params(file_line_parser, script_dir)
         elseif option == "max_time"
             max_time = Int(round(duration_from_string(value)))
         elseif option == "modules"
-            extra_modules = split(value, ',') .|> strip
+            modules = split(value, ',') .|> strip
         elseif option == "make_sub_script"
             make_sub_script = parse(Bool, value)
         elseif option == "one_job_per_cell"
@@ -230,6 +235,20 @@ function parse_measure_params(file_line_parser, script_dir)
             kokkos_backends = split(value, ';') .|> strip
         elseif option == "kokkos_version"
             kokkos_version = value
+        elseif option == "use_mpirun"
+            use_mpirun = parse(Bool, value)
+        elseif option == "hostlist"
+            hostlist = split(value, ',') .|> strip
+        elseif option == "hosts_max_cores"
+            hosts_max_cores = parse(Int, value)
+        elseif option == "mpirun_options"
+            options = split(value, ';') .|> strip
+            mpirun_options = (;
+                cmd = options[1],
+                ranks_per_node = options[2],
+                hosts = options[3],
+                extra = options[4:end]
+            )
         else
             error("Unknown option: $option, at line $i")
         end
@@ -291,6 +310,14 @@ function parse_measure_params(file_line_parser, script_dir)
         error("Cannot track energy outside of a submission script. `make_sub_script` should be `true`")
     end
 
+    if use_mpirun && hosts_max_cores <= 0
+        error("`use_mpirun == true`, expected `hosts_max_cores`")
+    end
+
+    if use_mpirun
+        node_count = [isempty(hostlist) ? 1 : length(hostlist)]
+    end
+
     params_and_legends = collect(zip(armon_params, armon_params_legends, armon_params_names))
 
     rel_plot_scripts_dir = joinpath(".", PLOT_SCRIPTS_DIR_NAME)
@@ -310,7 +337,8 @@ function parse_measure_params(file_line_parser, script_dir)
 
     return MeasureParams(
         device, node, distributions, processes, node_count, processes_per_node, max_time, use_MPI,
-        extra_modules,
+        modules,
+        use_mpirun, hostlist, hosts_max_cores, mpirun_options,
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,

@@ -37,6 +37,12 @@ mutable struct MeasureParams
     use_MPI::Bool
     extra_modules::Vector{String}
 
+    # mpirun params
+    use_mpirun::Bool
+    hostlist::Vector{String}
+    hosts_max_cores::Int
+    mpirun_options::NamedTuple
+
     # Job params
     make_sub_script::Bool
     one_job_per_cell::Bool
@@ -112,6 +118,9 @@ mutable struct ClusterParams
     processes::Int
     distribution::String
     node_count::Int
+    use_mpirun::Bool
+    hostlist::Vector{String}
+    mpirun_options::NamedTuple
 end
 
 
@@ -149,7 +158,7 @@ mutable struct JobStep
 end
 
 
-const REQUIRED_MODULES = ["cuda", #= "rocm", =# "hwloc", "mpi", "cmake/3.22.2"]
+const REQUIRED_MODULES = []
 
 
 const PROJECT_DIR = joinpath(@__DIR__, "..")
@@ -200,7 +209,10 @@ function build_cluster_combinaisons(measure::MeasureParams)
         Iterators.product(
             measure.processes,
             measure.distributions,
-            node_count
+            node_count,
+            [measure.use_mpirun],
+            [measure.hostlist],
+            [measure.mpirun_options]
         )
     )
 end
@@ -400,6 +412,26 @@ $(job_modules)
 module list
 """
 
+job_script_footer() = ""
+
+mpirun_job_script_header(
+    job_name, job_work_dir, job_stdout_file, job_stderr_file,
+    job_partition, job_nodes, job_processes, job_cores, job_time_limit,
+    job_modules
+) = """
+#!/bin/bash
+
+cd $(job_work_dir)
+JOB_STDOUT_FILE=$(job_stdout_file)
+
+{
+$(job_modules)
+module list
+"""
+
+mpirun_job_script_footer() = """
+} 2>&1 | tee \$JOB_STDOUT_FILE
+"""
 
 job_error_handler(script_path, log_file) = """
 function log_err {
@@ -420,22 +452,31 @@ echo "[\$(date +%d/%m/%Y-%H:%M:%S)] Stopped \${SLURM_JOB_ID} for '$script_path'"
 function job_step_command_args(step::JobStep; in_sub_script=true)
     cluster = step.cluster
 
+    if cluster.use_mpirun
+        mpirun_options = cluster.mpirun_options  # Defaults to 'cmd=mpirun', 'ranks_per_node=-N', 'hosts=--host', 'extra=[]'
+        host_count = isempty(cluster.hostlist) ? 1 : length(cluster.hostlist)
+        ranks_per_node = cld(cluster.processes, host_count)
+        args = [
+            mpirun_options.cmd,
+            mpirun_options.ranks_per_node, ranks_per_node
+        ]
+        !isempty(cluster.hostlist) && push!(args, mpirun_options.hosts, join(cluster.hostlist, ','))
+        append!(args, mpirun_options.extra)
+        return args
+    end
+
     if !haskey(CACHED_PARTITIONS_INFO, step.node_partition)
         error("Missing partition info about $(step.node_partition)")
     end
     partition_cpus = CACHED_PARTITIONS_INFO[step.node_partition][:cpus]
-    if cluster.processes == 1 && * step.threads < partition_cpus
+    if cluster.processes == 1 && step.threads < partition_cpus
         # Workaround Slurm's quirky cpu masks when using an exclusive allocation without using all
         # cores: `salloc --exclusive -c 64 -n 1 srun -n 1 --cpu-bind=verbose -c 64 echo` on a 128 core
         # node gives this mask: 0xffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000.
         # By using all cpus of the node, the mask is correctly contiguous.
         # This does not seem to occur with similar situations with multiple processes, is this a bug?
-        step_cores = max(partition_cpus ÷ cluster.processes, step.threads)
-        if step_cores < partition_cpus
-            @warn "Cannot ensure all cores ($partition_cpus) are used for the job ($(step.threads) \
-                   cores × $(cluster.processes))" maxlog=1
-            step_cores = step.threads  # Fallback to default
-        end
+        step_cores = partition_cpus
+        @info "Changed CPU count from $(step.threads) to $step_cores, to guareentee a valid CPU mask"
     else
         step_cores = step.threads
     end
@@ -570,7 +611,10 @@ function create_sub_script(
 
     open(script_path, "w") do script
         job_work_dir = abspath(measure.script_dir)
-        job_output_file_name = "$(measure.name)$(name_suffix)_%j"  # '%j' is replaced by the job ID
+        job_output_file_name = measure.name * name_suffix
+        if !measure.use_mpirun
+            job_output_file_name *= "_%j"  # '%j' is replaced by the job ID
+        end
         job_stdout_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stdout.txt") |> abspath
         job_stderr_file = joinpath(job_work_dir, JOBS_OUTPUT_DIR_NAME, job_output_file_name * "_stderr.txt") |> abspath
 
@@ -581,7 +625,8 @@ function create_sub_script(
             step.cluster.node_count
         end
 
-        println(script, job_script_header(
+        header_f = measure.use_mpirun ? mpirun_job_script_header : job_script_header
+        println(script, header_f(
             measure.name,
             job_work_dir, job_stdout_file, job_stderr_file,
             measure.node, job_nodes, job_processes, 1,  # 1 core as we are on an exclusive allocation
@@ -593,8 +638,10 @@ function create_sub_script(
         log_file = abspath(MEASURE_LOG_FILE)
         rel_script_path = relpath(realpath(abspath(script_path)), log_dir)
 
-        println(script, job_error_handler(rel_script_path, log_file))
-        println(script, job_log_start(rel_script_path, log_file))
+        if !measure.use_mpirun
+            println(script, job_error_handler(rel_script_path, log_file))
+            println(script, job_log_start(rel_script_path, log_file))
+        end
 
         if measure.track_energy
             # Energy consumption tracking variables
@@ -634,7 +681,10 @@ function create_sub_script(
             println(script, "\nrm -rf \$KOKKOS_BUILD_DIR")
         end
 
-        println(script, "\n", job_log_end(rel_script_path, log_file))
+        !measure.use_mpirun && println(script, "\n", job_log_end(rel_script_path, log_file))
+
+        footer_f = measure.use_mpirun ? mpirun_job_script_footer : job_script_footer
+        println(script, footer_f())
     end
 
     println("Created submission script '$script_name'")
@@ -646,6 +696,8 @@ end
 function append_to_sub_script(script::IO, measure::MeasureParams, step::JobStep, step_idx::Int)
     if measure.one_job_per_cell
         if measure.track_energy
+            measure.use_mpirun && error("Cannot track energy consumption without Slurm")
+
             # Add the data file variables
             energy_ref_data = energy_ref_file(step)
             energy_data = step.energy_plot.data_file
@@ -752,7 +804,12 @@ end
 function build_job_step(measure::MeasureParams, backend::BackendParams, cluster::ClusterParams)
     backend_name = backend_disp_name(backend)
     num_threads = backend.threads
-    max_node_cores = get_max_cores_of_partition(measure.node)
+
+    if measure.use_mpirun
+        max_node_cores = measure.hosts_max_cores
+    else
+        max_node_cores = get_max_cores_of_partition(measure.node)
+    end
 
     if num_threads * cluster.processes > max_node_cores * cluster.node_count
         println("Skipping running $(cluster.processes) $backend_name processes with $num_threads \
@@ -1034,10 +1091,10 @@ function do_measures(measures::Vector{MeasureParams}, batch_options::BatchOption
             header = "==== Measurement $(i)/$(length(measures)): $(measure.name) ===="
             if one_script_per_step
                 script_paths = create_script_for_each_step(measure, job_steps; header)
-                append!(sub_scripts, script_paths)
+                !measure.use_mpirun && append!(sub_scripts, script_paths)
             else
                 script_path = create_sub_script(measure, job_steps; header)
-                push!(sub_scripts, script_path)
+                !measure.use_mpirun && push!(sub_scripts, script_path)
             end
         else
             run_job_steps(measure, job_steps)

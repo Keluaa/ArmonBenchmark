@@ -39,6 +39,8 @@ which will then build the files and scripts.
 Each "list of" is a set of possible values. Unless specified, values are separated with commas.
 All combinaisons of the sets' values will be turned into individual job steps.
 
+Lines starting with `#` will be ignored.
+
 
 #### General options
 
@@ -48,17 +50,25 @@ All combinaisons of the sets' values will be turned into individual job steps.
  - `make_sub_script`: create a Slurm batch script. Defaults to true.
  - `one_job_per_cell`: make one job step per cell count. Useful for energy measurements. Defaults to false.
  - `one_script_per_step`: split all job steps into separate batch scripts. Defaults to false.
- - `modules`: extra modules to load at the start of the job
+ - `modules`: modules to load at the start of the job. Defaults to (`cuda, hwloc, mpi, cmake/3.22.2`).
 
 
 #### Slurm options
  
  - `node`: Slurm partition (mandatory)
- - `processes`: list of process count
+ - `processes`: list of total process count (across all nodes)
  - `node_count`: list of node count
  - `processes_per_node`: number of processes per node. If present, `node_count` is ignored and instead is deduced from `processes`
  - `distributions`: list of Slurm distributions, passed to the `--distribution` option (default: `block`)
  - `max_time`: maximum wall time of the job, in any format such as '30s', '1min12sec', '4h30m' or '8h'. Defaults to 1 hour.
+
+
+#### `mpirun` options
+
+ - `use_mpirun`: use the `mpirun` command to launch jobs, instead of Slurm. Appart of `processes`, all other Slurm options will be ignored if true.
+ - `hostlist`: comma-separated values passed to the `--host` option of `mpirun`. If empty, the `--host` option is omitted and jobs will run locally.
+ - `hosts_max_cores`: maximum number of cores in each node (mandatory)
+ - `mpirun_options`: command and options to use `mpirun`, in the format `<mpirun command>;<processes per node option>;<host list option>;<extra options...>`. Defaults to [OpenMPI](https://www.open-mpi.org/doc/current/man1/mpirun.1.php#toc6)'s `mpirun`: `mpirun;-N;--host`. Example for [MVAPICH](http://mvapich.cse.ohio-state.edu/static/media/mvapich/quick-3.0b.html): `mpiexec;-ppn;-f`.
 
 
 #### MPI options
@@ -73,6 +83,7 @@ All combinaisons of the sets' values will be turned into individual job steps.
 #### GPU, multithreading and vectorization options
 
  - `block_sizes`: list of block sizes for GPU devices. Defaults to 128.
+ - `threads`: list of threads/cores to use. Defaults to 4.
  - `use_simd`: list of bools, whether or not to enable vectorisation. Defaults to `true`.
  - `jl_places`: list of places for thread binding, like OpenMP's `OMP_PLACES`, only for Julia. Defaults to `cores`.
  - `jl_proc_bind`: list of process binding modes, like OpenMP's `OMP_PROC_BIND`, only for Julia. Defaults to `close`.

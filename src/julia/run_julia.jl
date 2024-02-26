@@ -365,36 +365,6 @@ muted_cuda_logger = MuteCUDANoDevice(Base.global_logger())
 prev_global_logger = Base.global_logger(muted_cuda_logger)
 
 #
-# GPU selection
-#
-
-if use_gpu && !use_kokkos
-    # If SLURM is used to dispatch jobs, we can use the local ID of the process to uniquely 
-    # assign the GPUs to each process.
-    gpu_index = parse(Int, get(ENV, "SLURM_LOCALID", "-1"))
-    if gpu_index == -1
-        @warn "SLURM_LOCALID is not defined. GPU device defaults to 0. All processes on the same \
-               node will use the same GPU." maxlog=1
-        gpu_index = 0
-    end
-
-    if gpu === :ROCM
-        using AMDGPU
-    elseif gpu === :CUDA
-        using CUDA
-    end
-
-    # We must select a GPU before initializing MPI
-    if use_MPI && gpu === :ROCM
-        gpu_index %= length(AMDGPU.devices())
-        AMDGPU.device_id!(gpu_index + 1)
-    elseif gpu === :CUDA
-        gpu_index %= CUDA.ndevices()  # In case we want more processes than GPUs
-        CUDA.device!(gpu_index)
-    end
-end
-
-#
 # MPI initialization
 #
 
@@ -495,6 +465,29 @@ if verbose_MPI || !isempty(file_MPI_dump)
             end
             MPI.Barrier(MPI.COMM_WORLD)
         end
+    end
+end
+
+#
+# GPU selection
+#
+
+if use_gpu && !use_kokkos
+    # Use the local MPI rank to dispatch GPUs among local ranks
+    gpu_index = local_rank
+
+    if gpu === :ROCM
+        using AMDGPU
+    elseif gpu === :CUDA
+        using CUDA
+    end
+
+    if use_MPI && gpu === :ROCM
+        gpu_index %= length(AMDGPU.devices())
+        AMDGPU.device_id!(gpu_index + 1)
+    elseif gpu === :CUDA
+        gpu_index %= CUDA.ndevices()
+        CUDA.device!(gpu_index)
     end
 end
 
