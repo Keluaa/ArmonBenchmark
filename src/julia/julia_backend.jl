@@ -139,9 +139,11 @@ function build_backend_command(step::JobStep, ::Val{Julia})
         "--project=$(@__DIR__())"
     ]
 
-    if step.options[:device] == ROCM
+    if step.options[:device] == ROCM || Sys.ARCH in (:arm, :aarch64)
         # TODO: This is to circumvent a bug with `AMDGPU.reduce`.
         # See https://github.com/JuliaGPU/AMDGPU.jl/issues/581
+        # TODO: This is also to circumvent a bug with Polyester.jl on ARM
+        # See https://github.com/JuliaSIMD/Polyester.jl/issues/132
         deleteat!(armon_options, findfirst(==("--check-bounds=no"), armon_options))
     end
 

@@ -50,6 +50,7 @@ Lines starting with `#` will be ignored.
  - `use_mpirun`: use the `mpirun` command to launch jobs, instead of Slurm. Appart of `processes`, all other Slurm options will be ignored if true.
  - `hostlist`: comma-separated values passed to the `--host` option of `mpirun`. If empty, the `--host` option is omitted and jobs will run locally.
  - `hosts_max_cores`: maximum number of cores in each node (mandatory)
+ - `mpirun_options`: command and options to use `mpirun`, in the format `<mpirun command>;<processes per node option>;<host list option>;<extra options...>`. Defaults to [OpenMPI](https://www.open-mpi.org/doc/current/man1/mpirun.1.php#toc6)'s `mpirun`: `mpirun;-N;--host`. Example for [MVAPICH](http://mvapich.cse.ohio-state.edu/static/media/mvapich/quick-3.0b.html): `mpiexec;-ppn;-f`.
 
 
 #### MPI options

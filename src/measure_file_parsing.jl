@@ -18,6 +18,7 @@ function parse_measure_params(file_line_parser, script_dir)
     use_mpirun = false
     hostlist = []
     hosts_max_cores = 0
+    mpirun_options = (; cmd="mpirun", ranks_per_node="-N", hosts="--host", extra=[])
 
     threads = [4]
     ieee_bits = [64]
@@ -240,6 +241,14 @@ function parse_measure_params(file_line_parser, script_dir)
             hostlist = split(value, ',') .|> strip
         elseif option == "hosts_max_cores"
             hosts_max_cores = parse(Int, value)
+        elseif option == "mpirun_options"
+            options = split(value, ';') .|> strip
+            mpirun_options = (;
+                cmd = options[1],
+                ranks_per_node = options[2],
+                hosts = options[3],
+                extra = options[4:end]
+            )
         else
             error("Unknown option: $option, at line $i")
         end
@@ -329,7 +338,7 @@ function parse_measure_params(file_line_parser, script_dir)
     return MeasureParams(
         device, node, distributions, processes, node_count, processes_per_node, max_time, use_MPI,
         modules,
-        use_mpirun, hostlist, hosts_max_cores,
+        use_mpirun, hostlist, hosts_max_cores, mpirun_options,
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
         dimension, async_comms, ieee_bits, block_sizes,

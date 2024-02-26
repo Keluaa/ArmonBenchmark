@@ -41,6 +41,7 @@ mutable struct MeasureParams
     use_mpirun::Bool
     hostlist::Vector{String}
     hosts_max_cores::Int
+    mpirun_options::NamedTuple
 
     # Job params
     make_sub_script::Bool
@@ -119,6 +120,7 @@ mutable struct ClusterParams
     node_count::Int
     use_mpirun::Bool
     hostlist::Vector{String}
+    mpirun_options::NamedTuple
 end
 
 
@@ -209,7 +211,8 @@ function build_cluster_combinaisons(measure::MeasureParams)
             measure.distributions,
             node_count,
             [measure.use_mpirun],
-            [measure.hostlist]
+            [measure.hostlist],
+            [measure.mpirun_options]
         )
     )
 end
@@ -419,20 +422,17 @@ mpirun_job_script_header(
 #!/bin/bash
 
 cd $(job_work_dir)
-$(job_modules)
-module list
-
 JOB_STDOUT_FILE=$(job_stdout_file)
-JOB_STDERR_FILE=$(job_stderr_file)
 
 {
+$(job_modules)
+module list
 """
 
 mpirun_job_script_footer() = """
-} >\$JOB_STDOUT_FILE 2>\$JOB_STDERR_FILE
+} 2>&1 | tee \$JOB_STDOUT_FILE
 """
 
-# TODO: replace SLURM_JOB_ID with config
 job_error_handler(script_path, log_file) = """
 function log_err {
     echo "[\$(date +%d/%m/%Y-%H:%M:%S)] ERROR   \${SLURM_JOB_ID} for '$script_path'" >> $log_file
@@ -453,13 +453,15 @@ function job_step_command_args(step::JobStep; in_sub_script=true)
     cluster = step.cluster
 
     if cluster.use_mpirun
+        mpirun_options = cluster.mpirun_options  # Defaults to 'cmd=mpirun', 'ranks_per_node=-N', 'hosts=--host', 'extra=[]'
         host_count = isempty(cluster.hostlist) ? 1 : length(cluster.hostlist)
         ranks_per_node = cld(cluster.processes, host_count)
         args = [
-            "mpirun",
-            "-N", ranks_per_node
+            mpirun_options.cmd,
+            mpirun_options.ranks_per_node, ranks_per_node
         ]
-        !isempty(cluster.hostlist) && push!(args, "--host", join(cluster.hostlist, ','))
+        !isempty(cluster.hostlist) && push!(args, mpirun_options.hosts, join(cluster.hostlist, ','))
+        append!(args, mpirun_options.extra)
         return args
     end
 
