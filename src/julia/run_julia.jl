@@ -16,18 +16,17 @@ armon_uuid = Base.UUID("b773a7a3-b593-48d6-82f6-54bf745a629b")
 # Arguments parsing
 #
 
-scheme = :GAD_minmod
-riemann = :acoustic
+scheme = :GAD
 riemann_limiter = :minmod
-nghost = 2
+nghost = 4
 cfl = 0.
 Dt = 0.
 maxtime = 0.0
 maxcycle = 500
-projection = :euler
+projection = :euler_2nd
 cst_dt = false
 dt_on_even_cycles = false
-ieee_bits = 64
+data_type = Float64
 silent = 2
 output_file = "output"
 write_output = false
@@ -43,7 +42,7 @@ kokkos_build_dir = missing
 kokkos_version = nothing
 use_md_iter = 0
 print_kokkos_threads_affinity = false
-block_size = 1024
+block_size = (1024, 1)
 gpu = :CUDA
 threads_places = :cores
 threads_proc_bind = :close
@@ -65,7 +64,9 @@ file_MPI_dump = ""
 proc_domains = [(1, 1)]
 proc_grid_ratios = nothing
 reorder_grid = true
-async_comms = false
+gpu_aware = false
+use_cache_blocking = true
+use_two_step_reduction = false
 
 measure_time = true
 
@@ -107,14 +108,11 @@ while i <= length(ARGS)
     if arg == "-s"
         global scheme = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
-    elseif arg == "--ieee"
-        global ieee_bits = parse(Int, ARGS[i+1])
+    elseif arg == "--type"
+        global data_type = eval(Meta.parse(ARGS[i+1]))
         global i += 1
     elseif arg == "--cycle"
         global maxcycle = parse(Int, ARGS[i+1])
-        global i += 1
-    elseif arg == "--riemann"
-        global riemann = Symbol(replace(ARGS[i+1], '-' => '_'))
         global i += 1
     elseif arg == "--riemann-limiter"
         global riemann_limiter = Symbol(replace(ARGS[i+1], '-' => '_'))
@@ -200,7 +198,7 @@ while i <= length(ARGS)
         global use_gpu = true
         global i += 1
     elseif arg == "--block-size"
-        global block_size = parse(Int, ARGS[i+1])
+        global block_size = parse.(Int, split(ARGS[i+1], ','))
         global i += 1
 
     # Kokkos params
@@ -238,7 +236,7 @@ while i <= length(ARGS)
     elseif arg == "--cells-list"
         domains_list = split(ARGS[i+1], ';')
         domains_list = split.(domains_list, ',')
-        domains_list_t = Vector{Tuple{Int, Int}}(undef, length(domains_list))
+        domains_list_t = Vector{NTuple{2, Int}}(undef, length(domains_list))
         for (i, domain) in enumerate(domains_list)
             domains_list_t[i] = Tuple(convert.(Int, parse.(Float64, domain)))
         end
@@ -257,27 +255,25 @@ while i <= length(ARGS)
         global i += 1
     elseif arg == "--proc-grid"
         raw_proc_domain_list = split(ARGS[i+1], ';')
-        raw_proc_domain_list = split.(raw_proc_domain_list, ',')
-        proc_domain_list_t = Vector{NTuple{2, Int}}(undef, length(raw_proc_domain_list))
-        for (i, proc_domain) in enumerate(raw_proc_domain_list)
-            proc_domain_list_t[i] = Tuple(parse.(Int, proc_domain))
-        end
-        global proc_domains = proc_domain_list_t
+        global proc_domain_list = [Tuple(parse.(Int, split(domain, ',')))
+            for domain in raw_proc_domain_list]::Vector{NTuple{2, Int}}
         global i += 1
     elseif arg == "--proc-grid-ratio"
         raw_proc_grid_ratios = split(ARGS[i+1], ';')
-        raw_proc_grid_ratios = split.(raw_proc_grid_ratios, ',')
-        proc_grid_ratios_t = Vector{NTuple{2, Int}}(undef, length(raw_proc_grid_ratios))
-        for (i, grid_ratio) in enumerate(raw_proc_grid_ratios)
-            proc_grid_ratios_t[i] = Tuple(parse.(Int, grid_ratio))
-        end
-        global proc_grid_ratios = proc_grid_ratios_t
+        global proc_grid_ratios = [Tuple(parse.(Int, split(ratio, ',')))
+            for ratio in raw_proc_grid_ratios]::Vector{NTuple{2, Int}}
         global i += 1
     elseif arg == "--reorder-grid"
         global reorder_grid = parse(Bool, ARGS[i+1])
         global i += 1
-    elseif arg == "--async-comms"
-        global async_comms = parse(Bool, ARGS[i+1])
+    elseif arg == "--gpu-aware"
+        global gpu_aware = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--cache-blocking"
+        global use_cache_blocking = parse(Bool, ARGS[i+1])
+        global i += 1
+    elseif arg == "--two-step-reduction"
+        global use_two_step_reduction = parse(Bool, ARGS[i+1])
         global i += 1
 
     # Measurements params
@@ -369,7 +365,13 @@ prev_global_logger = Base.global_logger(muted_cuda_logger)
 #
 
 using MPI
-MPI.Init()
+
+# Always initialize MPI, but only with `MPI.THREAD_MULTIPLE` if needed, as not all MPI might support it
+if use_MPI
+    MPI.Init(; threadlevel=:multiple)
+else
+    MPI.Init()
+end
 
 rank = MPI.Comm_rank(MPI.COMM_WORLD)
 global_size = MPI.Comm_size(MPI.COMM_WORLD)
@@ -549,22 +551,22 @@ end
 
 
 function build_params(test, domain; 
-        ieee_bits, riemann, scheme, cfl, Dt, cst_dt, dt_on_even_cycles, 
-        axis_splitting, maxtime, maxcycle, 
+        scheme, cfl, Dt, cst_dt, dt_on_even_cycles,
+        axis_splitting, maxtime, maxcycle,
         silent, output_file, write_output,
-        use_threading, use_simd, use_gpu, 
-        use_MPI, px, py, reorder_grid, async_comms)
+        use_threading, use_simd, use_gpu,
+        use_MPI, P, reorder_grid)
     options = (;
-        ieee_bits, riemann, scheme, projection, riemann_limiter,
+        data_type, scheme, projection, riemann_limiter,
         nghost, cfl, Dt, cst_dt, dt_on_even_cycles,
-        test=test, nx=domain[1], ny=domain[2],
+        test=test, N=domain,
         axis_splitting, 
         maxtime, maxcycle, silent, output_file, write_output, write_ghosts, write_slices, output_precision, 
         measure_time,
-        use_threading, use_simd, use_gpu, device=gpu, block_size,
+        use_threading, use_simd, use_gpu, device=gpu, block_size, use_cache_blocking, use_two_step_reduction,
         use_kokkos,
-        use_MPI, px, py,
-        reorder_grid, async_comms,
+        use_MPI, P,
+        reorder_grid, gpu_aware,
         compare, is_ref=compare_ref, comparison_tolerance=comparison_tol,
         check_result
     )
@@ -650,7 +652,7 @@ function free_memory_if_needed(params::ArmonParameters, manual_mem_management, c
     # freed automatically.
 
     mem_info = Armon.memory_info(params)
-    mem_required = Armon.memory_required(params)
+    mem_required, _ = Armon.memory_required(params)
 
     if params.use_MPI && !params.use_gpu
         # Account for sharing the RAM of the CPU
@@ -718,14 +720,18 @@ function print_first_params(params)
 end
 
 
+cells_str(cells)  = join((i == 1 ? @sprintf("%5g", c) : @sprintf("%-5g", c) for (i, c) in enumerate(cells)), '×')
+domain_str(cells) = join((i == 1 ? @sprintf("%2d", c) : @sprintf("%-2d", c) for (i, c) in enumerate(cells)), '×')
+
+
 function do_measure(data_file_name, test, cells, splitting)
-    params = build_params(test, cells; 
-        ieee_bits, riemann, scheme, cfl, 
+    params = build_params(test, cells;
+        scheme, cfl,
         Dt, cst_dt, dt_on_even_cycles=false, axis_splitting=splitting,
         maxtime, maxcycle, silent, output_file, write_output,
         use_threading, use_simd, use_gpu,
-        use_MPI=false, px=1, py=1,
-        reorder_grid=false, async_comms=false
+        use_MPI=false, P=(1, 1),
+        reorder_grid=false
     )
 
     print_first_params(params)
@@ -733,7 +739,7 @@ function do_measure(data_file_name, test, cells, splitting)
     @printf(" - ")
     length(tests) > 1          && @printf("%-4s ", string(test))
     length(axis_splitting) > 1 && @printf("%-14s ", string(splitting))
-    @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
+    @printf("%11g cells (%s): ", prod(cells), cells_str(cells))
 
     time_start = time_ns()
     actual_repeats, vals_cells_per_sec, time_contrib = run_armon(params)
@@ -769,22 +775,22 @@ function do_measure(data_file_name, test, cells, splitting)
 end
 
 
-function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitting, px, py)
+function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitting, P)
     params = build_params(test, cells;
-        ieee_bits, riemann, scheme, cfl,
+        scheme, cfl,
         Dt, cst_dt, dt_on_even_cycles, axis_splitting=splitting,
         maxtime, maxcycle, silent, output_file, write_output,
         use_threading, use_simd, use_gpu,
-        use_MPI, px, py,
-        reorder_grid, async_comms
+        use_MPI, P,
+        reorder_grid
     )
 
     if is_root
         print_first_params(params)
-        @printf(" - (%2dx%-2d) ", px, py)
+        @printf(" - (%s) ", domain_str(P))
         length(tests) > 1          && @printf("%-4s ", string(test))
         length(axis_splitting) > 1 && @printf("%-14s ", string(splitting))
-        @printf("%11g cells (%5gx%-5g): ", prod(cells), cells[1], cells[2])
+        @printf("%11g cells (%s): ", prod(cells), cells_str(cells))
     end
 
     time_start = time_ns()
@@ -859,13 +865,17 @@ function do_measure_MPI(data_file_name, MPI_time_file_name, test, cells, splitti
 end
 
 
-function process_ratio_to_grid(n_proc, ratios)
-    (rpx, rpy) = ratios
-    r = rpx / rpy
-    # In theory the ratios have been pre-checked so that those conversions don't throw InexactError
-    px = convert(Int, √(n_proc * r))
-    py = convert(Int, √(n_proc / r))
-    return px, py
+function process_ratio_to_grid(n_proc, ratios::Tuple{Vararg{Int}})
+    ratios = ratios .÷ gcd(ratios...)
+    dim = count(!iszero, ratios)
+    zero_to_one(r) = iszero(r) ? 1 : r
+    max_reps = ceil(Int, (n_proc / prod(zero_to_one, ratios))^(1/dim))
+    for i in max_reps:-1:1
+        grid = ratios .* i
+        prod(zero_to_one, grid) == n_proc && return grid
+    end
+    # In theory the ratios have been pre-checked so that this doesn't happen
+    error("$n_proc cannot be ratioed by $ratios")
 end
 
 
@@ -904,13 +914,13 @@ end
     out_pipe = Pipe()
     try
         redirect_stdout(out_pipe) do
-            run_armon(build_params(test, (240*proc_domains[1][1], 240*proc_domains[1][2]);
-                ieee_bits, riemann, scheme, cfl, 
-                Dt, cst_dt, dt_on_even_cycles, axis_splitting=axis_splitting[1], 
+            run_armon(build_params(test, 240 .* proc_domains[1];
+                scheme, cfl,
+                Dt, cst_dt, dt_on_even_cycles, axis_splitting=axis_splitting[1],
                 maxtime, maxcycle=10, silent, output_file, write_output=false,
-                use_threading, use_simd, 
-                use_gpu, use_MPI, px=proc_domains[1][1], py=proc_domains[1][2], 
-                reorder_grid, async_comms
+                use_threading, use_simd,
+                use_gpu, use_MPI, P=proc_domains[1],
+                reorder_grid
             ); for_precompilation=true)
         end
     catch e
@@ -928,8 +938,7 @@ if is_root && !no_precompilation
     @printf(" (time: %3.1f sec)\n", (compile_end_time - compile_start_time) / 1e9)
 end
 
-
-for test in tests, splitting in axis_splitting, (px, py) in proc_domains
+!isinteractive() && for test in tests, splitting in axis_splitting, P in proc_domains
     if isempty(base_file_name)
         data_file_name = ""
         hist_file_name = ""
@@ -946,7 +955,8 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
         end
 
         if length(proc_domains) > 1
-            data_file_name *= "_pg=$(px)x$(py)"
+            P_str = join(P, '×')
+            data_file_name *= "_pg=$P_str"
         end
 
         hist_file_name = data_file_name * "_hist.csv"
@@ -964,7 +974,7 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
     for cells in cells_list
         if use_MPI
             time_contrib, actual_repeats = do_measure_MPI(
-                    data_file_name, MPI_time_file_name, test, cells, splitting, px, py)
+                    data_file_name, MPI_time_file_name, test, cells, splitting, P)
         else
             time_contrib, actual_repeats = do_measure(data_file_name, test, cells, splitting)
         end
@@ -993,7 +1003,7 @@ for test in tests, splitting in axis_splitting, (px, py) in proc_domains
 end
 
 
-if use_kokkos
+if !isinteractive() && use_kokkos
     GC.gc(true)  # Ensure that all views have been finalized
     Kokkos.finalize()
 end

@@ -82,7 +82,7 @@ Lines starting with `#` will be ignored.
 
 #### GPU, multithreading and vectorization options
 
- - `block_sizes`: list of block sizes for GPU devices. Defaults to 128.
+ - `block_sizes`: list of 2D block sizes, separated by `;`, to be used for cache blocking or on GPU. Defaults to `1024,1`.
  - `threads`: list of threads/cores to use. Defaults to 4.
  - `use_simd`: list of bools, whether or not to enable vectorisation. Defaults to `true`.
  - `jl_places`: list of places for thread binding, like OpenMP's `OMP_PLACES`, only for Julia. Defaults to `cores`.
@@ -90,7 +90,7 @@ Lines starting with `#` will be ignored.
  - `omp_places`: list of values for `OMP_PLACES`, only for Kokkos. Defaults to `cores`.
  - `omp_proc_bind`: list of values for `OMP_PROC_BIND`, only for Kokkos. Defaults to `close`.
  - `use_max_threads`: whether or not to always use the maximum number of cores available. If true, `threads` is ignored. Defaults to `false`.
- - `ieee_bits`: list of floating-point precision bits (either 32 or 64). Defaults to 64.
+ - `type`: Julia data type, either `Float64` or `Float32`. Defaults to `Float64`.
 
 
 #### Solver options

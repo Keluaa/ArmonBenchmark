@@ -7,7 +7,6 @@ struct CppParams <: BackendParams
     omp_places::String
     omp_proc_bind::String
     threads::Int
-    ieee_bits::Int
     use_simd::Int
     dimension::Int
     compiler::Compiler
@@ -40,7 +39,6 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{CPP})
             measure.omp_places,
             measure.omp_proc_bind,
             threads,
-            measure.ieee_bits,
             measure.use_simd,
             measure.dimension,
             measure.compilers,
@@ -84,6 +82,7 @@ function build_job_step(measure::MeasureParams,
     end
 
     options = Dict{Symbol, Any}()
+    options[:type] = measure.type
     options[:verbose] = measure.verbose ? 2 : 3
     options[:in_sub_script] = measure.make_sub_script
     options[:tests] = measure.tests_list
@@ -125,7 +124,7 @@ function build_backend_command(step::JobStep, ::Val{CPP})
     append!(armon_options, [
         "--cycle", step.cycles,
         "--use-simd", step.backend.use_simd,
-        "--ieee", step.backend.ieee_bits,
+        "--ieee", step.options[:type] == Float64 ? "64" : "32",
         "--tests", join(step.options[:tests_list], ','),
         "--cells-list", cells_list_str,
         "--num-threads", step.backend.threads,

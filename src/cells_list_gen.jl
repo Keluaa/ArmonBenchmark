@@ -17,6 +17,14 @@ mem_usage_frac(cell_count, s::Specs) = mem_usage(cell_count, s) / (s.mem * 1e9)
 
 
 """
+    ws_cells(p, cells_per_p=1e6, dim=2)
+
+Number of cells for one axis for a weak scaling analysis, given the number of processes `p`.
+"""
+ws_cells(p, cells_per_p=1e6, dim=2) = closest_multiple((cells_per_p*p)^(1/dim), p)
+
+
+"""
     spread_cells(max_cells; 
         min_cells=10^4.5, step_log=log10(2), 
         dim=2, vars=16, type=Float64,

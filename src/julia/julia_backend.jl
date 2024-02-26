@@ -7,11 +7,9 @@ struct JuliaParams <: BackendParams
     jl_places::String
     jl_proc_bind::String
     threads::Int
-    ieee_bits::Int
-    block_size::Int
+    block_size::Vector{Int}
     use_simd::Int
     dimension::Int
-    async_comms::Bool
     use_kokkos::Bool
     kokkos_backends::String
     use_md_iter::Int
@@ -32,7 +30,6 @@ function run_backend_msg(measure::MeasureParams, julia::JuliaParams, cluster::Cl
         - $(params.use_simd == 1 ? "with" : "without") SIMD
         - $(params.use_md_iter == 0 ? "without" : params.use_md_iter == 1 ? "with 2D" : "with MD") iterations, with$(params.use_md_iter == 3 ? "" : "out") load balancing
         - $(julia.dimension)D
-        - $(julia.async_comms ? "a" : "")synchronous communications
         - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
         - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
        """
@@ -42,7 +39,6 @@ function run_backend_msg(measure::MeasureParams, julia::JuliaParams, cluster::Cl
         - threads binding: $(julia.jl_proc_bind), places: $(julia.jl_places)
         - $(julia.use_simd == 1 ? "with" : "without") SIMD
         - $(julia.dimension)D
-        - $(julia.async_comms ? "a" : "")synchronous communications
         - on $(string(measure.device)), node: $(isempty(measure.node) ? "local" : measure.node)
         - with $(cluster.processes) processes on $(cluster.node_count) nodes ($(cluster.distribution) distribution)
        """
@@ -62,17 +58,15 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Julia})
     Iterators.map(
         params->JuliaParams(params...),
         Iterators.filter(
-            params -> params[10] != isempty(params[11]),  # If we use kokkos, we require a non empty backend, else we do
+            params -> params[9] != isempty(params[10]),  # If we use kokkos, we require a non empty backend, else we do
             Iterators.product(
                 measure.armon_params,
                 measure.jl_places,
                 measure.jl_proc_bind,
                 threads,
-                measure.ieee_bits,
                 measure.block_sizes,
                 measure.use_simd,
                 measure.dimension,
-                measure.async_comms,
                 measure.use_kokkos,
                 kokkos_backends,
                 measure.use_md_iter
@@ -101,6 +95,7 @@ function build_job_step(measure::MeasureParams,
     end
 
     options = Dict{Symbol, Any}()
+    options[:type] = measure.type
     options[:verbose] = measure.verbose ? 2 : 5
     options[:in_sub_script] = measure.make_sub_script
     options[:device] = measure.device
@@ -171,9 +166,9 @@ function build_backend_command(step::JobStep, ::Val{Julia})
     append!(armon_options, [
         "--dim", step.dimension,
         "--cycle", step.cycles,
-        "--block-size", step.backend.block_size,
+        "--block-size", join(step.backend.block_size, ','),
         "--use-simd", step.backend.use_simd,
-        "--ieee", step.backend.ieee_bits,
+        "--type", step.options[:type],
         "--tests", join(step.options[:tests], ','),
         "--cells-list", cells_list_str,
         "--threads-places", step.backend.jl_places,
@@ -182,7 +177,6 @@ function build_backend_command(step::JobStep, ::Val{Julia})
         "--verbose", step.options[:verbose],
         "--use-mpi", step.options[:use_MPI],
         "--min-acquisition-time", step.options[:min_acquisition],
-        "--async-comms", step.backend.async_comms,
         "--splitting", join(step.options[:axis_splitting], ','),
         "--proc-grid", join([join(grid, ',') for grid in step.proc_grids], ';'),
         "--use-kokkos", step.backend.use_kokkos
@@ -257,15 +251,10 @@ function build_data_file_base_name(measure::MeasureParams, processes::Int, distr
         legend *= ", places: $(params.jl_places)"
     end
 
-    if length(measure.async_comms) > 1
-        async_str = params.async_comms ? "async" : "sync"
-        name *= "_$async_str"
-        legend *= ", $async_str"
-    end
-
     if length(measure.block_sizes) > 1 && !params.use_kokkos
-        name *= "_$(params.block_size)bs"
-        legend *= ", $(params.block_size) block size"
+        bs_str = join(params.block_size, '×')
+        name *= "_$(bs_str)bs"
+        legend *= ", $(bs_str) block size"
     end
 
     if length(measure.use_kokkos) > 1

@@ -7,7 +7,6 @@ struct KokkosParams <: BackendParams
     omp_places::String
     omp_proc_bind::String
     threads::Int
-    ieee_bits::Int
     use_simd::Int
     use_md_iter::Int
     dimension::Int
@@ -42,7 +41,6 @@ function iter_combinaisons(measure::MeasureParams, threads, ::Val{Kokkos})
             measure.omp_places,
             measure.omp_proc_bind,
             threads,
-            measure.ieee_bits,
             measure.use_simd,
             measure.use_md_iter,
             measure.dimension,
@@ -79,6 +77,7 @@ function build_job_step(measure::MeasureParams,
     end
 
     options = Dict{Symbol, Any}()
+    options[:type] = measure.type
     options[:verbose] = measure.verbose ? 2 : 3
     options[:in_sub_script] = measure.make_sub_script
     options[:device] = measure.device
@@ -140,7 +139,7 @@ function build_backend_command(step::JobStep, ::Val{Kokkos})
         "--use-2d-iter", step.backend.use_md_iter == 1,
         "--use-md-iter", step.backend.use_md_iter >= 2,
         "--balance-md-iter", step.backend.use_md_iter == 3,
-        "--ieee", step.backend.ieee_bits,
+        "--ieee", step.options[:type] == Float64 ? "64" : "32",
         "--tests", join(step.options[:tests], ','),
         "--cells-list", cells_list_str,
         "--num-threads", step.backend.threads,

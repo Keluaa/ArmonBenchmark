@@ -58,9 +58,8 @@ mutable struct MeasureParams
     omp_proc_bind::Vector{String}
     omp_places::Vector{String}
     dimension::Vector{Int}
-    async_comms::Vector{Bool}
-    ieee_bits::Vector{Int}
-    block_sizes::Vector{Int}
+    type::DataType
+    block_sizes::Vector{Vector{Int}}
     use_kokkos::Vector{Bool}
     kokkos_backends::Vector{String}
     use_md_iter::Vector{Int}

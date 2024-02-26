@@ -21,15 +21,14 @@ function parse_measure_params(file_line_parser, script_dir)
     mpirun_options = (; cmd="mpirun", ranks_per_node="-N", hosts="--host", extra=[])
 
     threads = [4]
-    ieee_bits = [64]
-    block_sizes = [128]
+    type = Float64
+    block_sizes = [[1024, 1]]
     use_simd = [true]
     jl_places = ["cores"]
     jl_proc_bind = ["close"]
     omp_places = ["cores"]
     omp_proc_bind = ["close"]
     dimension = [2]
-    async_comms = [false]
     cells_list = "12.5e3, 25e3, 50e3, 100e3, 200e3, 400e3, 800e3, 1.6e6, 3.2e6, 6.4e6, 12.8e6, 25.6e6, 51.2e6, 102.4e6"
     domain_list = "100,100; 250,250; 500,500; 750,750; 1000,1000"
     process_grids = ["1,1"]
@@ -56,7 +55,7 @@ function parse_measure_params(file_line_parser, script_dir)
     use_kokkos = [false]
     use_md_iter = [0]
     cmake_options = ""
-    kokkos_backends = ["Serial,OpenMP"]
+    kokkos_backends = [""]
     kokkos_version = "4.0.00"
 
     perf_plot = true
@@ -149,9 +148,10 @@ function parse_measure_params(file_line_parser, script_dir)
         elseif option == "threads"
             threads = parse.(Int, split(value, ','))
         elseif option == "block_sizes"
-            block_sizes = parse.(Int, split(value, ','))
-        elseif option == "ieee_bits"
-            ieee_bits = parse.(Int, split(value, ','))
+            sizes = split(value, ';') .|> strip
+            block_sizes = [parse.(Int, split(size, ',')) for size in sizes]
+        elseif option == "type"
+            type = eval(Meta.parse(value))
         elseif option == "use_simd"
             use_simd = parse.(Int, split(value, ','))
         elseif option == "jl_places"
@@ -164,8 +164,6 @@ function parse_measure_params(file_line_parser, script_dir)
             omp_proc_bind = split(value, ',')
         elseif option == "dim"
             dimension = parse.(Int, split(value, ','))
-        elseif option == "async_comms"
-            async_comms = parse.(Bool, split(value, ','))
         elseif option == "cells"
             cells_list = value
         elseif option == "domains"
@@ -341,7 +339,7 @@ function parse_measure_params(file_line_parser, script_dir)
         use_mpirun, hostlist, hosts_max_cores, mpirun_options,
         make_sub_script, one_job_per_cell, one_script_per_step,
         backends, compilers, threads, use_simd, jl_proc_bind, jl_places, omp_proc_bind, omp_places,
-        dimension, async_comms, ieee_bits, block_sizes,
+        dimension, type, block_sizes,
         use_kokkos, kokkos_backends, use_md_iter, cmake_options, kokkos_version,
         cycles, cells_list, domain_list, process_grids, process_grid_ratios, tests_list,
         axis_splitting, params_and_legends,
