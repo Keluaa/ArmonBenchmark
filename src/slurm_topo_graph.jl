@@ -120,7 +120,7 @@ function node_list_to_range(node_list::Vector{<:AbstractString})
         end
 
         # Compactify as needed
-        if length(cluster_ranges) == 1
+        if length(cluster_ranges) == 1 && !occursin('-', only(cluster_ranges))
             push!(ranges, cluster_name * only(cluster_ranges))
         else
             push!(ranges, cluster_name * '[' * join(cluster_ranges, ',') * ']')
@@ -201,6 +201,27 @@ function parse_job_topo()
     node_range = get(ENV, "SLURM_JOB_NODELIST", nothing)
     isnothing(node_range) && error("SLURM_JOB_NODELIST not defined, are you in a Slurm Job allocation?")
     return parse_nodes_topo(node_range)
+end
+
+
+"""
+    parse_job_topo(job_id; running=false)
+
+Retrieves the job's topology using `sacct`. If there is no entry then it tries with `squeue`
+(or if `running == true`).
+"""
+function parse_job_topo(job_id::Int; running=false)
+    raw_steps_node_lists = running ? "" : readchomp(`sacct -j $job_id -P -n -o 'NodeList'`)
+    if !isempty(raw_steps_node_lists)
+        steps_node_lists = split(raw_steps_node_lists, '\n') .|> strip
+        node_list = unique(Iterators.flatten(expand_range.(steps_node_lists)))
+    else
+        # The job may be currently running, therefore there is no entry in the Slurm database
+        raw_node_list = readchomp(`squeue --jobs=$job_id -h -O 'NodeList'`)  # May be inaccurate for some cases?
+        isempty(raw_node_list) && error("no node list for job $job_id")
+        node_list = expand_range(raw_node_list)
+    end
+    return parse_nodes_topo(node_list)
 end
 
 
@@ -581,13 +602,16 @@ Writes the `topo`logy to `io` in the form of a GraphViz graph file.
 Node names in `excluded` are excluded from the file, which `highlight` are highlighted in green.
 """
 function topo_to_graphviz_script(io, nodes::Dict{String, TopoEntity}; excluded=[], highlight=[])
-    sorted_nodes = sort(collect(nodes); by=first)
+    # The best 'circo' layout is obtained by placing switches first, then nodes,
+    # as it will create nice circles around the switches.
+    # We sort by placing switches first, sorted by ascending level, then nodes, in alphabetical order.
+    sorted_nodes = sort(collect(nodes); by=((k, v),) -> (v.is_node, -v.level, k))
     filter!(!in(excluded) ∘ first, sorted_nodes)
 
     # Header
     indent = "    "
     println(io, "digraph {")
-    println(io, indent, "graph [layout=twopi rankdir=BT normalize=true mindist=0.1]")
+    println(io, indent, "graph [layout=circo rankdir=BT normalize=true mindist=0.1]")
 
     # Nodes
     println(io)
