@@ -57,12 +57,19 @@ function node_list_to_range(node_list::Vector{<:AbstractString})
 
     # Split nodes by cluster (the prefix before the numbers)
     for node in node_list
-        m = match(r"^(\w*?)(\d+)$", node)
+        m = match(r"^(\w*?)(\d*)$", node)
         isnothing(m) && error("Node '$node' does not respect the expected name format")
         cluster = m[1]
-        number = parse(Int, m[2])
-        cluster_list = get!(clusters, cluster) do; String[] end
-        push!(cluster_list, number)
+        if isempty(m[2])
+            if haskey(clusters, cluster)
+                error("Node '$node' does not end with digits yet appears more than once")
+            end
+            clusters[cluster] = Int[]
+        else
+            number = parse(Int, m[2])
+            cluster_list = get!(clusters, cluster) do; Int[] end
+            push!(cluster_list, number)
+        end
     end
 
     ranges = String[]
@@ -120,7 +127,9 @@ function node_list_to_range(node_list::Vector{<:AbstractString})
         end
 
         # Compactify as needed
-        if length(cluster_ranges) == 1 && !occursin('-', only(cluster_ranges))
+        if isempty(cluster_ranges)
+            push!(ranges, cluster_name)
+        elseif length(cluster_ranges) == 1 && !occursin('-', only(cluster_ranges))
             push!(ranges, cluster_name * only(cluster_ranges))
         else
             push!(ranges, cluster_name * '[' * join(cluster_ranges, ',') * ']')
@@ -596,12 +605,15 @@ end
 
 
 """
-    topo_to_graphviz_script(io, topo::Dict{String, TopoEntity}; excluded=[], highlight=[])
+    topo_to_graphviz_script(io, topo::Dict{String, TopoEntity}; excluded=[], highlight=[], max_line_width=0)
 
 Writes the `topo`logy to `io` in the form of a GraphViz graph file.
 Node names in `excluded` are excluded from the file, which `highlight` are highlighted in green.
+
+`max_line_width` is the maximum number of characters per line, including the 4 spaces indent. Widths
+too small for a single graph node name will have only one node per line.
 """
-function topo_to_graphviz_script(io, nodes::Dict{String, TopoEntity}; excluded=[], highlight=[])
+function topo_to_graphviz_script(io, nodes::Dict{String, TopoEntity}; excluded=[], highlight=[], max_line_width=0)
     # The best 'circo' layout is obtained by placing switches first, then nodes,
     # as it will create nice circles around the switches.
     # We sort by placing switches first, sorted by ascending level, then nodes, in alphabetical order.
@@ -613,24 +625,57 @@ function topo_to_graphviz_script(io, nodes::Dict{String, TopoEntity}; excluded=[
     println(io, "digraph {")
     println(io, indent, "graph [layout=circo rankdir=BT normalize=true mindist=0.1]")
 
-    # Nodes
+    # Print the node+switch range as a comment in order to easily replicate the topology
     println(io)
+    topo_range = node_list_to_range(first.(sorted_nodes))
+    println(io, indent, "# ", topo_range)
+
+    # Nodes
+    line_width = 0
     for (node_name, node) in sorted_nodes
-        print(io, indent, node_name)
+        node_text = node_name
         if !node.is_node
-            print(io, " [color=red]")
+            node_text *= " [color=red]"
         elseif node_name in highlight
-            print(io, " [color=green]")
+            node_text *= " [color=green]"
         end
-        println(io)
+
+        node_text_len = length(node_text)
+        if line_width + 2 + node_text_len > max_line_width || line_width == 0
+            print(io, "\n", indent, node_text)
+            line_width = length(indent)
+        else
+            print(io, "; ", node_text)
+            line_width += 2
+        end
+        line_width += node_text_len
     end
     println(io)
 
     # Edges
     for (node_name, node) in sorted_nodes
         node.is_node && continue
-        connections = join(node.connections, ' ')
-        println(io, indent, "{$connections} -> $node_name")
+        line_width = length(indent) + 1
+        print(io, indent, '{')
+        for (i, connection) in enumerate(node.connections)
+            connection_len = (i == 1 ? 0 : 1) + length(connection)
+            if line_width + 1 + connection_len > max_line_width && i != 1
+                print(io, '\n', indent, ' ', connection)
+                line_width = length(indent) + 1 + connection_len
+            elseif i > 1
+                print(io, ' ', connection)
+                line_width += 1 + connection_len
+            else
+                print(io, connection)
+                line_width += connection_len
+            end
+        end
+
+        switch_text = "} -> " * node_name
+        if line_width + length(switch_text) > max_line_width
+            print(io, '\n', indent)
+        end
+        println(io, switch_text)
     end
 
     println(io, "}")
